@@ -53,6 +53,17 @@ def bollinger(series: pd.Series, length: int = 20, std: float = 2.0) -> pd.DataF
     return pd.DataFrame({"bb_mid": mid, "bb_upper": upper, "bb_lower": lower, "bbw": width})
 
 
+def stoch_rsi(series: pd.Series, length: int = 14, smooth: int = 3) -> pd.DataFrame:
+    """Stochastic RSI: stochastic oscillator applied to RSI (0-100)."""
+    r = rsi(series, length)
+    lo = r.rolling(length).min()
+    hi = r.rolling(length).max()
+    raw = (r - lo) / (hi - lo).replace(0, np.nan) * 100
+    k = raw.rolling(smooth).mean()
+    d = k.rolling(smooth).mean()
+    return pd.DataFrame({"k": k, "d": d})
+
+
 def tsi(series: pd.Series, long: int = 25, short: int = 13, signal: int = 13) -> pd.DataFrame:
     """True Strength Index: double-smoothed momentum oscillator."""
     momentum = series.diff()
@@ -100,6 +111,7 @@ def compute_indicators(df: pd.DataFrame) -> dict[str, Any]:
     atr14 = atr(df, 14)
     tsi_df = tsi(close)
     vwap_series = vwap(df)
+    stochrsi_df = stoch_rsi(close)
 
     avg_volume = df["volume"].rolling(20).mean()
 
@@ -137,6 +149,16 @@ def compute_indicators(df: pd.DataFrame) -> dict[str, Any]:
     vw = out["vwap"]
     out["price_above_vwap"] = bool(vw is not None and out["price"] > vw)
     out["price_below_vwap"] = bool(vw is not None and out["price"] < vw)
+
+    # Stochastic RSI extreme + turn.
+    srk = stochrsi_df["k"]
+    out["stochrsi_k"] = _f(srk.iloc[last])
+    k_now = out["stochrsi_k"]
+    k_prev = _f(srk.iloc[last - 1]) if len(srk) > 1 else None
+    out["stochrsi_bull_turn"] = bool(
+        k_now is not None and k_prev is not None and k_prev < 20 and k_now > k_prev)
+    out["stochrsi_bear_turn"] = bool(
+        k_now is not None and k_prev is not None and k_prev > 80 and k_now < k_prev)
 
     # Derived booleans used by the confluence engine.
     macd_hist = macd_df["hist"]

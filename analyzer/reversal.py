@@ -20,7 +20,7 @@ from analyzer.divergence import detect_divergence
 
 def detect_reversal(df: pd.DataFrame, ind: dict[str, Any],
                     cvd_series: pd.Series | None = None,
-                    swing_n: int = 10) -> dict[str, Any]:
+                    swing_n: int = 10, at_key_level: bool = False) -> dict[str, Any]:
     out: dict[str, Any] = {
         "bullish_reversal": False, "bearish_reversal": False,
         "bull_strong": False, "bear_strong": False,
@@ -74,6 +74,12 @@ def detect_reversal(df: pd.DataFrame, ind: dict[str, Any],
         if rprev > 70 and rsi < rprev:
             bear.append("RSI разворот из перекупленности")
 
+    # 4b. Stochastic RSI extreme + turn.
+    if ind.get("stochrsi_bull_turn"):
+        bull.append("StochRSI разворот из перепроданности")
+    if ind.get("stochrsi_bear_turn"):
+        bear.append("StochRSI разворот из перекупленности")
+
     # 5. CVD divergence (absorption).
     if cvd_series is not None and len(cvd_series) == len(df):
         div = detect_divergence(df, cvd_series)
@@ -81,6 +87,13 @@ def detect_reversal(df: pd.DataFrame, ind: dict[str, Any],
             bull.append("CVD-дивергенция — поглощение покупателем")
         if div.get("bearish_divergence"):
             bear.append("CVD-дивергенция — поглощение продавцом")
+
+    # 6. Reversal at a key HTF level amplifies an existing directional read.
+    if at_key_level:
+        if bull:
+            bull.append("У ключевого уровня (HTF)")
+        if bear:
+            bear.append("У ключевого уровня (HTF)")
 
     out["factors_bull"] = bull
     out["factors_bear"] = bear

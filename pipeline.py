@@ -101,9 +101,13 @@ async def gather_market_context(binance: BinanceClient,
     htf_levels = zones["levels"]
     liquidity = detect_liquidity(df_signal, atr_value=atr_value)
     volume_profile = compute_volume_profile(dfs.get(zone_tfs[0], df_signal))
-    reversal = detect_reversal(df_signal, ind_signal, cvd_series(df_signal))
+    # Is price at a key HTF level (inside an OB/FVG or near equal highs/lows)?
+    at_level = _near_key_level(ind_signal["price"], htf_levels, order_blocks, fvg,
+                               max(atr_value * 0.3, ind_signal["price"] * 0.002))
+    reversal = detect_reversal(df_signal, ind_signal, cvd_series(df_signal),
+                               at_key_level=at_level)
     # Multi-timeframe reversal read across 1H / 4H / 12H / 1D.
-    reversal_mtf = _reversal_mtf(dfs, inds)
+    reversal_mtf = _reversal_mtf(dfs, inds, at_level)
 
     # Premium/Discount of the dealing range, on the trend (HTF) timeframe.
     range_tf = profile["htf"] if profile["htf"] in dfs else (
@@ -278,15 +282,29 @@ def _structure_targets(ctx: dict[str, Any], direction: str, entry: float, risk: 
     return tp1, tp2, True
 
 
+def _near_key_level(price: float, levels: dict, ob: dict, fvg: dict, tol: float) -> bool:
+    """Whether price sits inside an HTF OB/FVG or near an HTF equal high/low."""
+    if ob.get("price_in_bullish_ob") or ob.get("price_in_bearish_ob"):
+        return True
+    if fvg.get("price_in_bullish_fvg") or fvg.get("price_in_bearish_fvg"):
+        return True
+    for lv in (levels.get("highs", []) + levels.get("lows", [])):
+        if abs(price - lv) <= tol:
+            return True
+    return False
+
+
 REVERSAL_TFS = ["1h", "4h", "12h", "1d"]
 
 
-def _reversal_mtf(dfs: dict[str, Any], inds: dict[str, Any]) -> dict[str, Any]:
+def _reversal_mtf(dfs: dict[str, Any], inds: dict[str, Any],
+                  at_key_level: bool = False) -> dict[str, Any]:
     """Run reversal detection on 1H/4H/12H/1D and combine into one verdict."""
     per_tf: dict[str, Any] = {}
     for tf in REVERSAL_TFS:
         if tf in dfs:
-            per_tf[tf] = detect_reversal(dfs[tf], inds[tf], cvd_series(dfs[tf]))
+            per_tf[tf] = detect_reversal(dfs[tf], inds[tf], cvd_series(dfs[tf]),
+                                         at_key_level=at_key_level)
     bull_tfs = [tf for tf in REVERSAL_TFS if per_tf.get(tf, {}).get("bullish_reversal")]
     bear_tfs = [tf for tf in REVERSAL_TFS if per_tf.get(tf, {}).get("bearish_reversal")]
     return {

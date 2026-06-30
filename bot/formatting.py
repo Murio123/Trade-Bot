@@ -120,6 +120,31 @@ def format_reversal_alert(ctx: dict[str, Any], direction: str,
 _TF_LABEL = {"1h": "1H", "4h": "4H", "12h": "12H", "1d": "1D"}
 
 
+def _nearest_sr(ctx: dict[str, Any], price: float | None) -> tuple[float | None, float | None]:
+    """Nearest support (below) and resistance (above) across all level sources."""
+    if not price:
+        return None, None
+    pts: list[float] = []
+    levels = ctx.get("htf_levels", {})
+    pts += list(levels.get("highs", [])) + list(levels.get("lows", []))
+    vp = ctx.get("volume_profile", {})
+    for k in ("poc", "vah", "val"):
+        if vp.get(k):
+            pts.append(vp[k])
+    liq = ctx.get("liquidity", {})
+    pts += list(liq.get("equal_highs", [])) + list(liq.get("equal_lows", []))
+    for ob_key in ("bullish_ob", "bearish_ob"):
+        z = (ctx.get("order_blocks", {}) or {}).get(ob_key)
+        if z:
+            pts += [z["low"], z["high"]]
+
+    above = [p for p in pts if p > price * 1.0005]
+    below = [p for p in pts if p < price * 0.9995]
+    resistance = min(above) if above else None
+    support = max(below) if below else None
+    return support, resistance
+
+
 def format_reversal(ctx: dict[str, Any]) -> str:
     mtf = ctx.get("reversal_mtf", {})
     per_tf = mtf.get("per_tf", {})
@@ -236,8 +261,22 @@ def format_levels(ctx: dict[str, Any]) -> str:
     ob = ctx.get("order_blocks", {})
     liq = ctx.get("liquidity", {})
     vp = ctx.get("volume_profile", {})
+    price = ctx.get("price")
     lines = [f"📐 Ключевые уровни {config.SYMBOL_DISPLAY} | {ctx.get('timeframe', '').upper()}",
-             f"Цена: {_fmt_price(ctx.get('price'))}", ""]
+             f"Цена: {_fmt_price(price)}", ""]
+
+    # Nearest support / resistance across all level sources.
+    support, resistance = _nearest_sr(ctx, price)
+    lines.append("🎯 Ближайшие уровни:")
+    if resistance is not None:
+        lines.append(f"  🔺 Сопротивление: {_fmt_price(resistance)} "
+                     f"(+{(resistance - price) / price * 100:.1f}%)")
+    if support is not None:
+        lines.append(f"  🔻 Поддержка: {_fmt_price(support)} "
+                     f"(−{(price - support) / price * 100:.1f}%)")
+    if support is None and resistance is None:
+        lines.append("  • уровни рядом не найдены")
+    lines.append("")
 
     bull_ob = ob.get("bullish_ob")
     bear_ob = ob.get("bearish_ob")
@@ -269,6 +308,23 @@ def format_levels(ctx: dict[str, Any]) -> str:
     lines.append(f"  • POC: {_fmt_price(vp.get('poc'))}")
     lines.append(f"  • VAH: {_fmt_price(vp.get('vah'))}")
     lines.append(f"  • VAL: {_fmt_price(vp.get('val'))}")
+
+    # Liquidation magnets (OI-based estimate).
+    liq_map = ctx.get("liquidation_map", {})
+    if liq_map.get("source") == "oi_estimate" and price:
+        shorts = [c["price"] for c in liq_map.get("short_liquidations", []) if c["price"] > price]
+        longs = [c["price"] for c in liq_map.get("long_liquidations", []) if c["price"] < price]
+        nearest_short = min(shorts) if shorts else None
+        nearest_long = max(longs) if longs else None
+        if nearest_short or nearest_long:
+            lines.append("")
+            lines.append("💥 Зоны ликвидаций (магниты):")
+            if nearest_short:
+                lines.append(f"  • Шорты сверху: {_fmt_price(nearest_short)} "
+                             f"(+{(nearest_short - price) / price * 100:.1f}%)")
+            if nearest_long:
+                lines.append(f"  • Лонги снизу: {_fmt_price(nearest_long)} "
+                             f"(−{(price - nearest_long) / price * 100:.1f}%)")
 
     fvg = ctx.get("fvg", {})
     bull_fvg = fvg.get("bullish_fvg")
