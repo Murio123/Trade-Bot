@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 HELP_TEXT = (
     "🤖 BTC Signal Bot\n\n"
     "Нажимай кнопки ниже или используй команды:\n"
-    "/signal — свинг-сигнал (вход 4H, тренд 1D/12H)\n"
+    "/signal — свинг-сигнал (вход 1H, тренд 1D/12H/4H)\n"
     "/intraday — интрадей-сигнал (вход 15m, тренд 4H/1H)\n"
     "/deep — глубокий институциональный анализ (1D/12H/4H, score /100)\n"
     "/reversal — поиск дна/пика (истощение тренда)\n"
@@ -210,8 +210,8 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "last_analysis_tf": bot_data.get("last_analysis_tf"),
         "last_analysis_status": bot_data.get("last_analysis_status"),
         "last_analysis_blocked_at": bot_data.get("last_analysis_blocked_at"),
-        "signal_tf": config.SIGNAL_TIMEFRAME,
-        "fast_tf": config.FAST_TIMEFRAME if config.ENABLE_FAST_ANALYSIS else "—",
+        "signal_tf": "1H (свинг)",
+        "fast_tf": "15m (интрадей)" if config.ENABLE_FAST_ANALYSIS else "—",
         "signals_today": signals_today,
         "max_per_day": config.MAX_SIGNALS_PER_DAY,
         "open_trades": open_trades,
@@ -347,7 +347,7 @@ COMMAND_DISPATCH = {
 
 # Shown in the Telegram "/" command menu.
 BOT_COMMANDS = [
-    ("signal", "Свинг-сигнал (4H)"),
+    ("signal", "Свинг-сигнал (1H)"),
     ("intraday", "Интрадей-сигнал (15m)"),
     ("deep", "Глубокий институциональный анализ"),
     ("reversal", "Поиск дна/пика (разворот)"),

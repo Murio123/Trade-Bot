@@ -163,9 +163,9 @@ async def _maybe_reversal_alert(application, ctx: dict, profile_name: str,
 def build_scheduler(application) -> AsyncIOScheduler:
     from signal_engine.profiles import PROFILES
     scheduler = AsyncIOScheduler(timezone="UTC")
-    # Swing analysis (4h entry, 1D/12H/4H) every N hours.
+    # Swing analysis (1H entry, 1D/12H/4H context) on the profile's cadence.
     scheduler.add_job(
-        analysis_job, "interval", hours=config.ANALYSIS_INTERVAL_HOURS,
+        analysis_job, "interval", minutes=PROFILES["swing"]["interval_minutes"],
         args=[application, "swing"], id="analysis_swing", next_run_time=None,
     )
     # Intraday analysis (15m entry, 4H/1H/15m) every M minutes.

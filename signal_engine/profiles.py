@@ -12,13 +12,13 @@ PROFILES: dict[str, dict[str, Any]] = {
     "swing": {
         "label": "СВИНГ",
         "emoji": "📊",
-        "entry": "4h",
+        "entry": "1h",
         "htf": "1d",
-        "mtf": ["1h", "4h", "12h", "1d"],  # 1H timing / 4H entry / 12H zones / 1D trend
+        "mtf": ["1h", "4h", "12h", "1d"],  # 1H entry / 4H+12H zones / 1D trend
         "cooldown_hours": 8,
         "atr_mult": 1.5,
         "targets": (1.5, 3.0),
-        "interval_minutes": 240,   # scheduled every 4h
+        "interval_minutes": 60,    # scheduled hourly (matches 1H entry)
     },
     "intraday": {
         "label": "ИНТРАДЕЙ",
