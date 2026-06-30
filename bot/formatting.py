@@ -59,7 +59,8 @@ def format_signal(signal: dict[str, Any]) -> str:
         f"{_fmt_duration(signal.get('hold_tp2_hours'))} (до TP1–TP2)",
         "",
         f"📈 Confluence Score: {min(signal.get('score', 0), 10)}/10",
-        f"• HTF Bias (1D): {BIAS_LABEL.get(signal.get('htf_bias', 'neutral'))} (фильтр пройден)",
+        f"• HTF Bias ({signal.get('htf_tf', '1d').upper()}): "
+        f"{BIAS_LABEL.get(signal.get('htf_bias', 'neutral'))} (фильтр пройден)",
     ]
 
     for reason in signal.get("reasons", [])[:8]:
@@ -336,7 +337,7 @@ HTF_LINE = {
 }
 
 BLOCK_REASON = {
-    "htf_filter": "сигнал против дневного тренда (HTF-фильтр)",
+    "htf_filter": "сигнал против старшего тренда (HTF-фильтр)",
     "diversity": "мало категориального разнообразия (нужно ≥3 категории)",
     "below_threshold": "очков недостаточно для журнала (нужно ≥5)",
     "wait_for_sweep": "впереди вероятное снятие ликвидности — ждём свип",
@@ -539,7 +540,7 @@ def format_blocked(result: dict[str, Any]) -> str:
     if price is not None:
         lines.append(f"Цена: {_fmt_price(price)}")
 
-    lines.append(f"HTF (1D): {HTF_LINE.get(bias, bias)}")
+    lines.append(f"HTF ({result.get('htf_tf', '1d').upper()}): {HTF_LINE.get(bias, bias)}")
 
     if long_s is not None and short_s is not None:
         lines.append(f"Score: лонг {long_s} / шорт {short_s}")

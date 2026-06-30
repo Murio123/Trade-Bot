@@ -316,6 +316,7 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     # Common diagnostic fields attached to every blocked result.
     diag = {
         "htf_bias": htf_bias,
+        "htf_tf": profile["htf"],
         "long_score": long_total,
         "short_score": short_total,
         "price": ctx["price"],
@@ -385,6 +386,7 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         "category_scores": scores,
         "reasons": reasons,
         "htf_bias": htf_bias,
+        "htf_tf": profile["htf"],
         "confidence": round(confidence, 3),
         "confidence_modifier": modifier,
         "mtf": mtf_trends,
