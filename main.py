@@ -11,7 +11,7 @@ import signal as os_signal
 
 import config
 from analyzer.exchange import create_market_client
-from bot.handlers import register_handlers
+from bot.handlers import _post_init, register_handlers
 from database import db
 from scheduler import build_scheduler
 
@@ -40,6 +40,7 @@ async def _amain() -> None:
     application = (
         Application.builder()
         .token(config.TELEGRAM_BOT_TOKEN)
+        .post_init(_post_init)
         .build()
     )
     application.bot_data["binance"] = binance

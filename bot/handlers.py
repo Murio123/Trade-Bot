@@ -14,7 +14,7 @@ from telegram.ext import ContextTypes
 import config
 from analyzer.news import get_fear_greed
 from ai import claude
-from bot import formatting, journal
+from bot import formatting, journal, keyboards
 from database import db
 from pipeline import gather_market_context, run_cascade
 
@@ -22,13 +22,21 @@ log = logging.getLogger(__name__)
 
 HELP_TEXT = (
     "🤖 BTC Signal Bot\n\n"
+    "Нажимай кнопки ниже или используй команды:\n"
     "/signal — текущий сигнал (включая слабые 5-7)\n"
     "/levels — ключевые уровни (OB, ликвидность, volume profile)\n"
     "/funding — funding rate + аномальность\n"
     "/fear — индекс страха/жадности\n"
     "/backtest — результаты стратегии за период\n"
     "/journal — статистика журнала (винрейт, R/R)\n"
-    "/ask <вопрос> — свободный вопрос к Claude с рыночным контекстом"
+    "/ask <вопрос> — свободный вопрос к Claude с рыночным контекстом\n\n"
+    "💬 Любой текст без команды я восприму как вопрос к ИИ."
+)
+
+WELCOME_TEXT = (
+    "🤖 Привет! Я BTC Signal Bot.\n\n"
+    "Анализирую BTC/USDT на нескольких таймфреймах и присылаю сигналы.\n"
+    "Выбери действие на кнопках ниже 👇"
 )
 
 
@@ -44,15 +52,23 @@ async def _fresh_context(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
 
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(HELP_TEXT)
+    # Show the persistent reply keyboard and an inline quick-menu.
+    await update.effective_message.reply_text(
+        WELCOME_TEXT, reply_markup=keyboards.main_reply_keyboard()
+    )
+    await update.effective_message.reply_text(
+        "Быстрое меню:", reply_markup=keyboards.main_inline_keyboard()
+    )
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(HELP_TEXT)
+    await update.effective_message.reply_text(
+        HELP_TEXT, reply_markup=keyboards.main_reply_keyboard()
+    )
 
 
 async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("⏳ Анализирую рынок…")
+    await update.effective_message.reply_text("⏳ Анализирую рынок…")
     try:
         ctx = await _fresh_context(context)
         delivered_today = await db.signals_today(config.SYMBOL)
@@ -60,22 +76,22 @@ async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         result = await run_cascade(ctx, delivered_today, last_signal, interpret=True)
     except Exception as exc:  # noqa: BLE001
         log.exception("signal_cmd failed")
-        await update.message.reply_text(f"⚠️ Ошибка анализа: {exc}")
+        await update.effective_message.reply_text(f"⚠️ Ошибка анализа: {exc}")
         return
 
     if result.get("status") == "blocked":
-        await update.message.reply_text(formatting.format_blocked(result))
+        await update.effective_message.reply_text(formatting.format_blocked(result))
         return
-    await update.message.reply_text(formatting.format_signal(result))
+    await update.effective_message.reply_text(formatting.format_signal(result))
 
 
 async def levels_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         ctx = await _fresh_context(context)
     except Exception as exc:  # noqa: BLE001
-        await update.message.reply_text(f"⚠️ Ошибка: {exc}")
+        await update.effective_message.reply_text(f"⚠️ Ошибка: {exc}")
         return
-    await update.message.reply_text(formatting.format_levels(ctx))
+    await update.effective_message.reply_text(formatting.format_levels(ctx))
 
 
 async def funding_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -84,57 +100,88 @@ async def funding_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         funding = await binance.funding_rate()
         ls = await binance.long_short_ratio()
     except Exception as exc:  # noqa: BLE001
-        await update.message.reply_text(f"⚠️ Ошибка: {exc}")
+        await update.effective_message.reply_text(f"⚠️ Ошибка: {exc}")
         return
-    await update.message.reply_text(formatting.format_funding(funding, ls))
+    await update.effective_message.reply_text(formatting.format_funding(funding, ls))
 
 
 async def fear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     fng = await get_fear_greed()
-    await update.message.reply_text(formatting.format_fear(fng))
+    await update.effective_message.reply_text(formatting.format_fear(fng))
 
 
 async def journal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     stats = await journal.get_stats(config.SYMBOL)
-    await update.message.reply_text(formatting.format_journal(stats))
+    await update.effective_message.reply_text(formatting.format_journal(stats))
 
 
 async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from backtest import run_backtest
-    await update.message.reply_text("⏳ Запускаю бэктест…")
+    await update.effective_message.reply_text("⏳ Запускаю бэктест…")
     binance = _binance(context)
     try:
         report = await run_backtest(binance)
     except Exception as exc:  # noqa: BLE001
         log.exception("backtest failed")
-        await update.message.reply_text(f"⚠️ Ошибка бэктеста: {exc}")
+        await update.effective_message.reply_text(f"⚠️ Ошибка бэктеста: {exc}")
         return
-    await update.message.reply_text(report)
+    await update.effective_message.reply_text(report)
 
 
 async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     question = " ".join(context.args) if context.args else ""
     if not question:
-        await update.message.reply_text("Использование: /ask <ваш вопрос>")
+        await update.effective_message.reply_text("Использование: /ask <ваш вопрос>")
         return
     ctx = context.application.bot_data.get("last_context")
     if ctx is None:
         try:
             ctx = await _fresh_context(context)
         except Exception as exc:  # noqa: BLE001
-            await update.message.reply_text(f"⚠️ Ошибка: {exc}")
+            await update.effective_message.reply_text(f"⚠️ Ошибка: {exc}")
             return
     market_context = _ask_context(ctx)
     answer = await claude.ask(question, market_context)
-    await update.message.reply_text(answer)
+    await update.effective_message.reply_text(answer)
 
 
 async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Free-form chat: treat any non-command text as an /ask question."""
+    """Route reply-keyboard button presses; otherwise treat text as /ask."""
     if not update.message or not update.message.text:
         return
-    context.args = update.message.text.split()
+    text = update.message.text.strip()
+
+    command = keyboards.LABEL_TO_COMMAND.get(text)
+    if command == "ask_prompt":
+        await update.effective_message.reply_text(
+            "🧠 Напиши свой вопрос обычным сообщением — я отвечу с учётом "
+            "текущего рынка. Например: «Стоит ли ждать откат к 80k?»"
+        )
+        return
+    if command:
+        handler = COMMAND_DISPATCH.get(command)
+        if handler:
+            await handler(update, context)
+            return
+
+    # Not a button -> free-form question to Claude.
+    context.args = text.split()
     await ask_cmd(update, context)
+
+
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle inline-menu taps (callback_data 'cmd:<name>')."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()  # stop the loading spinner
+    data = query.data or ""
+    if not data.startswith("cmd:"):
+        return
+    command = data.split(":", 1)[1]
+    handler = COMMAND_DISPATCH.get(command)
+    if handler:
+        await handler(update, context)
 
 
 def _ask_context(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -168,8 +215,46 @@ def _ask_context(ctx: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+# Maps an internal command name to its handler (used by reply-keyboard
+# buttons and inline-menu callbacks alike).
+COMMAND_DISPATCH = {
+    "signal": signal_cmd,
+    "levels": levels_cmd,
+    "funding": funding_cmd,
+    "fear": fear_cmd,
+    "journal": journal_cmd,
+    "backtest": backtest_cmd,
+    "help": help_cmd,
+}
+
+# Shown in the Telegram "/" command menu.
+BOT_COMMANDS = [
+    ("signal", "Текущий сигнал"),
+    ("levels", "Ключевые уровни"),
+    ("funding", "Funding rate"),
+    ("fear", "Индекс страха/жадности"),
+    ("journal", "Статистика журнала"),
+    ("backtest", "Бэктест стратегии"),
+    ("ask", "Вопрос к ИИ"),
+    ("help", "Помощь"),
+]
+
+
+async def _post_init(application) -> None:
+    """Register the '/' command menu once the bot is initialised."""
+    from telegram import BotCommand
+
+    try:
+        await application.bot.set_my_commands(
+            [BotCommand(c, d) for c, d in BOT_COMMANDS]
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("set_my_commands failed: %s", exc)
+
+
 def register_handlers(application) -> None:
-    from telegram.ext import CommandHandler, MessageHandler, filters
+    from telegram.ext import (CallbackQueryHandler, CommandHandler,
+                              MessageHandler, filters)
 
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("help", help_cmd))
@@ -180,6 +265,7 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("journal", journal_cmd))
     application.add_handler(CommandHandler("backtest", backtest_cmd))
     application.add_handler(CommandHandler("ask", ask_cmd))
+    application.add_handler(CallbackQueryHandler(button_callback, pattern=r"^cmd:"))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_message)
     )
