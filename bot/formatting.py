@@ -105,7 +105,8 @@ def format_reversal(ctx: dict[str, Any]) -> str:
     bear = rev.get("factors_bear") or []
     if not bull and not bear:
         lines.append("Признаков истощения/разворота сейчас нет.")
-        lines.append("Цена не на свинговом экстремуме — жду формирования дна/пика.")
+        lines.append("Цена не на свинговом экстремуме — слежу за зонами 👇")
+        lines += _reversal_watch(ctx, price)
         return "\n".join(lines)
 
     if rev.get("bullish_reversal"):
@@ -124,10 +125,47 @@ def format_reversal(ctx: dict[str, Any]) -> str:
         lines.append(f"🔴 Слабые признаки пика ({rev.get('bear_score')}/2):")
         lines += [f"  • {f}" for f in bear]
 
+    lines += _reversal_watch(ctx, price)
     lines.append("")
     lines.append("⚠️ Развороты — это фейд движения: ниже винрейт, выше R:R. "
                  "Лучше брать в сторону старшего тренда.")
     return "\n".join(lines)
+
+
+def _reversal_watch(ctx: dict[str, Any], price: float | None) -> list[str]:
+    """Context for the 'no setup yet' case: RSI zone + nearest levels to watch."""
+    ind = ctx.get("ind_signal", {})
+    liq = ctx.get("liquidity", {})
+    out: list[str] = [""]
+
+    rsi = ind.get("rsi")
+    if rsi is not None:
+        if rsi < 30:
+            zone = "перепродан — близко к развороту вверх 🟢"
+        elif rsi < 40:
+            zone = "приближается к перепроданности"
+        elif rsi > 70:
+            zone = "перекуплен — близко к развороту вниз 🔴"
+        elif rsi > 60:
+            zone = "приближается к перекупленности"
+        else:
+            zone = "нейтрально"
+        out.append(f"• RSI: {rsi:.0f} ({zone})")
+
+    # Nearest support below / resistance above where a reversal may form.
+    lows = [l for l in (liq.get("equal_lows") or []) if price and l <= price]
+    highs = [h for h in (liq.get("equal_highs") or []) if price and h >= price]
+    support = max(lows) if lows else ind.get("bb_lower")
+    resistance = min(highs) if highs else ind.get("bb_upper")
+    if support and price:
+        out.append(f"• Зона дна (поддержка): {_fmt_price(support)} "
+                   f"(−{(price - support) / price * 100:.1f}%)")
+    if resistance and price:
+        out.append(f"• Зона пика (сопротивление): {_fmt_price(resistance)} "
+                   f"(+{(resistance - price) / price * 100:.1f}%)")
+
+    out.append("🔔 Пришлю алерт, когда совпадёт ≥3 фактора истощения.")
+    return out
 
 
 def format_levels(ctx: dict[str, Any]) -> str:
