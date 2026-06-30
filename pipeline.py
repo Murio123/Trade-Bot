@@ -38,7 +38,7 @@ from signal_engine.conflict_resolver import resolve_conflicts
 from signal_engine.cooldown import should_send_signal
 from signal_engine.daily_limiter import beats_weakest, within_daily_limit
 from signal_engine.htf_filter import filter_by_htf, get_htf_bias
-from signal_engine.mtf_confidence import apply_mtf_confidence, trend_label
+from signal_engine.mtf_confidence import mtf_confidence_factor, trend_label
 from signal_engine.profiles import get_profile
 
 log = logging.getLogger(__name__)
@@ -322,13 +322,13 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         return _blocked("wait_for_sweep", direction=direction, score=total,
                         category_scores=scores, reasons=reasons, **diag)
 
-    # Level 5: multi-timeframe agreement on the profile's three timeframes.
+    # Level 5: direction-aware multi-timeframe agreement over the profile's
+    # timeframes (swing: 1H/4H/12H/1D; intraday: 15m/1H/4H).
     mtf_tfs = profile["mtf"]
-    t_low = trend_label(inds.get(mtf_tfs[0], ctx["ind_1h"]))
-    t_mid = trend_label(inds.get(mtf_tfs[1], ctx["ind_4h"]))
-    t_high = trend_label(inds.get(mtf_tfs[2], ctx["ind_1d"]))
+    mtf_trends = {tf: trend_label(inds.get(tf, ctx.get("ind_signal", {})))
+                  for tf in mtf_tfs}
     base_conf = total / 10.0
-    modifier = apply_mtf_confidence(1.0, t_low, t_mid, t_high)
+    modifier, mtf_info = mtf_confidence_factor(list(mtf_trends.values()), direction)
     confidence = min(base_conf * modifier, 1.0)
 
     # Risk sizing tuned to the trade style.
@@ -355,7 +355,8 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         "htf_bias": htf_bias,
         "confidence": round(confidence, 3),
         "confidence_modifier": modifier,
-        "mtf": {mtf_tfs[0]: t_low, mtf_tfs[1]: t_mid, mtf_tfs[2]: t_high},
+        "mtf": mtf_trends,
+        "mtf_agreement": mtf_info,
         "style": profile_name or "swing",
         "style_label": profile["label"],
         "style_emoji": profile["emoji"],

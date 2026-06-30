@@ -14,7 +14,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "emoji": "📊",
         "entry": "4h",
         "htf": "1d",
-        "mtf": ["4h", "12h", "1d"],  # 1D trend / 12H zones / 4H entry
+        "mtf": ["1h", "4h", "12h", "1d"],  # 1H timing / 4H entry / 12H zones / 1D trend
         "cooldown_hours": 8,
         "atr_mult": 1.5,
         "targets": (1.5, 3.0),
@@ -25,7 +25,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "emoji": "⚡",
         "entry": "15m",
         "htf": "4h",
-        "mtf": ["15m", "1h", "4h"],
+        "mtf": ["15m", "1h", "4h", "12h"],  # 15m entry / 1H+4H timing / 12H filter
         "cooldown_hours": 2,
         "atr_mult": 1.2,
         "targets": (1.0, 2.0),

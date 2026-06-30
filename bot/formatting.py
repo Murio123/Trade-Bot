@@ -46,6 +46,14 @@ def format_signal(signal: dict[str, Any]) -> str:
     for reason in signal.get("reasons", [])[:8]:
         lines.append(f"• {reason}")
 
+    mtf = signal.get("mtf") or {}
+    agr = signal.get("mtf_agreement") or {}
+    if mtf and agr.get("total"):
+        tf_str = " ".join(
+            f"{tf}:{'🔼' if t == 'bullish' else '🔽' if t == 'bearish' else '⚪'}"
+            for tf, t in mtf.items())
+        lines.append(f"• Согласие ТФ {agr.get('agree')}/{agr.get('total')} → {tf_str}")
+
     best = signal.get("session_best")
     if best:
         sessions = signal.get("sessions") or {}
