@@ -301,6 +301,38 @@ def format_status(s: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_trade_event(trade: dict[str, Any], event: dict[str, Any]) -> str:
+    direction = "🟢 ЛОНГ" if trade.get("direction") == "long" else "🔴 ШОРТ"
+    entry = _fmt_price(trade.get("entry_price"))
+    head = f"📍 Сделка {direction} {config.SYMBOL_DISPLAY} | вход {entry}"
+
+    if event["type"] == "tp1":
+        return "\n".join([
+            head,
+            "🎯 TP1 достигнут!",
+            f"🛡 Стоп переведён в безубыток ({_fmt_price(event.get('stop'))}).",
+            "Позиция теперь без риска — дальше ведём к TP2.",
+        ])
+
+    outcome = event.get("outcome")
+    pnl_r = event.get("pnl_r", 0.0)
+    if outcome == "win":
+        emoji, label = "✅", "TP2 достигнут — закрыто в плюс"
+    elif outcome == "loss":
+        emoji, label = "🛑", "Стоп — закрыто в минус"
+    elif outcome == "breakeven":
+        emoji, label = "➖", "Откат к безубытку после TP1 — в ноль"
+    else:
+        emoji, label = "ℹ️", outcome or "закрыто"
+    if event.get("expired"):
+        label = "Закрыто по времени (21 день)"
+    return "\n".join([
+        head,
+        f"{emoji} {label}",
+        f"Результат: {pnl_r:+.2f}R | выход {_fmt_price(event.get('exit_price'))}",
+    ])
+
+
 def format_blocked(result: dict[str, Any]) -> str:
     stage = result.get("blocked_at")
     bias = result.get("htf_bias", "neutral")

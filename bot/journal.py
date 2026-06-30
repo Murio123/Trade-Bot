@@ -1,8 +1,14 @@
-"""Trade journal: record delivered signals as trades and resolve their outcome.
+"""Trade journal: record delivered signals and manage their lifecycle.
 
-Resolution walks forward through klines from the trade's open time and decides
-whether the stop or the first target was hit first, recording win/loss and the
-realised R multiple. A trade left open past an expiry is closed at market.
+Lifecycle (single position, stop management — no partial sizing):
+    open  -> price hits TP1  -> stop moved to breakeven (stage = tp1)
+    tp1   -> price hits TP2  -> closed win
+    tp1   -> price falls back to breakeven stop -> closed breakeven (0R)
+    open  -> price hits original stop -> closed loss (-1R)
+
+Resolution replays klines from the trade's open time each run, so it is
+stateless except for the stored ``stage`` which is used to emit each milestone
+notification exactly once. Stale trades expire at market after 21 days.
 """
 from __future__ import annotations
 
@@ -17,10 +23,10 @@ from database import db, utcnow
 log = logging.getLogger(__name__)
 
 EXPIRY_DAYS = 21
+_STAGE_RANK = {"open": 0, "tp1": 1, "closed": 2}
 
 
 async def record_signal_as_trade(signal_id: int, signal: dict[str, Any]) -> int | None:
-    """Open a journal entry tied to a delivered signal."""
     try:
         return await db.insert_trade({
             "signal_id": signal_id,
@@ -28,33 +34,35 @@ async def record_signal_as_trade(signal_id: int, signal: dict[str, Any]) -> int 
             "entry_price": signal.get("entry_price"),
             "stop_loss": signal.get("stop_loss"),
             "target": signal.get("target_1"),
+            "tp1": signal.get("target_1"),
+            "tp2": signal.get("target_2"),
         })
     except Exception as exc:  # noqa: BLE001
         log.warning("record_signal_as_trade failed: %s", exc)
         return None
 
 
-def _r_multiple(entry: float, stop: float, exit_price: float, direction: str) -> float:
+def _r(entry: float, stop: float, exit_price: float, direction: str) -> float:
     risk = abs(entry - stop)
     if risk == 0:
         return 0.0
-    if direction == "long":
-        return round((exit_price - entry) / risk, 2)
-    return round((entry - exit_price) / risk, 2)
+    sign = 1 if direction == "long" else -1
+    return round(sign * (exit_price - entry) / risk, 2)
 
 
-def resolve_trade(trade: dict[str, Any], df: pd.DataFrame,
-                  current_price: float) -> dict[str, Any] | None:
-    """Return {'outcome','exit_price','pnl_r'} if resolved, else None."""
+def evaluate_trade(trade: dict[str, Any], df: pd.DataFrame,
+                   current_price: float) -> dict[str, Any] | None:
+    """Replay the trade and return the new events/state, or None if unchanged."""
     direction = trade.get("direction")
     entry = trade.get("entry_price")
     stop = trade.get("stop_loss")
-    target = trade.get("target")
+    tp1 = trade.get("tp1") or trade.get("target")
+    tp2 = trade.get("tp2")
     opened_at = trade.get("opened_at")
-    if None in (direction, entry, stop, target):
+    stored_stage = trade.get("stage") or "open"
+    if None in (direction, entry, stop, tp1):
         return None
 
-    # Only consider candles after the trade opened.
     candles = df
     if opened_at is not None and "open_time" in df.columns:
         ts = pd.Timestamp(opened_at)
@@ -62,33 +70,64 @@ def resolve_trade(trade: dict[str, Any], df: pd.DataFrame,
             ts = ts.tz_localize("UTC")
         candles = df[df["open_time"] >= ts]
 
+    long = direction == "long"
+    hit_tp1 = False
+    cur_stop = stop
+    closed: dict[str, Any] | None = None
+
     for _, c in candles.iterrows():
         high, low = float(c["high"]), float(c["low"])
-        if direction == "long":
-            hit_stop = low <= stop
-            hit_target = high >= target
-        else:
-            hit_stop = high >= stop
-            hit_target = low <= target
-        # Conservative: if a candle hits both, assume the stop was hit first.
-        if hit_stop:
-            return {"outcome": "loss", "exit_price": stop,
-                    "pnl_r": _r_multiple(entry, stop, stop, direction)}
-        if hit_target:
-            return {"outcome": "win", "exit_price": target,
-                    "pnl_r": _r_multiple(entry, stop, target, direction)}
+        if not hit_tp1:
+            stop_hit = (low <= stop) if long else (high >= stop)
+            tp1_hit = (high >= tp1) if long else (low <= tp1)
+            if stop_hit:  # conservative: stop before target within a candle
+                closed = {"outcome": "loss", "exit_price": stop,
+                          "pnl_r": _r(entry, stop, stop, direction)}
+                break
+            if tp1_hit:
+                hit_tp1 = True
+                cur_stop = entry  # move to breakeven
+                if tp2 is None:   # single-target signal -> TP1 closes the trade
+                    closed = {"outcome": "win", "exit_price": tp1,
+                              "pnl_r": _r(entry, stop, tp1, direction)}
+                    break
+        if hit_tp1 and tp2 is not None:
+            be_hit = (low <= cur_stop) if long else (high >= cur_stop)
+            tp2_hit = (high >= tp2) if long else (low <= tp2)
+            if be_hit:
+                closed = {"outcome": "breakeven", "exit_price": cur_stop, "pnl_r": 0.0}
+                break
+            if tp2_hit:
+                closed = {"outcome": "win", "exit_price": tp2,
+                          "pnl_r": _r(entry, stop, tp2, direction)}
+                break
 
-    # Expiry: close stale trades at market.
-    if opened_at is not None:
+    # Expiry for trades that never resolved.
+    if closed is None and opened_at is not None:
         opened_ts = pd.Timestamp(opened_at)
         if opened_ts.tzinfo is None:
             opened_ts = opened_ts.tz_localize("UTC")
         if utcnow() - opened_ts.to_pydatetime() > timedelta(days=EXPIRY_DAYS):
-            r = _r_multiple(entry, stop, current_price, direction)
-            outcome = "win" if r > 0 else "loss" if r < 0 else "breakeven"
-            return {"outcome": outcome, "exit_price": current_price, "pnl_r": r}
+            r = _r(entry, stop, current_price, direction)
+            closed = {"outcome": "win" if r > 0 else "loss" if r < 0 else "breakeven",
+                      "exit_price": current_price, "pnl_r": r, "expired": True}
 
-    return None
+    new_stage = "closed" if closed else ("tp1" if hit_tp1 else "open")
+    if _STAGE_RANK[new_stage] <= _STAGE_RANK.get(stored_stage, 0):
+        return None  # nothing new since last check
+
+    events = []
+    if hit_tp1 and _STAGE_RANK.get(stored_stage, 0) < 1:
+        events.append({"type": "tp1", "stop": entry})
+    if closed:
+        events.append({"type": "closed", **closed})
+
+    return {
+        "new_stage": new_stage,
+        "current_stop": cur_stop,
+        "closed": closed,
+        "events": events,
+    }
 
 
 async def get_stats(symbol: str) -> dict[str, Any]:

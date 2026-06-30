@@ -96,25 +96,22 @@ async def resolve_trades_job(application) -> None:
         return
 
     for trade in open_trades:
-        result = journal.resolve_trade(trade, df, price)
-        if not result:
+        evaluation = journal.evaluate_trade(trade, df, price)
+        if not evaluation:
             continue
-        await db.close_trade(trade["id"], result["exit_price"],
-                             result["outcome"], result["pnl_r"])
-        log.info("Trade #%s closed: %s (%.2fR)",
-                 trade["id"], result["outcome"], result["pnl_r"])
-        await _notify_trade_closed(application, trade, result)
+        # Advance stored stage / stop, or close the trade.
+        if evaluation["closed"]:
+            c = evaluation["closed"]
+            await db.close_trade(trade["id"], c["exit_price"], c["outcome"], c["pnl_r"])
+            log.info("Trade #%s closed: %s (%.2fR)", trade["id"], c["outcome"], c["pnl_r"])
+        else:
+            await db.advance_trade_stage(
+                trade["id"], evaluation["new_stage"], evaluation["current_stop"])
+            log.info("Trade #%s -> stage %s", trade["id"], evaluation["new_stage"])
 
-
-async def _notify_trade_closed(application, trade: dict, result: dict) -> None:
-    emoji = {"win": "✅", "loss": "🛑", "breakeven": "➖"}.get(result["outcome"], "ℹ️")
-    direction = "ЛОНГ" if trade.get("direction") == "long" else "ШОРТ"
-    outcome_ru = {"win": "цель достигнута", "loss": "стоп",
-                  "breakeven": "закрыта по времени"}.get(result["outcome"], result["outcome"])
-    text = (f"{emoji} Сделка закрыта: {direction} {config.SYMBOL_DISPLAY}\n"
-            f"Итог: {outcome_ru} | {result['pnl_r']:+.2f}R\n"
-            f"Выход: {result['exit_price']:,.0f}")
-    await alerts.broadcast(application.bot, text)
+        for event in evaluation["events"]:
+            text = formatting.format_trade_event(trade, event)
+            await alerts.broadcast(application.bot, text)
 
 
 def build_scheduler(application) -> AsyncIOScheduler:

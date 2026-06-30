@@ -58,6 +58,10 @@ CREATE TABLE IF NOT EXISTS trades_journal (
     exit_price      DOUBLE PRECISION,
     stop_loss       DOUBLE PRECISION,
     target          DOUBLE PRECISION,
+    tp1             DOUBLE PRECISION,
+    tp2             DOUBLE PRECISION,
+    stage           TEXT DEFAULT 'open',     -- open | tp1 | closed
+    current_stop    DOUBLE PRECISION,
     outcome         TEXT,              -- win | loss | breakeven | open
     pnl_r           DOUBLE PRECISION,  -- realised R multiple
     notes           TEXT
@@ -79,6 +83,14 @@ CREATE TABLE IF NOT EXISTS user_settings (
     settings        JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+"""
+
+# Idempotent migrations for tables created before lifecycle columns existed.
+MIGRATIONS = """
+ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS tp1 DOUBLE PRECISION;
+ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS tp2 DOUBLE PRECISION;
+ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS stage TEXT DEFAULT 'open';
+ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS current_stop DOUBLE PRECISION;
 """
 
 
@@ -107,6 +119,7 @@ class Database:
                 self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=5)
                 async with self.pool.acquire() as conn:
                     await conn.execute(SCHEMA)
+                    await conn.execute(MIGRATIONS)
                 log.info("PostgreSQL connected and schema ensured")
                 return
             except Exception as exc:  # noqa: BLE001
@@ -205,14 +218,26 @@ class Database:
             row = await conn.fetchrow(
                 """
                 INSERT INTO trades_journal
-                    (signal_id, direction, entry_price, stop_loss, target, outcome)
-                VALUES ($1,$2,$3,$4,$5,'open')
+                    (signal_id, direction, entry_price, stop_loss, target,
+                     tp1, tp2, stage, current_stop, outcome)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,'open',$8,'open')
                 RETURNING id
                 """,
                 trade.get("signal_id"), trade.get("direction"), trade.get("entry_price"),
                 trade.get("stop_loss"), trade.get("target"),
+                trade.get("tp1"), trade.get("tp2"), trade.get("stop_loss"),
             )
             return int(row["id"])
+
+    async def advance_trade_stage(self, trade_id: int, stage: str,
+                                  current_stop: float) -> None:
+        if not self.pool:
+            return self._mem.advance_trade_stage(trade_id, stage, current_stop)
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE trades_journal SET stage=$1, current_stop=$2 WHERE id=$3",
+                stage, current_stop, trade_id,
+            )
 
     async def open_trades(self) -> list[dict[str, Any]]:
         if not self.pool:
@@ -358,12 +383,20 @@ class _MemoryStore:
         rec = dict(trade)
         rec["id"] = self._tid
         rec["outcome"] = "open"
+        rec["stage"] = "open"
+        rec.setdefault("current_stop", trade.get("stop_loss"))
         rec.setdefault("opened_at", utcnow())
         self.trades.append(rec)
         return self._tid
 
     def open_trades(self):
         return [t for t in self.trades if t.get("outcome") == "open"]
+
+    def advance_trade_stage(self, trade_id: int, stage: str, current_stop: float):
+        for t in self.trades:
+            if t["id"] == trade_id:
+                t["stage"] = stage
+                t["current_stop"] = current_stop
 
     def close_trade(self, trade_id: int, exit_price: float, outcome: str, pnl_r: float):
         for t in self.trades:
