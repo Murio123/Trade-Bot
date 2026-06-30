@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -45,6 +45,9 @@ async def analysis_job(application, profile_name: str = "swing") -> None:
     application.bot_data["last_analysis_tf"] = f"{profile_name}/{timeframe}"
     application.bot_data["last_analysis_status"] = result.get("status")
     application.bot_data["last_analysis_blocked_at"] = result.get("blocked_at")
+
+    # Proactive reversal (bottom/top) alert from the already-gathered context.
+    await _maybe_reversal_alert(application, ctx, profile_name, timeframe)
 
     status = result.get("status")
     if status == "blocked":
@@ -115,6 +118,38 @@ async def resolve_trades_job(application) -> None:
         for event in evaluation["events"]:
             text = formatting.format_trade_event(trade, event)
             await alerts.broadcast(application.bot, text)
+
+
+async def _maybe_reversal_alert(application, ctx: dict, profile_name: str,
+                                timeframe: str) -> None:
+    """Emit a proactive bottom/top alert when enough exhaustion factors align."""
+    if not config.ENABLE_REVERSAL_ALERTS:
+        return
+    rev = ctx.get("reversal") or {}
+    min_factors = config.REVERSAL_ALERT_MIN_FACTORS
+    if rev.get("bull_score", 0) >= min_factors and rev.get("bull_score", 0) >= rev.get("bear_score", 0):
+        direction, factors, strong = "bull", rev.get("factors_bull", []), rev.get("bull_strong")
+    elif rev.get("bear_score", 0) >= min_factors:
+        direction, factors, strong = "bear", rev.get("factors_bear", []), rev.get("bear_strong")
+    else:
+        return
+
+    # De-duplicate: skip if the same direction fired recently near this price.
+    price = ctx.get("price")
+    atr = ctx.get("atr") or (price * 0.01 if price else 0)
+    key = f"last_reversal_alert_{timeframe}"
+    last = application.bot_data.get(key)
+    now = datetime.now(timezone.utc)
+    if last and last["direction"] == direction:
+        within_cooldown = (now - last["time"]) < timedelta(hours=config.REVERSAL_ALERT_COOLDOWN_HOURS)
+        near_price = price is not None and abs(price - last["price"]) < atr * 0.5
+        if within_cooldown and near_price:
+            return
+
+    text = formatting.format_reversal_alert(ctx, direction, factors, bool(strong))
+    await alerts.broadcast(application.bot, text)
+    application.bot_data[key] = {"direction": direction, "price": price, "time": now}
+    log.info("[%s] Reversal alert: %s (%d factors)", profile_name, direction, len(factors))
 
 
 def build_scheduler(application) -> AsyncIOScheduler:

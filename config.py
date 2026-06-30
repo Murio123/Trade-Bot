@@ -89,6 +89,11 @@ ANALYSIS_INTERVAL_HOURS = _get_int("ANALYSIS_INTERVAL_HOURS", 4)
 ALERT_CHECK_INTERVAL_MINUTES = _get_int("ALERT_CHECK_INTERVAL_MINUTES", 5)
 # How often open trades are checked for stop/target hits.
 TRADE_CHECK_INTERVAL_MINUTES = _get_int("TRADE_CHECK_INTERVAL_MINUTES", 15)
+
+# Proactive reversal (bottom/top) alerts when enough exhaustion factors align.
+ENABLE_REVERSAL_ALERTS = _get_bool("ENABLE_REVERSAL_ALERTS", True)
+REVERSAL_ALERT_MIN_FACTORS = _get_int("REVERSAL_ALERT_MIN_FACTORS", 3)
+REVERSAL_ALERT_COOLDOWN_HOURS = _get_int("REVERSAL_ALERT_COOLDOWN_HOURS", 4)
 # Primary timeframe used by the scheduled analysis and the /signal command.
 SIGNAL_TIMEFRAME = _get("SIGNAL_TIMEFRAME", "4h")
 

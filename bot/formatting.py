@@ -69,6 +69,22 @@ def format_signal(signal: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_reversal_alert(ctx: dict[str, Any], direction: str,
+                          factors: list[str], strong: bool) -> str:
+    head = "🟢 Возможное ДНО" if direction == "bull" else "🔴 Возможный ПИК"
+    tf = ctx.get("timeframe", "").upper()
+    lines = [
+        f"🔔 {head}{' (сильное)' if strong else ''} | {config.SYMBOL_DISPLAY} {tf}",
+        f"Цена: {_fmt_price(ctx.get('price'))}",
+        f"Совпало факторов: {len(factors)}",
+    ]
+    lines += [f"  • {f}" for f in factors]
+    lines.append("")
+    lines.append("⚠️ Сигнал на истощение тренда — это фейд. Жди подтверждения "
+                 "входной свечой и учитывай старший тренд.")
+    return "\n".join(lines)
+
+
 def format_reversal(ctx: dict[str, Any]) -> str:
     rev = ctx.get("reversal", {})
     price = ctx.get("price")
