@@ -107,6 +107,17 @@ async def ask(question: str, market_context: dict[str, Any]) -> str:
         return _extract_text(resp)
     except Exception as exc:  # noqa: BLE001
         log.warning("Claude ask failed: %s", exc)
+        msg = str(exc).lower()
+        if "authentication" in msg or "invalid x-api-key" in msg or "401" in msg:
+            return (
+                "🔑 ИИ-чат недоступен: неверный ANTHROPIC_API_KEY.\n"
+                "Проверь ключ в Railway (console.anthropic.com → API Keys).\n\n"
+                "Анализ работает и без ИИ — жми 📊 Сигнал или 🏛 Глубокий анализ."
+            )
+        if "rate_limit" in msg or "429" in msg:
+            return "⏳ Лимит запросов к ИИ исчерпан, попробуй чуть позже."
+        if "credit" in msg or "insufficient" in msg or "billing" in msg:
+            return "💳 На балансе Anthropic недостаточно средств — пополни в console.anthropic.com."
         return f"Ошибка обращения к AI: {exc}"
 
 
