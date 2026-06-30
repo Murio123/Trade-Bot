@@ -97,13 +97,16 @@ def format_signal(signal: dict[str, Any]) -> str:
 
 
 def format_reversal_alert(ctx: dict[str, Any], direction: str,
-                          factors: list[str], strong: bool) -> str:
+                          factors: list[str], strong: bool,
+                          tfs: list[str] | None = None) -> str:
     head = "🟢 Возможное ДНО" if direction == "bull" else "🔴 Возможный ПИК"
-    tf = ctx.get("timeframe", "").upper()
+    tf_str = ", ".join(_TF_LABEL.get(t, t.upper()) for t in (tfs or []))
     lines = [
-        f"🔔 {head}{' (сильное)' if strong else ''} | {config.SYMBOL_DISPLAY} {tf}",
+        f"🔔 {head}{' (сильное)' if strong else ''} | {config.SYMBOL_DISPLAY}",
         f"Цена: {_fmt_price(ctx.get('price'))}",
-        f"Совпало факторов: {len(factors)}",
+        f"Подтверждено на {len(tfs or [])} ТФ: {tf_str}",
+        "",
+        "Факторы:",
     ]
     lines += [f"  • {f}" for f in factors]
     lines.append("")
@@ -112,43 +115,77 @@ def format_reversal_alert(ctx: dict[str, Any], direction: str,
     return "\n".join(lines)
 
 
+_TF_LABEL = {"1h": "1H", "4h": "4H", "12h": "12H", "1d": "1D"}
+
+
 def format_reversal(ctx: dict[str, Any]) -> str:
-    rev = ctx.get("reversal", {})
+    mtf = ctx.get("reversal_mtf", {})
+    per_tf = mtf.get("per_tf", {})
     price = ctx.get("price")
     lines = [
-        f"🔄 Анализ разворота {config.SYMBOL_DISPLAY} | {ctx.get('timeframe', '').upper()}",
+        f"🔄 Анализ разворота {config.SYMBOL_DISPLAY} | 1H/4H/12H/1D",
         f"Цена: {_fmt_price(price)}",
         "",
     ]
-    bull = rev.get("factors_bull") or []
-    bear = rev.get("factors_bear") or []
-    if not bull and not bear:
-        lines.append("Признаков истощения/разворота сейчас нет.")
-        lines.append("Цена не на свинговом экстремуме — слежу за зонами 👇")
-        lines += _reversal_watch(ctx, price)
+
+    if not per_tf:
+        lines.append("Нет данных по таймфреймам.")
         return "\n".join(lines)
 
-    if rev.get("bullish_reversal"):
-        lines.append(f"🟢 Возможное ДНО{' (сильное)' if rev.get('bull_strong') else ''} — "
-                     f"{rev.get('bull_score')} подтверждения:")
-        lines += [f"  • {f}" for f in bull]
-    elif bull:
-        lines.append(f"🟢 Слабые признаки дна ({rev.get('bull_score')}/2):")
-        lines += [f"  • {f}" for f in bull]
+    # Per-timeframe status line.
+    lines.append("По таймфреймам:")
+    for tf in ("1h", "4h", "12h", "1d"):
+        r = per_tf.get(tf)
+        if not r:
+            continue
+        if r.get("bullish_reversal"):
+            mark = f"🟢 дно ({r.get('bull_score')})" + (" сильное" if r.get("bull_strong") else "")
+        elif r.get("bearish_reversal"):
+            mark = f"🔴 пик ({r.get('bear_score')})" + (" сильный" if r.get("bear_strong") else "")
+        elif r.get("bull_score"):
+            mark = f"🟢· слабо ({r.get('bull_score')}/2)"
+        elif r.get("bear_score"):
+            mark = f"🔴· слабо ({r.get('bear_score')}/2)"
+        else:
+            mark = "—"
+        lines.append(f"  {_TF_LABEL[tf]}: {mark}")
 
-    if rev.get("bearish_reversal"):
-        lines.append(f"🔴 Возможный ПИК{' (сильный)' if rev.get('bear_strong') else ''} — "
-                     f"{rev.get('bear_score')} подтверждения:")
-        lines += [f"  • {f}" for f in bear]
-    elif bear:
-        lines.append(f"🔴 Слабые признаки пика ({rev.get('bear_score')}/2):")
-        lines += [f"  • {f}" for f in bear]
+    bull_tfs = mtf.get("bull_tfs") or []
+    bear_tfs = mtf.get("bear_tfs") or []
+    lines.append("")
 
-    lines += _reversal_watch(ctx, price)
+    if mtf.get("combined_bullish"):
+        lines.append(f"🟢 ДНО подтверждено на {len(bull_tfs)} ТФ: "
+                     f"{', '.join(_TF_LABEL[t] for t in bull_tfs)}")
+        lines += _tf_factors(per_tf, bull_tfs, "factors_bull")
+    elif mtf.get("combined_bearish"):
+        lines.append(f"🔴 ПИК подтверждён на {len(bear_tfs)} ТФ: "
+                     f"{', '.join(_TF_LABEL[t] for t in bear_tfs)}")
+        lines += _tf_factors(per_tf, bear_tfs, "factors_bear")
+    elif bull_tfs:
+        lines.append(f"🟢 Признаки дна на {', '.join(_TF_LABEL[t] for t in bull_tfs)} "
+                     f"(нужно ≥2 ТФ для подтверждения)")
+    elif bear_tfs:
+        lines.append(f"🔴 Признаки пика на {', '.join(_TF_LABEL[t] for t in bear_tfs)} "
+                     f"(нужно ≥2 ТФ для подтверждения)")
+    else:
+        lines.append("Признаков разворота сейчас нет ни на одном ТФ.")
+        lines += _reversal_watch(ctx, price)
+
     lines.append("")
     lines.append("⚠️ Развороты — это фейд движения: ниже винрейт, выше R:R. "
                  "Лучше брать в сторону старшего тренда.")
     return "\n".join(lines)
+
+
+def _tf_factors(per_tf: dict, tfs: list, key: str) -> list[str]:
+    """Unique reversal factors across the confirming timeframes."""
+    seen: list[str] = []
+    for tf in tfs:
+        for f in per_tf.get(tf, {}).get(key, []):
+            if f not in seen:
+                seen.append(f)
+    return [f"  • {f}" for f in seen]
 
 
 def _reversal_watch(ctx: dict[str, Any], price: float | None) -> list[str]:

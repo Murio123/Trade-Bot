@@ -94,6 +94,8 @@ async def gather_market_context(binance: BinanceClient,
     volume_profile = compute_volume_profile(df_signal)
     fvg = detect_fvg(df_signal, atr_value=atr_value)
     reversal = detect_reversal(df_signal, ind_signal, cvd_series(df_signal))
+    # Multi-timeframe reversal read across 1H / 4H / 12H / 1D.
+    reversal_mtf = _reversal_mtf(dfs, inds)
 
     # Divergence on both RSI(14) and MACD; combine (either one counts).
     series = ind_signal.get("_series", {})
@@ -140,12 +142,35 @@ async def gather_market_context(binance: BinanceClient,
         "volume_profile": volume_profile,
         "fvg": fvg,
         "reversal": reversal,
+        "reversal_mtf": reversal_mtf,
         "divergence": divergence,
         "liquidation_map": liq_map,
         "sweep_signal": sweep,
         "sessions": sessions,
     }
     return context
+
+
+REVERSAL_TFS = ["1h", "4h", "12h", "1d"]
+
+
+def _reversal_mtf(dfs: dict[str, Any], inds: dict[str, Any]) -> dict[str, Any]:
+    """Run reversal detection on 1H/4H/12H/1D and combine into one verdict."""
+    per_tf: dict[str, Any] = {}
+    for tf in REVERSAL_TFS:
+        if tf in dfs:
+            per_tf[tf] = detect_reversal(dfs[tf], inds[tf], cvd_series(dfs[tf]))
+    bull_tfs = [tf for tf in REVERSAL_TFS if per_tf.get(tf, {}).get("bullish_reversal")]
+    bear_tfs = [tf for tf in REVERSAL_TFS if per_tf.get(tf, {}).get("bearish_reversal")]
+    return {
+        "per_tf": per_tf,
+        "bull_tfs": bull_tfs,
+        "bear_tfs": bear_tfs,
+        "bull_tf_count": len(bull_tfs),
+        "bear_tf_count": len(bear_tfs),
+        "combined_bullish": len(bull_tfs) >= 2,
+        "combined_bearish": len(bear_tfs) >= 2,
+    }
 
 
 def _oi_rising(oi_hist: list[dict[str, Any]]) -> bool | None:

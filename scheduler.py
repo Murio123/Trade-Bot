@@ -122,23 +122,30 @@ async def resolve_trades_job(application) -> None:
 
 async def _maybe_reversal_alert(application, ctx: dict, profile_name: str,
                                 timeframe: str) -> None:
-    """Emit a proactive bottom/top alert when enough exhaustion factors align."""
+    """Emit a proactive bottom/top alert when 2+ timeframes confirm a reversal."""
     if not config.ENABLE_REVERSAL_ALERTS:
         return
-    rev = ctx.get("reversal") or {}
-    min_factors = config.REVERSAL_ALERT_MIN_FACTORS
-    if rev.get("bull_score", 0) >= min_factors and rev.get("bull_score", 0) >= rev.get("bear_score", 0):
-        direction, factors, strong = "bull", rev.get("factors_bull", []), rev.get("bull_strong")
-    elif rev.get("bear_score", 0) >= min_factors:
-        direction, factors, strong = "bear", rev.get("factors_bear", []), rev.get("bear_strong")
+    mtf = ctx.get("reversal_mtf") or {}
+    if mtf.get("combined_bullish"):
+        direction, tfs = "bull", mtf.get("bull_tfs", [])
+    elif mtf.get("combined_bearish"):
+        direction, tfs = "bear", mtf.get("bear_tfs", [])
     else:
         return
 
-    # De-duplicate: skip if the same direction fired recently near this price.
+    # Aggregate the factors across the confirming timeframes.
+    per_tf = mtf.get("per_tf", {})
+    key_f = "factors_bull" if direction == "bull" else "factors_bear"
+    factors: list[str] = []
+    for tf in tfs:
+        for f in per_tf.get(tf, {}).get(key_f, []):
+            if f not in factors:
+                factors.append(f)
+
+    # Global de-duplication (both profile jobs see the same 1H/4H/12H/1D read).
     price = ctx.get("price")
     atr = ctx.get("atr") or (price * 0.01 if price else 0)
-    key = f"last_reversal_alert_{timeframe}"
-    last = application.bot_data.get(key)
+    last = application.bot_data.get("last_reversal_alert")
     now = datetime.now(timezone.utc)
     if last and last["direction"] == direction:
         within_cooldown = (now - last["time"]) < timedelta(hours=config.REVERSAL_ALERT_COOLDOWN_HOURS)
@@ -146,10 +153,11 @@ async def _maybe_reversal_alert(application, ctx: dict, profile_name: str,
         if within_cooldown and near_price:
             return
 
-    text = formatting.format_reversal_alert(ctx, direction, factors, bool(strong))
+    strong = len(tfs) >= 3
+    text = formatting.format_reversal_alert(ctx, direction, factors, strong, tfs)
     await alerts.broadcast(application.bot, text)
-    application.bot_data[key] = {"direction": direction, "price": price, "time": now}
-    log.info("[%s] Reversal alert: %s (%d factors)", profile_name, direction, len(factors))
+    application.bot_data["last_reversal_alert"] = {"direction": direction, "price": price, "time": now}
+    log.info("Reversal alert: %s on %d TFs (%s)", direction, len(tfs), ",".join(tfs))
 
 
 def build_scheduler(application) -> AsyncIOScheduler:
