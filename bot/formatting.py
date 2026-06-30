@@ -281,6 +281,16 @@ def format_levels(ctx: dict[str, Any]) -> str:
         if bear_fvg:
             lines.append(f"  • Медвежий: {_fmt_price(bear_fvg['low'])}–{_fmt_price(bear_fvg['high'])}")
 
+    eq = ctx.get("equilibrium", {})
+    if eq.get("eq"):
+        zone_ru = {"discount": "🟢 дисконт (зона лонгов)",
+                   "premium": "🔴 премиум (зона шортов)",
+                   "equilibrium": "⚪ равновесие"}.get(eq.get("zone"), eq.get("zone"))
+        lines.append("")
+        lines.append(f"⚖️ Диапазон: {_fmt_price(eq.get('low'))}–{_fmt_price(eq.get('high'))}")
+        lines.append(f"  Равновесие: {_fmt_price(eq.get('eq'))} | сейчас {zone_ru} "
+                     f"({int(eq.get('pos', 0.5) * 100)}%)")
+
     ind = ctx.get("ind_signal", {})
     bbw = ind.get("bbw")
     if bbw is not None:

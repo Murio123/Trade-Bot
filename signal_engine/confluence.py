@@ -84,6 +84,14 @@ def calculate_confluence_score(data: dict[str, Any], direction: str) -> tuple[in
         scores["structure"] += 2
         reasons.append("Цена в медвежьем FVG (имбаланс)")
 
+    # Premium/Discount: longs are favoured in discount, shorts in premium.
+    if bull and data.get("in_discount"):
+        scores["structure"] += 2
+        reasons.append("Вход в дисконте (ниже равновесия)")
+    if not bull and data.get("in_premium"):
+        scores["structure"] += 2
+        reasons.append("Вход в премиуме (выше равновесия)")
+
     # Reversal / exhaustion at an extreme (catching a bottom / top).
     if bull and data.get("bullish_reversal"):
         scores["structure"] += 3 if data.get("reversal_strong_bull") else 2

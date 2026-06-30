@@ -16,6 +16,7 @@ import config
 from analyzer.binance import BinanceClient
 from analyzer.correlation import get_correlations
 from analyzer.cvd import compute_cvd_from_klines, cvd_series
+from analyzer.equilibrium import compute_equilibrium
 from analyzer.reversal import detect_reversal
 from analyzer.divergence import detect_divergence
 from analyzer.fvg import detect_fvg
@@ -104,6 +105,11 @@ async def gather_market_context(binance: BinanceClient,
     # Multi-timeframe reversal read across 1H / 4H / 12H / 1D.
     reversal_mtf = _reversal_mtf(dfs, inds)
 
+    # Premium/Discount of the dealing range, on the trend (HTF) timeframe.
+    range_tf = profile["htf"] if profile["htf"] in dfs else (
+        zone_tfs[0] if zone_tfs else signal_timeframe)
+    equilibrium = compute_equilibrium(dfs.get(range_tf, df_signal))
+
     # Divergence on both RSI(14) and MACD; combine (either one counts).
     series = ind_signal.get("_series", {})
     div_rsi = detect_divergence(df_signal, series.get("rsi"))
@@ -150,6 +156,7 @@ async def gather_market_context(binance: BinanceClient,
         "fvg": fvg,
         "htf_levels": htf_levels,
         "zone_tfs": zone_tfs,
+        "equilibrium": equilibrium,
         "reversal": reversal,
         "reversal_mtf": reversal_mtf,
         "divergence": divergence,
@@ -397,6 +404,8 @@ def _flatten_for_confluence(ctx: dict[str, Any]) -> dict[str, Any]:
         "reversal_candle": ctx["liquidity"].get("reversal_candle"),
         "price_in_bullish_fvg": ctx.get("fvg", {}).get("price_in_bullish_fvg"),
         "price_in_bearish_fvg": ctx.get("fvg", {}).get("price_in_bearish_fvg"),
+        "in_discount": ctx.get("equilibrium", {}).get("zone") == "discount",
+        "in_premium": ctx.get("equilibrium", {}).get("zone") == "premium",
         "bullish_reversal": ctx.get("reversal", {}).get("bullish_reversal"),
         "bearish_reversal": ctx.get("reversal", {}).get("bearish_reversal"),
         "reversal_strong_bull": ctx.get("reversal", {}).get("bull_strong"),
