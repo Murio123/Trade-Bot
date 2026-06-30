@@ -1,7 +1,8 @@
-"""Macro correlation: DXY (US dollar index) and US10Y (10-year yield).
+"""Macro context: US10Y (10-year Treasury yield).
 
 Uses FRED if FRED_API_KEY is set, otherwise Stooq's free CSV endpoint (no key).
-A falling DXY is generally a bullish backdrop for BTC.
+DXY was removed from the analysis on request; US10Y is kept for context only
+(it does not contribute to the confluence score).
 """
 from __future__ import annotations
 
@@ -18,8 +19,8 @@ log = logging.getLogger(__name__)
 FRED_BASE = "https://api.stlouisfed.org/fred/series/observations"
 STOOQ_BASE = "https://stooq.com/q/d/l/"
 
-FRED_SERIES = {"dxy": "DTWEXBGS", "us10y": "DGS10"}
-STOOQ_SYMBOLS = {"dxy": "dx.f", "us10y": "10usy.b"}
+FRED_SERIES = {"us10y": "DGS10"}
+STOOQ_SYMBOLS = {"us10y": "10usy.b"}
 
 
 async def _fred_series(series_id: str) -> list[float]:
@@ -77,16 +78,9 @@ def _trend(values: list[float]) -> str:
 
 
 async def get_macro() -> dict[str, Any]:
-    dxy = await _series("dxy")
     us10y = await _series("us10y")
-    dxy_trend = _trend(dxy)
     us10y_trend = _trend(us10y)
     return {
-        "dxy": dxy[-1] if dxy else None,
-        "dxy_trend": dxy_trend,
         "us10y": us10y[-1] if us10y else None,
         "us10y_trend": us10y_trend,
-        # Falling dollar = bullish context for BTC.
-        "dxy_bearish_correlation": dxy_trend == "down",
-        "dxy_bullish_correlation": dxy_trend == "up",
     }

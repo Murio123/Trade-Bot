@@ -150,14 +150,22 @@ class Database:
             )
             return int(row["id"])
 
-    async def last_signal(self, symbol: str) -> Optional[dict[str, Any]]:
+    async def last_signal(self, symbol: str,
+                          timeframe: Optional[str] = None) -> Optional[dict[str, Any]]:
         if not self.pool:
-            return self._mem.last_signal(symbol)
+            return self._mem.last_signal(symbol, timeframe)
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM signals WHERE symbol=$1 ORDER BY created_at DESC LIMIT 1",
-                symbol,
-            )
+            if timeframe:
+                row = await conn.fetchrow(
+                    "SELECT * FROM signals WHERE symbol=$1 AND timeframe=$2 "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    symbol, timeframe,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT * FROM signals WHERE symbol=$1 ORDER BY created_at DESC LIMIT 1",
+                    symbol,
+                )
             return _row_to_signal(row) if row else None
 
     async def last_delivered_signal(self, symbol: str) -> Optional[dict[str, Any]]:
@@ -278,8 +286,12 @@ class _MemoryStore:
         self.signals.append(rec)
         return self._sid
 
-    def last_signal(self, symbol: str):
-        items = [s for s in self.signals if s.get("symbol") == symbol]
+    def last_signal(self, symbol: str, timeframe: Optional[str] = None):
+        items = [
+            s for s in self.signals
+            if s.get("symbol") == symbol
+            and (timeframe is None or s.get("timeframe") == timeframe)
+        ]
         return items[-1] if items else None
 
     def last_delivered_signal(self, symbol: str):

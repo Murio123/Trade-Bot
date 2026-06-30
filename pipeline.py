@@ -51,8 +51,16 @@ async def gather_market_context(binance: BinanceClient,
     ind_4h = compute_indicators(df_4h)
     ind_1d = compute_indicators(df_1d)
 
-    df_signal = {"1h": df_1h, "4h": df_4h, "1d": df_1d}[signal_timeframe]
-    ind_signal = {"1h": ind_1h, "4h": ind_4h, "1d": ind_1d}[signal_timeframe]
+    # 1h/4h/1d are always needed for the HTF bias + MTF agreement. The signal
+    # timeframe may be one of those or a separate one (e.g. 15m) fetched here.
+    base_dfs = {"1h": df_1h, "4h": df_4h, "1d": df_1d}
+    base_inds = {"1h": ind_1h, "4h": ind_4h, "1d": ind_1d}
+    if signal_timeframe in base_dfs:
+        df_signal = base_dfs[signal_timeframe]
+        ind_signal = base_inds[signal_timeframe]
+    else:
+        df_signal = await binance.klines(signal_timeframe, limit=300)
+        ind_signal = compute_indicators(df_signal)
 
     # Crypto-specific + external sources (run concurrently, tolerate failures).
     (funding, oi, ls_ratio, agg_trades, macro, onchain) = await asyncio.gather(
@@ -135,8 +143,6 @@ def _flatten_for_confluence(ctx: dict[str, Any]) -> dict[str, Any]:
         "cvd_bearish": ctx["cvd"].get("cvd_bearish"),
         "funding": (ctx["funding"] or {}).get("current"),
         "exchange_netflow": (ctx["onchain"] or {}).get("exchange_netflow"),
-        "dxy_bearish_correlation": (ctx["macro"] or {}).get("dxy_bearish_correlation"),
-        "dxy_bullish_correlation": (ctx["macro"] or {}).get("dxy_bullish_correlation"),
     })
     return flat
 

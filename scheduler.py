@@ -19,22 +19,26 @@ from pipeline import gather_market_context, run_cascade
 log = logging.getLogger(__name__)
 
 
-async def analysis_job(application) -> None:
+async def analysis_job(application, timeframe: str | None = None) -> None:
     binance = application.bot_data["binance"]
-    log.info("Running scheduled analysis…")
+    timeframe = timeframe or config.SIGNAL_TIMEFRAME
+    log.info("Running scheduled analysis (%s)…", timeframe)
     try:
-        ctx = await gather_market_context(binance, signal_timeframe="4h")
-        application.bot_data["last_context"] = ctx
+        ctx = await gather_market_context(binance, signal_timeframe=timeframe)
+        # Cache the primary timeframe context for /ask and /levels.
+        if timeframe == config.SIGNAL_TIMEFRAME:
+            application.bot_data["last_context"] = ctx
         delivered_today = await db.signals_today(config.SYMBOL)
-        last_signal = await db.last_signal(config.SYMBOL)
+        # Per-timeframe cooldown so 15m and 4h don't suppress each other.
+        last_signal = await db.last_signal(config.SYMBOL, timeframe=timeframe)
         result = await run_cascade(ctx, delivered_today, last_signal, interpret=True)
     except Exception:  # noqa: BLE001
-        log.exception("analysis_job failed")
+        log.exception("analysis_job (%s) failed", timeframe)
         return
 
     status = result.get("status")
     if status == "blocked":
-        log.info("Signal blocked at: %s", result.get("blocked_at"))
+        log.info("[%s] Signal blocked at: %s", timeframe, result.get("blocked_at"))
         return
 
     # Persist anything at journal threshold or above.
@@ -73,10 +77,18 @@ async def price_alert_job(application) -> None:
 
 def build_scheduler(application) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
+    # Primary analysis on the main timeframe (e.g. 4h) every N hours.
     scheduler.add_job(
         analysis_job, "interval", hours=config.ANALYSIS_INTERVAL_HOURS,
-        args=[application], id="analysis", next_run_time=None,
+        args=[application, config.SIGNAL_TIMEFRAME], id="analysis", next_run_time=None,
     )
+    # Fast intraday analysis on a shorter timeframe (e.g. 15m) every M minutes.
+    if config.ENABLE_FAST_ANALYSIS and config.FAST_TIMEFRAME != config.SIGNAL_TIMEFRAME:
+        scheduler.add_job(
+            analysis_job, "interval", minutes=config.FAST_INTERVAL_MINUTES,
+            args=[application, config.FAST_TIMEFRAME], id="fast_analysis",
+            next_run_time=None,
+        )
     scheduler.add_job(
         price_alert_job, "interval", minutes=config.ALERT_CHECK_INTERVAL_MINUTES,
         args=[application], id="price_alerts",

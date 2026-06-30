@@ -99,13 +99,6 @@ def calculate_confluence_score(data: dict[str, Any], direction: str) -> tuple[in
             scores["macro"] += 1
             reasons.append("Приток на биржи")
 
-    if bull and data.get("dxy_bearish_correlation"):
-        scores["macro"] += 1
-        reasons.append("DXY слабеет — бычий контекст для BTC")
-    if not bull and data.get("dxy_bullish_correlation"):
-        scores["macro"] += 1
-        reasons.append("DXY укрепляется — медвежий контекст для BTC")
-
     total = sum(scores.values())
     return total, scores, reasons
 

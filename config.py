@@ -87,6 +87,13 @@ SCORE_JOURNAL_MIN = _get_int("SCORE_JOURNAL_MIN", 5)  # 5-7 -> store, available 
 # --- Scheduler ------------------------------------------------------------
 ANALYSIS_INTERVAL_HOURS = _get_int("ANALYSIS_INTERVAL_HOURS", 4)
 ALERT_CHECK_INTERVAL_MINUTES = _get_int("ALERT_CHECK_INTERVAL_MINUTES", 5)
+# Primary timeframe used by the scheduled analysis and the /signal command.
+SIGNAL_TIMEFRAME = _get("SIGNAL_TIMEFRAME", "4h")
+
+# Fast intraday analysis on a shorter timeframe (e.g. 15m), run more often.
+ENABLE_FAST_ANALYSIS = _get_bool("ENABLE_FAST_ANALYSIS", True)
+FAST_TIMEFRAME = _get("FAST_TIMEFRAME", "15m")
+FAST_INTERVAL_MINUTES = _get_int("FAST_INTERVAL_MINUTES", 15)
 
 # --- Operating mode -------------------------------------------------------
 # Dry-run: run the whole pipeline but do NOT send Telegram alerts (ТЗ step 10).

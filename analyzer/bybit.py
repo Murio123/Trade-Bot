@@ -18,8 +18,8 @@ import config
 log = logging.getLogger(__name__)
 
 BASE = "https://api.bybit.com"
-INTERVALS = {"1h": "60", "4h": "240", "1d": "D"}
-INTERVAL_MS = {"1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
+INTERVALS = {"15m": "15", "1h": "60", "4h": "240", "1d": "D"}
+INTERVAL_MS = {"15m": 900_000, "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000}
 
 
 class BybitClient:

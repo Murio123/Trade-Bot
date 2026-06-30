@@ -46,7 +46,7 @@ def _binance(context: ContextTypes.DEFAULT_TYPE):
 
 async def _fresh_context(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
     binance = _binance(context)
-    ctx = await gather_market_context(binance, signal_timeframe="4h")
+    ctx = await gather_market_context(binance, signal_timeframe=config.SIGNAL_TIMEFRAME)
     context.application.bot_data["last_context"] = ctx
     return ctx
 
