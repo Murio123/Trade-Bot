@@ -169,7 +169,13 @@ def format_reversal(ctx: dict[str, Any]) -> str:
         lines.append(f"🔴 Признаки пика на {', '.join(_TF_LABEL[t] for t in bear_tfs)} "
                      f"(нужно ≥2 ТФ для подтверждения)")
     else:
-        lines.append("Признаков разворота сейчас нет ни на одном ТФ.")
+        any_weak = any((r.get("bull_score") or r.get("bear_score"))
+                       for r in per_tf.values())
+        if any_weak:
+            lines.append("Слабые звоночки есть, но ни на одном ТФ не набралось "
+                         "≥2 факторов — разворот не подтверждён.")
+        else:
+            lines.append("Признаков разворота сейчас нет ни на одном ТФ.")
         lines += _reversal_watch(ctx, price)
 
     lines.append("")
@@ -220,7 +226,7 @@ def _reversal_watch(ctx: dict[str, Any], price: float | None) -> list[str]:
         out.append(f"• Зона пика (сопротивление): {_fmt_price(resistance)} "
                    f"(+{(resistance - price) / price * 100:.1f}%)")
 
-    out.append("🔔 Пришлю алерт, когда совпадёт ≥3 фактора истощения.")
+    out.append("🔔 Пришлю алерт, когда дно/пик подтвердится на ≥2 ТФ.")
     return out
 
 
