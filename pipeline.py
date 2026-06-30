@@ -336,6 +336,10 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
                                   atr_multiplier=profile["atr_mult"],
                                   targets_r=profile["targets"])
 
+    # Expected holding time to TP1 / TP2 from ATR-based drift on this timeframe.
+    hold = estimate_holding(ctx["price"], position["target_1"],
+                            position["target_2"], atr_value, ctx["timeframe"])
+
     signal = {
         "symbol": ctx["symbol"],
         "timeframe": ctx["timeframe"],
@@ -345,6 +349,8 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         "stop_loss": position["stop_loss"],
         "target_1": position["target_1"],
         "target_2": position["target_2"],
+        "hold_tp1_hours": hold[0],
+        "hold_tp2_hours": hold[1],
         "position_size": position["position_size"],
         "risk_amount": position["risk_amount"],
         "atr": atr_value,
@@ -395,6 +401,23 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         signal["confidence"] = round((signal["confidence"] + ai["confidence"]) / 2, 3)
 
     return signal
+
+
+_TF_HOURS = {"15m": 0.25, "1h": 1.0, "4h": 4.0, "12h": 12.0, "1d": 24.0}
+# Net directional drift per candle as a fraction of ATR (range != displacement).
+_DRIFT_PER_BAR = 0.5
+
+
+def estimate_holding(entry: float, tp1: float, tp2: float, atr: float,
+                     timeframe: str) -> tuple[float, float]:
+    """Rough expected hours to reach TP1 / TP2 from ATR-based drift."""
+    tf_hours = _TF_HOURS.get(timeframe, 4.0)
+    if not atr or atr <= 0:
+        return (0.0, 0.0)
+    step = atr * _DRIFT_PER_BAR
+    bars_tp1 = abs(tp1 - entry) / step
+    bars_tp2 = abs(tp2 - entry) / step
+    return (round(bars_tp1 * tf_hours, 1), round(bars_tp2 * tf_hours, 1))
 
 
 def _blocked(stage: str, **extra: Any) -> dict[str, Any]:

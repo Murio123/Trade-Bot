@@ -16,6 +16,22 @@ def _fmt_price(value: Any) -> str:
     return f"{value:,.0f}".replace(",", " ")
 
 
+def _stop_pct(signal: dict[str, Any]) -> str:
+    entry = signal.get("entry_price")
+    stop = signal.get("stop_loss")
+    if not entry or stop is None:
+        return ""
+    return f", {abs(stop - entry) / entry * 100:.1f}%"
+
+
+def _fmt_duration(hours: Any) -> str:
+    if not hours or hours <= 0:
+        return "н/д"
+    if hours < 24:
+        return f"{round(hours)} ч"
+    return f"{round(hours / 24, 1)} дн"
+
+
 def format_signal(signal: dict[str, Any]) -> str:
     ts = signal.get("timestamp")
     if isinstance(ts, datetime):
@@ -32,12 +48,15 @@ def format_signal(signal: dict[str, Any]) -> str:
         f"💰 Вход: {_fmt_price(signal.get('entry_price'))}",
         "",
         "📐 Risk Management (ATR-based):",
-        f"🛑 Стоп: {_fmt_price(signal.get('stop_loss'))} "
-        f"({signal.get('atr_multiplier_used', config.ATR_MULTIPLIER)}×ATR)",
+        f"🛑 Стоп-лосс: {_fmt_price(signal.get('stop_loss'))} "
+        f"({signal.get('atr_multiplier_used', config.ATR_MULTIPLIER)}×ATR"
+        f"{_stop_pct(signal)})",
         f"🎯 Цель 1: {_fmt_price(signal.get('target_1'))}",
         f"🎯 Цель 2: {_fmt_price(signal.get('target_2'))}",
         f"💼 Размер позиции: {signal.get('position_size')} {config.SYMBOL_DISPLAY} "
         f"({signal.get('risk_percent', config.RISK_PERCENT)}% риска)",
+        f"⏳ Удержание: ~{_fmt_duration(signal.get('hold_tp1_hours'))}–"
+        f"{_fmt_duration(signal.get('hold_tp2_hours'))} (до TP1–TP2)",
         "",
         f"📈 Confluence Score: {min(signal.get('score', 0), 10)}/10",
         f"• HTF Bias (1D): {BIAS_LABEL.get(signal.get('htf_bias', 'neutral'))} (фильтр пройден)",
