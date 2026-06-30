@@ -14,7 +14,7 @@ from typing import Any
 
 import config
 from analyzer.binance import BinanceClient
-from analyzer.cvd import compute_cvd
+from analyzer.cvd import compute_cvd_from_klines
 from analyzer.divergence import detect_divergence
 from analyzer.fvg import detect_fvg
 from analyzer.indicators import compute_indicators
@@ -64,11 +64,10 @@ async def gather_market_context(binance: BinanceClient,
         ind_signal = compute_indicators(df_signal)
 
     # Crypto-specific + external sources (run concurrently, tolerate failures).
-    (funding, oi, ls_ratio, agg_trades, macro, onchain) = await asyncio.gather(
+    (funding, oi, ls_ratio, macro, onchain) = await asyncio.gather(
         binance.funding_rate(),
         binance.open_interest(),
         binance.long_short_ratio(),
-        binance.agg_trades(limit=1000),
         get_macro(),
         get_onchain(),
         return_exceptions=True,
@@ -77,11 +76,12 @@ async def gather_market_context(binance: BinanceClient,
     funding = _safe(funding, {})
     oi = _safe(oi, 0.0)
     ls_ratio = _safe(ls_ratio, {})
-    agg_trades = _safe(agg_trades, [])
     macro = _safe(macro, {})
     onchain = _safe(onchain, {})
 
-    cvd = compute_cvd(agg_trades if isinstance(agg_trades, list) else [])
+    # CVD per-candle over the signal timeframe (exact from taker volume when the
+    # exchange provides it, otherwise an OHLCV-based estimate).
+    cvd = compute_cvd_from_klines(df_signal)
 
     # Structural analyzers on the signal timeframe.
     atr_value = ind_signal.get("atr") or 0.0
