@@ -8,6 +8,7 @@ local testing without a database.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -88,14 +89,39 @@ class Database:
         self._mem = _MemoryStore()
         self.enabled = bool(dsn and asyncpg)
 
-    async def connect(self) -> None:
+    async def connect(self, retries: int = 4) -> None:
+        """Connect to PostgreSQL with a few retries.
+
+        If the database is unreachable (bad/missing DATABASE_URL, DNS failure,
+        DB still booting), the bot does NOT crash: it logs a clear warning and
+        falls back to the in-memory store so Telegram + analysis keep working.
+        Persistence (signals/journal/alerts) is disabled until the DB is fixed.
+        """
         if not self.enabled:
             log.warning("DATABASE_URL not set or asyncpg missing -> using in-memory store")
             return
-        self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=5)
-        async with self.pool.acquire() as conn:
-            await conn.execute(SCHEMA)
-        log.info("PostgreSQL connected and schema ensured")
+
+        delay = 2
+        for attempt in range(1, retries + 1):
+            try:
+                self.pool = await asyncpg.create_pool(self.dsn, min_size=1, max_size=5)
+                async with self.pool.acquire() as conn:
+                    await conn.execute(SCHEMA)
+                log.info("PostgreSQL connected and schema ensured")
+                return
+            except Exception as exc:  # noqa: BLE001
+                self.pool = None
+                log.warning("DB connect attempt %s/%s failed: %s", attempt, retries, exc)
+                if attempt < retries:
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 16)
+
+        log.error(
+            "Could not connect to PostgreSQL after %s attempts. Falling back to "
+            "in-memory store (no persistence). Check that DATABASE_URL points to a "
+            "reachable database, e.g. ${{Postgres.DATABASE_URL}} on Railway.",
+            retries,
+        )
 
     async def close(self) -> None:
         if self.pool:
