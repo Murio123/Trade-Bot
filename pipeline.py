@@ -38,34 +38,33 @@ from signal_engine.cooldown import should_send_signal
 from signal_engine.daily_limiter import beats_weakest, within_daily_limit
 from signal_engine.htf_filter import filter_by_htf, get_htf_bias
 from signal_engine.mtf_confidence import apply_mtf_confidence, trend_label
+from signal_engine.profiles import get_profile
 
 log = logging.getLogger(__name__)
 
 
 async def gather_market_context(binance: BinanceClient,
-                                signal_timeframe: str = "4h") -> dict[str, Any]:
-    """Fetch raw data from every source and compute all analyzer outputs."""
-    # Klines for the three timeframes.
-    df_1h, df_4h, df_1d = await asyncio.gather(
-        binance.klines("1h", limit=300),
-        binance.klines("4h", limit=300),
-        binance.klines("1d", limit=300),
-    )
+                                signal_timeframe: str | None = None,
+                                profile_name: str | None = None) -> dict[str, Any]:
+    """Fetch raw data from every source and compute all analyzer outputs.
 
-    ind_1h = compute_indicators(df_1h)
-    ind_4h = compute_indicators(df_4h)
-    ind_1d = compute_indicators(df_1d)
+    Fetches the union of timeframes the active profile needs: always 1h/4h/1d
+    (HTF bias, sessions, fallbacks) plus the entry timeframe and every MTF
+    timeframe (e.g. 12h for swing, 15m for intraday).
+    """
+    profile = get_profile(profile_name)
+    signal_timeframe = signal_timeframe or profile["entry"]
 
-    # 1h/4h/1d are always needed for the HTF bias + MTF agreement. The signal
-    # timeframe may be one of those or a separate one (e.g. 15m) fetched here.
-    base_dfs = {"1h": df_1h, "4h": df_4h, "1d": df_1d}
-    base_inds = {"1h": ind_1h, "4h": ind_4h, "1d": ind_1d}
-    if signal_timeframe in base_dfs:
-        df_signal = base_dfs[signal_timeframe]
-        ind_signal = base_inds[signal_timeframe]
-    else:
-        df_signal = await binance.klines(signal_timeframe, limit=300)
-        ind_signal = compute_indicators(df_signal)
+    needed = {"1h", "4h", "1d", signal_timeframe} | set(profile["mtf"])
+    tfs = sorted(needed)
+    frames = await asyncio.gather(*[binance.klines(tf, limit=300) for tf in tfs])
+    dfs = dict(zip(tfs, frames))
+    inds = {tf: compute_indicators(df) for tf, df in dfs.items()}
+
+    df_1h, df_4h, df_1d = dfs["1h"], dfs["4h"], dfs["1d"]
+    ind_1h, ind_4h, ind_1d = inds["1h"], inds["4h"], inds["1d"]
+    df_signal = dfs[signal_timeframe]
+    ind_signal = inds[signal_timeframe]
 
     # Crypto-specific + external sources (run concurrently, tolerate failures).
     (funding, oi, ls_ratio, macro, onchain) = await asyncio.gather(
@@ -125,6 +124,9 @@ async def gather_market_context(binance: BinanceClient,
         "ind_4h": ind_4h,
         "ind_1d": ind_1d,
         "ind_signal": ind_signal,
+        # Indicator snapshots keyed by timeframe (incl. 12h / 15m when fetched),
+        # used by the cascade to resolve a profile's HTF/MTF references.
+        "inds_by_tf": inds,
         "funding": funding,
         "open_interest": oi,
         "long_short_ratio": ls_ratio,
@@ -254,13 +256,17 @@ def _flatten_for_confluence(ctx: dict[str, Any]) -> dict[str, Any]:
 
 async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]],
                       last_signal: dict[str, Any] | None,
-                      interpret: bool = True) -> dict[str, Any]:
+                      interpret: bool = True,
+                      profile_name: str | None = None) -> dict[str, Any]:
     """Run levels 1-7 and return a result describing the outcome."""
+    profile = get_profile(profile_name)
+    inds = ctx.get("inds_by_tf", {})
     flat = _flatten_for_confluence(ctx)
     atr_value = ctx["atr"] or 0.0
 
-    # Level 1: HTF bias.
-    htf_bias = get_htf_bias(ctx["ind_1d"])
+    # Level 1: HTF bias from the profile's higher timeframe.
+    htf_ind = inds.get(profile["htf"], ctx["ind_1d"])
+    htf_bias = get_htf_bias(htf_ind)
 
     # Score both directions; the stronger one is the candidate.
     long_total, long_scores, long_reasons = calculate_confluence_score(flat, "long")
@@ -306,16 +312,19 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         return _blocked("wait_for_sweep", direction=direction, score=total,
                         category_scores=scores, reasons=reasons, **diag)
 
-    # Level 5: multi-timeframe confidence modifier.
-    t1h = trend_label(ctx["ind_1h"])
-    t4h = trend_label(ctx["ind_4h"])
-    t1d = trend_label(ctx["ind_1d"])
+    # Level 5: multi-timeframe agreement on the profile's three timeframes.
+    mtf_tfs = profile["mtf"]
+    t_low = trend_label(inds.get(mtf_tfs[0], ctx["ind_1h"]))
+    t_mid = trend_label(inds.get(mtf_tfs[1], ctx["ind_4h"]))
+    t_high = trend_label(inds.get(mtf_tfs[2], ctx["ind_1d"]))
     base_conf = total / 10.0
-    modifier = apply_mtf_confidence(1.0, t1h, t4h, t1d)
+    modifier = apply_mtf_confidence(1.0, t_low, t_mid, t_high)
     confidence = min(base_conf * modifier, 1.0)
 
-    # Risk sizing.
-    position = calculate_position(ctx["price"], atr_value, direction=direction)
+    # Risk sizing tuned to the trade style.
+    position = calculate_position(ctx["price"], atr_value, direction=direction,
+                                  atr_multiplier=profile["atr_mult"],
+                                  targets_r=profile["targets"])
 
     signal = {
         "symbol": ctx["symbol"],
@@ -336,7 +345,10 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         "htf_bias": htf_bias,
         "confidence": round(confidence, 3),
         "confidence_modifier": modifier,
-        "mtf": {"1h": t1h, "4h": t4h, "1d": t1d},
+        "mtf": {mtf_tfs[0]: t_low, mtf_tfs[1]: t_mid, mtf_tfs[2]: t_high},
+        "style": profile_name or "swing",
+        "style_label": profile["label"],
+        "style_emoji": profile["emoji"],
         "session_best": ctx["sessions"].get("best_session"),
         "sessions": ctx["sessions"].get("sessions"),
         "funding_value": (ctx["funding"] or {}).get("current"),
@@ -344,7 +356,7 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     }
 
     # Level 6: cooldown / dedup (blocking).
-    if not should_send_signal(signal, last_signal, atr_value, config.COOLDOWN_HOURS):
+    if not should_send_signal(signal, last_signal, atr_value, profile["cooldown_hours"]):
         signal["status"] = "cooldown"
         signal["deliverable"] = False
         return signal

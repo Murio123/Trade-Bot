@@ -23,7 +23,8 @@ log = logging.getLogger(__name__)
 HELP_TEXT = (
     "🤖 BTC Signal Bot\n\n"
     "Нажимай кнопки ниже или используй команды:\n"
-    "/signal — текущий сигнал (включая слабые 5-7)\n"
+    "/signal — свинг-сигнал (вход 4H, тренд 1D/12H)\n"
+    "/intraday — интрадей-сигнал (вход 15m, тренд 4H/1H)\n"
     "/deep — глубокий институциональный анализ (1D/12H/4H, score /100)\n"
     "/levels — ключевые уровни (OB, ликвидность, volume profile)\n"
     "/funding — funding rate + аномальность\n"
@@ -46,10 +47,12 @@ def _binance(context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data["binance"]
 
 
-async def _fresh_context(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
+async def _fresh_context(context: ContextTypes.DEFAULT_TYPE,
+                         profile_name: str = "swing") -> dict[str, Any]:
     binance = _binance(context)
-    ctx = await gather_market_context(binance, signal_timeframe=config.SIGNAL_TIMEFRAME)
-    context.application.bot_data["last_context"] = ctx
+    ctx = await gather_market_context(binance, profile_name=profile_name)
+    if profile_name == "swing":
+        context.application.bot_data["last_context"] = ctx
     return ctx
 
 
@@ -69,15 +72,21 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text("⏳ Анализирую рынок…")
+async def _run_signal(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                      profile_name: str) -> None:
+    from signal_engine.profiles import get_profile
+    profile = get_profile(profile_name)
+    await update.effective_message.reply_text(
+        f"{profile['emoji']} Анализирую ({profile['label']})…")
     try:
-        ctx = await _fresh_context(context)
-        delivered_today = await db.signals_today(config.SYMBOL)
-        last_signal = await db.last_signal(config.SYMBOL)
-        result = await run_cascade(ctx, delivered_today, last_signal, interpret=True)
+        ctx = await _fresh_context(context, profile_name=profile_name)
+        tf = profile["entry"]
+        delivered_today = await db.signals_today(config.SYMBOL, timeframe=tf)
+        last_signal = await db.last_signal(config.SYMBOL, timeframe=tf)
+        result = await run_cascade(ctx, delivered_today, last_signal,
+                                   interpret=True, profile_name=profile_name)
     except Exception as exc:  # noqa: BLE001
-        log.exception("signal_cmd failed")
+        log.exception("signal (%s) failed", profile_name)
         await update.effective_message.reply_text(f"⚠️ Ошибка анализа: {exc}")
         return
 
@@ -85,6 +94,14 @@ async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.effective_message.reply_text(formatting.format_blocked(result))
         return
     await update.effective_message.reply_text(formatting.format_signal(result))
+
+
+async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _run_signal(update, context, "swing")
+
+
+async def intraday_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _run_signal(update, context, "intraday")
 
 
 async def levels_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -283,6 +300,7 @@ def _ask_context(ctx: dict[str, Any]) -> dict[str, Any]:
 # buttons and inline-menu callbacks alike).
 COMMAND_DISPATCH = {
     "signal": signal_cmd,
+    "intraday": intraday_cmd,
     "deep": deep_cmd,
     "levels": levels_cmd,
     "funding": funding_cmd,
@@ -295,7 +313,8 @@ COMMAND_DISPATCH = {
 
 # Shown in the Telegram "/" command menu.
 BOT_COMMANDS = [
-    ("signal", "Текущий сигнал"),
+    ("signal", "Свинг-сигнал (4H)"),
+    ("intraday", "Интрадей-сигнал (15m)"),
     ("deep", "Глубокий институциональный анализ"),
     ("levels", "Ключевые уровни"),
     ("funding", "Funding rate"),
@@ -327,6 +346,7 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("signal", signal_cmd))
+    application.add_handler(CommandHandler("intraday", intraday_cmd))
     application.add_handler(CommandHandler("deep", deep_cmd))
     application.add_handler(CommandHandler("levels", levels_cmd))
     application.add_handler(CommandHandler("funding", funding_cmd))

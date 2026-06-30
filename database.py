@@ -192,16 +192,24 @@ class Database:
             )
             return _row_to_signal(row) if row else None
 
-    async def signals_today(self, symbol: str) -> list[dict[str, Any]]:
+    async def signals_today(self, symbol: str,
+                            timeframe: Optional[str] = None) -> list[dict[str, Any]]:
         if not self.pool:
-            return self._mem.signals_today(symbol)
+            return self._mem.signals_today(symbol, timeframe)
         since = utcnow() - timedelta(hours=24)
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT * FROM signals WHERE symbol=$1 AND delivered=TRUE "
-                "AND created_at >= $2 ORDER BY created_at DESC",
-                symbol, since,
-            )
+            if timeframe:
+                rows = await conn.fetch(
+                    "SELECT * FROM signals WHERE symbol=$1 AND timeframe=$2 "
+                    "AND delivered=TRUE AND created_at >= $3 ORDER BY created_at DESC",
+                    symbol, timeframe, since,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT * FROM signals WHERE symbol=$1 AND delivered=TRUE "
+                    "AND created_at >= $2 ORDER BY created_at DESC",
+                    symbol, since,
+                )
             return [_row_to_signal(r) for r in rows]
 
     async def mark_delivered(self, signal_id: int) -> None:
@@ -365,11 +373,12 @@ class _MemoryStore:
         items = [s for s in self.signals if s.get("symbol") == symbol and s.get("delivered")]
         return items[-1] if items else None
 
-    def signals_today(self, symbol: str):
+    def signals_today(self, symbol: str, timeframe: Optional[str] = None):
         since = utcnow() - timedelta(hours=24)
         return [
             s for s in self.signals
             if s.get("symbol") == symbol and s.get("delivered")
+            and (timeframe is None or s.get("timeframe") == timeframe)
             and s.get("created_at", utcnow()) >= since
         ]
 

@@ -24,8 +24,10 @@ def format_signal(signal: dict[str, Any]) -> str:
         ts_str = str(ts or "")
 
     direction = signal.get("direction", "")
+    style = signal.get("style_label", "СИГНАЛ")
+    emoji = signal.get("style_emoji", "🤖")
     lines = [
-        f"🤖 {config.SYMBOL_DISPLAY} СИГНАЛ | {signal.get('timeframe', '').upper()} | {ts_str}",
+        f"{emoji} {config.SYMBOL_DISPLAY} {style} | {signal.get('timeframe', '').upper()} | {ts_str}",
         f"📊 Направление: {DIRECTION_LABEL.get(direction, direction)}",
         f"💰 Вход: {_fmt_price(signal.get('entry_price'))}",
         "",

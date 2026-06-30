@@ -10,7 +10,8 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
                       KeyboardButton, ReplyKeyboardMarkup)
 
 # --- reply keyboard labels (also used for routing button presses) ---------
-BTN_SIGNAL = "📊 Сигнал"
+BTN_SIGNAL = "📊 Свинг"
+BTN_INTRADAY = "⚡ Интрадей"
 BTN_DEEP = "🏛 Глубокий анализ"
 BTN_LEVELS = "📐 Уровни"
 BTN_FUNDING = "💸 Funding"
@@ -25,11 +26,11 @@ BTN_HELP = "❓ Помощь"
 def main_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(BTN_SIGNAL), KeyboardButton(BTN_DEEP)],
-            [KeyboardButton(BTN_LEVELS), KeyboardButton(BTN_FUNDING)],
-            [KeyboardButton(BTN_FEAR), KeyboardButton(BTN_JOURNAL)],
-            [KeyboardButton(BTN_BACKTEST), KeyboardButton(BTN_ASK)],
-            [KeyboardButton(BTN_STATUS), KeyboardButton(BTN_HELP)],
+            [KeyboardButton(BTN_SIGNAL), KeyboardButton(BTN_INTRADAY)],
+            [KeyboardButton(BTN_DEEP), KeyboardButton(BTN_LEVELS)],
+            [KeyboardButton(BTN_FUNDING), KeyboardButton(BTN_FEAR)],
+            [KeyboardButton(BTN_JOURNAL), KeyboardButton(BTN_BACKTEST)],
+            [KeyboardButton(BTN_ASK), KeyboardButton(BTN_STATUS), KeyboardButton(BTN_HELP)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите команду или задайте вопрос…",
@@ -41,6 +42,9 @@ def main_inline_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(BTN_SIGNAL, callback_data="cmd:signal"),
+                InlineKeyboardButton(BTN_INTRADAY, callback_data="cmd:intraday"),
+            ],
+            [
                 InlineKeyboardButton(BTN_DEEP, callback_data="cmd:deep"),
             ],
             [
@@ -61,6 +65,7 @@ def main_inline_keyboard() -> InlineKeyboardMarkup:
 # Map reply-keyboard label -> internal command name.
 LABEL_TO_COMMAND = {
     BTN_SIGNAL: "signal",
+    BTN_INTRADAY: "intraday",
     BTN_DEEP: "deep",
     BTN_LEVELS: "levels",
     BTN_FUNDING: "funding",
