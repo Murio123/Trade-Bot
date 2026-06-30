@@ -137,12 +137,44 @@ def format_journal(stats: dict[str, Any]) -> str:
     ])
 
 
+HTF_LINE = {
+    "bullish": "Бычий 🔼 — шорты заблокированы",
+    "bearish": "Медвежий 🔽 — лонги заблокированы",
+    "neutral": "Нейтральный ⚪ — нет чёткого направления",
+}
+
+BLOCK_REASON = {
+    "htf_filter": "сигнал против дневного тренда (HTF-фильтр)",
+    "diversity": "мало категориального разнообразия (нужно ≥3 категории)",
+    "below_threshold": "очков недостаточно для журнала (нужно ≥5)",
+    "wait_for_sweep": "впереди вероятное снятие ликвидности — ждём свип",
+}
+
+BLOCK_HINT = {
+    "bullish": "Жду совпадения импульса с трендом вверх.",
+    "bearish": "Жду совпадения импульса с трендом вниз.",
+    "neutral": "Жду формирования чёткого дневного тренда.",
+}
+
+
 def format_blocked(result: dict[str, Any]) -> str:
     stage = result.get("blocked_at")
-    labels = {
-        "htf_filter": "сигнал против дневного тренда — заблокирован (HTF фильтр)",
-        "diversity": "недостаточно категориального разнообразия (нужно ≥3 категории)",
-        "below_threshold": f"score {result.get('score')} ниже порога журнала",
-        "wait_for_sweep": "ждём снятия ликвидности перед входом",
-    }
-    return "ℹ️ Нет активного сигнала: " + labels.get(stage, stage or "нет данных")
+    bias = result.get("htf_bias", "neutral")
+    long_s = result.get("long_score")
+    short_s = result.get("short_score")
+
+    lines = ["ℹ️ Нет активного сигнала"]
+    lines.append(f"Причина: {BLOCK_REASON.get(stage, stage or 'нет данных')}")
+
+    price = result.get("price")
+    if price is not None:
+        lines.append(f"Цена: {_fmt_price(price)}")
+
+    lines.append(f"HTF (1D): {HTF_LINE.get(bias, bias)}")
+
+    if long_s is not None and short_s is not None:
+        lines.append(f"Score: лонг {long_s} / шорт {short_s}")
+
+    lines.append("")
+    lines.append(BLOCK_HINT.get(bias, "Жду более сильного сетапа."))
+    return "\n".join(lines)

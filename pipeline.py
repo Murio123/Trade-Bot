@@ -160,21 +160,28 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     else:
         direction, total, scores, reasons = "short", short_total, short_scores, short_reasons
 
+    # Common diagnostic fields attached to every blocked result.
+    diag = {
+        "htf_bias": htf_bias,
+        "long_score": long_total,
+        "short_score": short_total,
+        "price": ctx["price"],
+    }
+
     # Level 1 (blocking): drop counter-trend signals.
     allowed = filter_by_htf(direction, htf_bias)
     if allowed is None:
-        return _blocked("htf_filter", direction=direction, htf_bias=htf_bias,
-                        score=total)
+        return _blocked("htf_filter", direction=direction, score=total, **diag)
 
     # Level 3 (blocking): categorical diversity.
     if not has_diverse_confirmation(scores, config.MIN_DIVERSE_CATEGORIES):
         return _blocked("diversity", direction=direction, score=total,
-                        category_scores=scores, reasons=reasons, htf_bias=htf_bias)
+                        category_scores=scores, reasons=reasons, **diag)
 
     # Below journal threshold -> ignored entirely.
     if total < config.SCORE_JOURNAL_MIN:
         return _blocked("below_threshold", direction=direction, score=total,
-                        category_scores=scores, reasons=reasons, htf_bias=htf_bias)
+                        category_scores=scores, reasons=reasons, **diag)
 
     # Level 4: conflict resolution.
     ob_dir = "bullish" if ctx["order_blocks"].get("bullish_ob") else (
@@ -186,7 +193,7 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     })
     if resolved == "wait_for_sweep":
         return _blocked("wait_for_sweep", direction=direction, score=total,
-                        category_scores=scores, reasons=reasons, htf_bias=htf_bias)
+                        category_scores=scores, reasons=reasons, **diag)
 
     # Level 5: multi-timeframe confidence modifier.
     t1h = trend_label(ctx["ind_1h"])
