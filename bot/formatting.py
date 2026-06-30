@@ -215,7 +215,54 @@ def format_reversal(ctx: dict[str, Any]) -> str:
     lines.append("")
     lines.append("⚠️ Развороты — это фейд движения: ниже винрейт, выше R:R. "
                  "Лучше брать в сторону старшего тренда.")
+    lines.append("")
+    lines += _reversal_conclusion(ctx, price)
     return "\n".join(lines)
+
+
+def _reversal_conclusion(ctx: dict[str, Any], price: float | None) -> list[str]:
+    if not price:
+        return []
+    mtf = ctx.get("reversal_mtf", {})
+    inds = ctx.get("inds_by_tf", {})
+    ema200_1d = inds.get("1d", {}).get("ema200")
+    trend = ("бычий" if price > ema200_1d else "медвежий") if ema200_1d else None
+    support, resistance = _nearest_sr(ctx, price)
+
+    out = ["📌 Вывод:"]
+    if mtf.get("combined_bullish"):
+        n = len(mtf.get("bull_tfs", []))
+        if trend == "бычий":
+            out.append(f"🟢 Дно подтверждено на {n} ТФ ПО тренду вверх — покупка отката, "
+                       "надёжный сетап.")
+        elif trend == "медвежий":
+            out.append(f"🟡 Дно на {n} ТФ, но ПРОТИВ тренда вниз — отскок/ловля ножа. "
+                       "Рискованно, малым объёмом и быстрой фиксацией.")
+        else:
+            out.append(f"🟢 Дно подтверждено на {n} ТФ.")
+        if support and resistance:
+            out.append(f"План лонга: вход у {_fmt_price(support)}, стоп ниже, "
+                       f"цель {_fmt_price(resistance)} (+{(resistance - price) / price * 100:.1f}%).")
+    elif mtf.get("combined_bearish"):
+        n = len(mtf.get("bear_tfs", []))
+        if trend == "медвежий":
+            out.append(f"🔴 Пик подтверждён на {n} ТФ ПО тренду вниз — шорт отскока, "
+                       "надёжный сетап.")
+        elif trend == "бычий":
+            out.append(f"🟡 Пик на {n} ТФ, но ПРОТИВ тренда вверх — лишь коррекция. "
+                       "Шорт рискован, малым объёмом.")
+        else:
+            out.append(f"🔴 Пик подтверждён на {n} ТФ.")
+        if support and resistance:
+            out.append(f"План шорта: вход у {_fmt_price(resistance)}, стоп выше, "
+                       f"цель {_fmt_price(support)} (−{(price - support) / price * 100:.1f}%).")
+    else:
+        trend_str = f" Глобальный тренд {trend}." if trend else ""
+        out.append("⚪ Подтверждённого разворота нет — сделки нет." + trend_str)
+        if support and resistance:
+            out.append(f"Слежу за реакцией у {_fmt_price(support)} / {_fmt_price(resistance)}. "
+                       "Алерт придёт при подтверждении на ≥2 ТФ.")
+    return out
 
 
 def _tf_factors(per_tf: dict, tfs: list, key: str) -> list[str]:
