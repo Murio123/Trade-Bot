@@ -42,6 +42,17 @@ def calculate_confluence_score(data: dict[str, Any], direction: str) -> tuple[in
         scores["momentum"] += 2
         reasons.append("Медвежья дивергенция RSI/MACD")
 
+    # BBW: a squeeze (coiled volatility) breaking out in the trade direction.
+    if bull and data.get("bb_breakout_up"):
+        scores["momentum"] += 1
+        reasons.append("Пробой верхней полосы Боллинджера")
+    if not bull and data.get("bb_breakout_down"):
+        scores["momentum"] += 1
+        reasons.append("Пробой нижней полосы Боллинджера")
+    if data.get("bb_squeeze"):
+        scores["momentum"] += 1
+        reasons.append("Сжатие BBW — готовится импульс")
+
     # --- trend -----------------------------------------------------------
     if bull and data.get("ema_aligned_bullish"):
         scores["trend"] += 1
@@ -64,6 +75,14 @@ def calculate_confluence_score(data: dict[str, Any], direction: str) -> tuple[in
     if not bull and data.get("liquidity_swept_above") and data.get("reversal_candle"):
         scores["structure"] += 3
         reasons.append("Снятие ликвидности сверху + разворот")
+
+    # FVG: price reacting inside a live Fair Value Gap (imbalance).
+    if bull and data.get("price_in_bullish_fvg"):
+        scores["structure"] += 2
+        reasons.append("Цена в бычьем FVG (имбаланс)")
+    if not bull and data.get("price_in_bearish_fvg"):
+        scores["structure"] += 2
+        reasons.append("Цена в медвежьем FVG (имбаланс)")
 
     # --- volume ----------------------------------------------------------
     volume = data.get("volume")

@@ -16,6 +16,7 @@ import config
 from analyzer.binance import BinanceClient
 from analyzer.cvd import compute_cvd
 from analyzer.divergence import detect_divergence
+from analyzer.fvg import detect_fvg
 from analyzer.indicators import compute_indicators
 from analyzer.liquidation_map import get_liquidation_map, nearest_sweep_signal
 from analyzer.liquidity import detect_liquidity
@@ -87,9 +88,20 @@ async def gather_market_context(binance: BinanceClient,
     order_blocks = detect_order_blocks(df_signal)
     liquidity = detect_liquidity(df_signal, atr_value=atr_value)
     volume_profile = compute_volume_profile(df_signal)
+    fvg = detect_fvg(df_signal, atr_value=atr_value)
 
-    osc_series = ind_signal.get("_series", {}).get("rsi")
-    divergence = detect_divergence(df_signal, osc_series)
+    # Divergence on both RSI(14) and MACD; combine (either one counts).
+    series = ind_signal.get("_series", {})
+    div_rsi = detect_divergence(df_signal, series.get("rsi"))
+    div_macd = detect_divergence(df_signal, series.get("macd"))
+    divergence = {
+        "bullish_divergence": bool(div_rsi.get("bullish_divergence")
+                                   or div_macd.get("bullish_divergence")),
+        "bearish_divergence": bool(div_rsi.get("bearish_divergence")
+                                   or div_macd.get("bearish_divergence")),
+        "rsi": div_rsi,
+        "macd": div_macd,
+    }
 
     liq_map = await get_liquidation_map(
         ind_signal["price"], float(oi) if oi else 0.0,
@@ -118,6 +130,7 @@ async def gather_market_context(binance: BinanceClient,
         "order_blocks": order_blocks,
         "liquidity": liquidity,
         "volume_profile": volume_profile,
+        "fvg": fvg,
         "divergence": divergence,
         "liquidation_map": liq_map,
         "sweep_signal": sweep,
@@ -139,6 +152,8 @@ def _flatten_for_confluence(ctx: dict[str, Any]) -> dict[str, Any]:
         "liquidity_swept_below": ctx["liquidity"].get("liquidity_swept_below"),
         "liquidity_swept_above": ctx["liquidity"].get("liquidity_swept_above"),
         "reversal_candle": ctx["liquidity"].get("reversal_candle"),
+        "price_in_bullish_fvg": ctx.get("fvg", {}).get("price_in_bullish_fvg"),
+        "price_in_bearish_fvg": ctx.get("fvg", {}).get("price_in_bearish_fvg"),
         "cvd_bullish": ctx["cvd"].get("cvd_bullish"),
         "cvd_bearish": ctx["cvd"].get("cvd_bearish"),
         "funding": (ctx["funding"] or {}).get("current"),

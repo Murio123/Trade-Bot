@@ -124,7 +124,15 @@ def compute_indicators(df: pd.DataFrame) -> dict[str, Any]:
 
     bbw = out["bbw"]
     bbw_avg = out["bbw_avg"]
+    # BBW squeeze: bands compressed vs their own average -> volatility coiling.
     out["bb_squeeze"] = bool(bbw is not None and bbw_avg is not None and bbw < bbw_avg * 0.6)
+    # BBW expansion: bands wider than usual -> volatility releasing.
+    out["bb_expansion"] = bool(bbw is not None and bbw_avg is not None and bbw > bbw_avg * 1.3)
+    # Breakout of a Bollinger band (directional).
+    bb_upper = out["bb_upper"]
+    bb_lower = out["bb_lower"]
+    out["bb_breakout_up"] = bool(bb_upper is not None and price > bb_upper)
+    out["bb_breakout_down"] = bool(bb_lower is not None and price < bb_lower)
 
     # Attach full series for downstream modules (divergence etc).
     out["_series"] = {

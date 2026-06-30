@@ -100,6 +100,25 @@ def format_levels(ctx: dict[str, Any]) -> str:
     lines.append(f"  • POC: {_fmt_price(vp.get('poc'))}")
     lines.append(f"  • VAH: {_fmt_price(vp.get('vah'))}")
     lines.append(f"  • VAL: {_fmt_price(vp.get('val'))}")
+
+    fvg = ctx.get("fvg", {})
+    bull_fvg = fvg.get("bullish_fvg")
+    bear_fvg = fvg.get("bearish_fvg")
+    if bull_fvg or bear_fvg:
+        lines.append("")
+        lines.append("🧩 FVG (имбаланс):")
+        if bull_fvg:
+            lines.append(f"  • Бычий: {_fmt_price(bull_fvg['low'])}–{_fmt_price(bull_fvg['high'])}")
+        if bear_fvg:
+            lines.append(f"  • Медвежий: {_fmt_price(bear_fvg['low'])}–{_fmt_price(bear_fvg['high'])}")
+
+    ind = ctx.get("ind_signal", {})
+    bbw = ind.get("bbw")
+    if bbw is not None:
+        regime = "сжатие 🔸" if ind.get("bb_squeeze") else (
+            "расширение 🔶" if ind.get("bb_expansion") else "норма")
+        lines.append("")
+        lines.append(f"📏 BBW: {bbw:.4f} ({regime})")
     return "\n".join(lines)
 
 
