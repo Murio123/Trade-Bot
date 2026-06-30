@@ -51,7 +51,8 @@ def format_signal(signal: dict[str, Any]) -> str:
         f"🛑 Стоп-лосс: {_fmt_price(signal.get('stop_loss'))} "
         f"({signal.get('atr_multiplier_used', config.ATR_MULTIPLIER)}×ATR"
         f"{_stop_pct(signal)})",
-        f"🎯 Цель 1: {_fmt_price(signal.get('target_1'))}",
+        f"🎯 Цель 1: {_fmt_price(signal.get('target_1'))}"
+        f"{' (HTF-структура)' if signal.get('targets_structure') else ''}",
         f"🎯 Цель 2: {_fmt_price(signal.get('target_2'))}",
         f"💼 Размер позиции: {signal.get('position_size')} {config.SYMBOL_DISPLAY} "
         f"({signal.get('risk_percent', config.RISK_PERCENT)}% риска)",
@@ -240,11 +241,15 @@ def format_levels(ctx: dict[str, Any]) -> str:
 
     bull_ob = ob.get("bullish_ob")
     bear_ob = ob.get("bearish_ob")
-    lines.append("🧱 Order Blocks:")
+    zone_tfs = ctx.get("zone_tfs") or []
+    suffix = f" (зоны с {'/'.join(t.upper() for t in zone_tfs)})" if zone_tfs else ""
+    lines.append(f"🧱 Order Blocks{suffix}:")
     if bull_ob:
-        lines.append(f"  • Бычий OB: {_fmt_price(bull_ob['low'])}–{_fmt_price(bull_ob['high'])}")
+        tf = f" [{bull_ob.get('tf', '').upper()}]" if bull_ob.get("tf") else ""
+        lines.append(f"  • Бычий OB{tf}: {_fmt_price(bull_ob['low'])}–{_fmt_price(bull_ob['high'])}")
     if bear_ob:
-        lines.append(f"  • Медвежий OB: {_fmt_price(bear_ob['low'])}–{_fmt_price(bear_ob['high'])}")
+        tf = f" [{bear_ob.get('tf', '').upper()}]" if bear_ob.get("tf") else ""
+        lines.append(f"  • Медвежий OB{tf}: {_fmt_price(bear_ob['low'])}–{_fmt_price(bear_ob['high'])}")
     if not bull_ob and not bear_ob:
         lines.append("  • активных OB не найдено")
 

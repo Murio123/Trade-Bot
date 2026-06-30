@@ -88,12 +88,18 @@ async def gather_market_context(binance: BinanceClient,
     # exchange provides it, otherwise an OHLCV-based estimate).
     cvd = compute_cvd_from_klines(df_signal)
 
-    # Structural analyzers on the signal timeframe.
+    # Zones (Order Blocks / FVG / targets) from higher timeframes; the entry
+    # timeframe supplies the liquidity sweep and the rejection-wick trigger.
     atr_value = ind_signal.get("atr") or 0.0
-    order_blocks = detect_order_blocks(df_signal)
+    zone_tfs = [t for t in (profile.get("zone_tfs") or [signal_timeframe]) if t in dfs]
+    if not zone_tfs:
+        zone_tfs = [signal_timeframe]
+    zones = _build_htf_zones(dfs, inds, zone_tfs, ind_signal["price"], df_signal)
+    order_blocks = zones["order_blocks"]
+    fvg = zones["fvg"]
+    htf_levels = zones["levels"]
     liquidity = detect_liquidity(df_signal, atr_value=atr_value)
-    volume_profile = compute_volume_profile(df_signal)
-    fvg = detect_fvg(df_signal, atr_value=atr_value)
+    volume_profile = compute_volume_profile(dfs.get(zone_tfs[0], df_signal))
     reversal = detect_reversal(df_signal, ind_signal, cvd_series(df_signal))
     # Multi-timeframe reversal read across 1H / 4H / 12H / 1D.
     reversal_mtf = _reversal_mtf(dfs, inds)
@@ -142,6 +148,8 @@ async def gather_market_context(binance: BinanceClient,
         "liquidity": liquidity,
         "volume_profile": volume_profile,
         "fvg": fvg,
+        "htf_levels": htf_levels,
+        "zone_tfs": zone_tfs,
         "reversal": reversal,
         "reversal_mtf": reversal_mtf,
         "divergence": divergence,
@@ -150,6 +158,117 @@ async def gather_market_context(binance: BinanceClient,
         "sessions": sessions,
     }
     return context
+
+
+def _entry_rejection(df) -> bool:
+    """Significant rejection wick on the current (entry-timeframe) candle."""
+    if df is None or len(df) == 0:
+        return False
+    last = df.iloc[-1]
+    o, h, l, c = float(last["open"]), float(last["high"]), float(last["low"]), float(last["close"])
+    rng = max(h - l, 1e-9)
+    lower = min(o, c) - l
+    upper = h - max(o, c)
+    return (lower / rng > 0.4) or (upper / rng > 0.4)
+
+
+def _build_htf_zones(dfs: dict[str, Any], inds: dict[str, Any], zone_tfs: list[str],
+                     price: float, entry_df) -> dict[str, Any]:
+    """Detect Order Blocks / FVG and key levels on higher timeframes.
+
+    Zones come from the HTF set (e.g. 12H+4H); the entry timeframe only
+    supplies the rejection wick that confirms a reaction inside an HTF zone.
+    """
+    ob = {"bullish_ob": None, "bearish_ob": None, "price_in_bullish_ob": False,
+          "price_in_bearish_ob": False, "rejection_wick": _entry_rejection(entry_df),
+          "blocks": [], "zone_tfs": zone_tfs}
+    fvg = {"bullish_fvg": None, "bearish_fvg": None, "price_in_bullish_fvg": False,
+           "price_in_bearish_fvg": False, "fvgs": []}
+    highs: list[float] = []
+    lows: list[float] = []
+
+    for tf in zone_tfs:
+        df = dfs.get(tf)
+        if df is None:
+            continue
+        atr = inds.get(tf, {}).get("atr")
+        ob_z = detect_order_blocks(df)
+        for blk in ob_z.get("blocks", []):
+            tagged = {**blk, "tf": tf}
+            ob["blocks"].append(tagged)
+            if blk["low"] <= price <= blk["high"]:
+                if blk["type"] == "bullish":
+                    ob["price_in_bullish_ob"] = True
+                    ob["bullish_ob"] = ob["bullish_ob"] or tagged
+                else:
+                    ob["price_in_bearish_ob"] = True
+                    ob["bearish_ob"] = ob["bearish_ob"] or tagged
+        if ob_z.get("bullish_ob") and not ob["bullish_ob"]:
+            ob["bullish_ob"] = {**ob_z["bullish_ob"], "tf": tf}
+        if ob_z.get("bearish_ob") and not ob["bearish_ob"]:
+            ob["bearish_ob"] = {**ob_z["bearish_ob"], "tf": tf}
+
+        fvg_z = detect_fvg(df, atr_value=atr)
+        for z in fvg_z.get("fvgs", []):
+            tagged = {**z, "tf": tf}
+            fvg["fvgs"].append(tagged)
+            if z["low"] <= price <= z["high"]:
+                if z["type"] == "bullish":
+                    fvg["price_in_bullish_fvg"] = True
+                    fvg["bullish_fvg"] = fvg["bullish_fvg"] or tagged
+                else:
+                    fvg["price_in_bearish_fvg"] = True
+                    fvg["bearish_fvg"] = fvg["bearish_fvg"] or tagged
+        if fvg_z.get("bullish_fvg") and not fvg["bullish_fvg"]:
+            fvg["bullish_fvg"] = {**fvg_z["bullish_fvg"], "tf": tf}
+        if fvg_z.get("bearish_fvg") and not fvg["bearish_fvg"]:
+            fvg["bearish_fvg"] = {**fvg_z["bearish_fvg"], "tf": tf}
+
+        # Key levels for HTF targets: equal highs/lows + recent extremes.
+        liq_z = detect_liquidity(df, atr_value=atr)
+        highs += liq_z.get("equal_highs", [])
+        lows += liq_z.get("equal_lows", [])
+        recent = df.iloc[-60:]
+        highs.append(float(recent["high"].max()))
+        lows.append(float(recent["low"].min()))
+
+    levels = {
+        "highs": sorted({round(h, 2) for h in highs}),
+        "lows": sorted({round(l, 2) for l in lows}),
+    }
+    return {"order_blocks": ob, "fvg": fvg, "levels": levels}
+
+
+def _structure_targets(ctx: dict[str, Any], direction: str, entry: float, risk: float,
+                       fb1: float, fb2: float) -> tuple[float, float, bool]:
+    """Targets at the nearest HTF liquidity / volume nodes, else ATR fallback."""
+    levels = ctx.get("htf_levels", {})
+    vp = ctx.get("volume_profile", {})
+    pts: list[float] = []
+    if direction == "long":
+        pts += [x for x in levels.get("highs", []) if x > entry]
+        for k in ("vah", "poc"):
+            v = vp.get(k)
+            if v and v > entry:
+                pts.append(v)
+        pts = sorted({round(p, 2) for p in pts})
+    else:
+        pts += [x for x in levels.get("lows", []) if x < entry]
+        for k in ("val", "poc"):
+            v = vp.get(k)
+            if v and v < entry:
+                pts.append(v)
+        pts = sorted({round(p, 2) for p in pts}, reverse=True)
+
+    pts = [p for p in pts if abs(p - entry) >= risk]  # at least 1R away
+    if not pts:
+        return fb1, fb2, False
+    tp1 = pts[0]
+    if len(pts) > 1:
+        tp2 = pts[1]
+    else:
+        tp2 = round(entry + risk * 3 * (1 if direction == "long" else -1), 2)
+    return tp1, tp2, True
 
 
 REVERSAL_TFS = ["1h", "4h", "12h", "1d"]
@@ -363,6 +482,13 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
                                   atr_multiplier=profile["atr_mult"],
                                   targets_r=profile["targets"])
 
+    # Targets at HTF structure (nearest liquidity / volume nodes) when available,
+    # otherwise the ATR-based R-multiples.
+    risk = abs(ctx["price"] - position["stop_loss"])
+    tp1, tp2, struct_targets = _structure_targets(
+        ctx, direction, ctx["price"], risk, position["target_1"], position["target_2"])
+    position["target_1"], position["target_2"] = tp1, tp2
+
     # Expected holding time to TP1 / TP2 from ATR-based drift on this timeframe.
     hold = estimate_holding(ctx["price"], position["target_1"],
                             position["target_2"], atr_value, ctx["timeframe"])
@@ -378,6 +504,7 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         "target_2": position["target_2"],
         "hold_tp1_hours": hold[0],
         "hold_tp2_hours": hold[1],
+        "targets_structure": struct_targets,
         "position_size": position["position_size"],
         "risk_amount": position["risk_amount"],
         "atr": atr_value,

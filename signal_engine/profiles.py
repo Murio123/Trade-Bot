@@ -15,6 +15,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "entry": "1h",
         "htf": "1d",
         "mtf": ["1h", "4h", "12h", "1d"],  # 1H entry / 4H+12H zones / 1D trend
+        "zone_tfs": ["12h", "4h"],          # OB/FVG/targets from higher timeframes
         "cooldown_hours": 8,
         "atr_mult": 1.5,
         "targets": (1.5, 3.0),
@@ -26,6 +27,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "entry": "15m",
         "htf": "1h",
         "mtf": ["15m", "1h", "4h"],  # 15m entry / 1H trend / 4H context
+        "zone_tfs": ["4h", "1h"],     # OB/FVG/targets from higher timeframes
         "cooldown_hours": 2,
         "atr_mult": 1.2,
         "targets": (1.0, 2.0),
