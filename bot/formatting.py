@@ -550,6 +550,22 @@ def format_blocked(result: dict[str, Any]) -> str:
     if long_s is not None and short_s is not None:
         lines.append(f"Score: лонг {long_s} / шорт {short_s}")
 
+    # Show which categories are active so it's clear what's missing.
+    cats = result.get("category_scores") or {}
+    active = {k: v for k, v in cats.items() if v > 0}
+    if active:
+        lines.append("Категории: " + ", ".join(
+            f"{CATEGORY_LABEL.get(k, k)} {v}" for k, v in active.items()))
+        if stage == "diversity":
+            from config import MIN_DIVERSE_CATEGORIES
+            lines.append(f"Сейчас {len(active)} категория(и), нужно ≥{MIN_DIVERSE_CATEGORIES} разных.")
+
     lines.append("")
     lines.append(BLOCK_HINT.get(bias, "Жду более сильного сетапа."))
     return "\n".join(lines)
+
+
+CATEGORY_LABEL = {
+    "trend": "Тренд", "momentum": "Импульс", "volume": "Объём",
+    "structure": "Структура", "macro": "Макро",
+}
