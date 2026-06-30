@@ -223,10 +223,10 @@ def format_deep(quality: dict[str, Any], ctx: dict[str, Any], ai_text: str) -> s
         f"{DECISION_EMOJI.get(decision, '')} Решение: {decision}",
         f"📊 Trade Quality Score: {overall}/100",
         "",
-        "Разбивка (0-10):",
+        "Разбивка (взвешенная):",
     ]
-    for key in scores:
-        lines.append(f"• {SECTION_LABEL.get(key, key)}: {scores[key]}")
+    for item in quality.get("breakdown", []):
+        lines.append(f"• {item['label']}: {item['earned']}/{item['max']}")
 
     if direction and decision != "NO TRADE":
         lines += [
@@ -240,22 +240,40 @@ def format_deep(quality: dict[str, Any], ctx: dict[str, Any], ai_text: str) -> s
             f"R:R ≈ {plan.get('rr')} | макс. просадка {plan.get('max_drawdown_pct')}%",
         ]
 
+    # For NO TRADE the full plan is hidden — still show the hypothetical R:R.
+    if decision == "NO TRADE" and direction and plan.get("rr") is not None:
+        lines += [
+            "",
+            f"ℹ️ Если бы вход ({'ЛОНГ' if direction == 'long' else 'ШОРТ'}): "
+            f"стоп {_fmt_price(plan.get('stop'))}, R:R ≈ {plan.get('rr')}",
+        ]
+
     em = (vol.get("expected_move") or {}).get("7d", {})
     lines += [
         "",
-        f"📈 Волатильность: {vol.get('regime')} (ATR {vol.get('atr_percentile')}‰)",
+        f"📈 Волатильность: {vol.get('regime')}, ATR-перцентиль {vol.get('atr_percentile')}%",
         f"Ожидаемое движение 7д: ±{em.get('pct')}%" if em else "",
-        f"🕰 Аналоги: {hist.get('matches', 0)} | бычьих {hist.get('bullish_pct')}% | "
+        f"🕰 Аналоги: {hist.get('matches', 0)} | "
+        f"в сторону сделки {_hist_dir_pct(hist, direction)}% | "
         f"ср. {hist.get('avg_return')}% | conf {hist.get('confidence')}",
     ]
 
     if ai_text:
         lines += ["", "— — —", ai_text]
 
-    if decision == "NO TRADE":
+    if decision.startswith("WEAK"):
+        lines += ["", "⚠️ Слабый сетап — рассматривать осторожно, уменьшенным объёмом."]
+    elif decision == "NO TRADE":
         lines += ["", "💡 Кэш — тоже позиция. Сделка не форсируется."]
 
     return "\n".join(lines)
+
+
+def _hist_dir_pct(hist: dict[str, Any], direction: str | None) -> Any:
+    bp = hist.get("bullish_pct")
+    if bp is None:
+        return "н/д"
+    return round(bp if direction == "long" else 100 - bp, 1)
 
 
 def _ago(dt) -> str:

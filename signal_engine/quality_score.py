@@ -1,17 +1,34 @@
-"""Deterministic Trade Quality Score (/100) for the advanced swing module.
+"""Weighted Trade Quality Score (/100) for the advanced swing module.
 
-Scores ten sections 0-10 from the gathered swing context (real data only — no
-LLM), derives a direction, structure-based stop/targets and R:R, and maps the
-total to a final decision. Below 85 -> NO TRADE (never force a trade).
+Scoring follows the user's institutional weighting (trend-heavy, structure and
+history matter, oscillators are confirmation) rather than equal-weight sections,
+so a strong directional setup is not killed by a single weak section. Direction
+comes from the 1D bias; the score expresses conviction in that direction.
+
+Decision tiers:
+    >= 88  STRONG BUY/SELL
+    >= 75  BUY/SELL
+    >= 62  WEAK BUY/SELL  (consider, with caution)
+    <  62  NO TRADE       (cash is a position)
 """
 from __future__ import annotations
 
 from typing import Any
 
-SECTIONS = [
-    "trend_alignment", "market_structure", "liquidity", "volume", "momentum",
-    "derivatives", "macro", "historical", "risk_profile", "execution",
+# (key, label, max points) — weights sum to 100.
+FACTORS = [
+    ("trend", "Тренд 1D", 20),
+    ("structure", "Структура/OB", 15),
+    ("fvg", "FVG", 8),
+    ("rsi", "RSI", 8),
+    ("macd", "MACD", 8),
+    ("tsi", "TSI", 8),
+    ("volume", "Объём/CVD", 8),
+    ("derivatives", "Деривативы", 12),
+    ("correlation", "Корреляции", 5),
+    ("historical", "История", 8),
 ]
+MAXES = {k: m for k, _, m in FACTORS}
 
 
 def _bias(ind: dict[str, Any]) -> str:
@@ -27,7 +44,7 @@ def _bias(ind: dict[str, Any]) -> str:
 
 def compute_quality_score(ctx: dict[str, Any]) -> dict[str, Any]:
     ind_1d = ctx["ind_1d"]
-    ind_12h = ctx["ind_12h"]
+    ind_12h = ctx.get("ind_12h", ctx.get("ind_4h", {}))
     ind_4h = ctx["ind_4h"]
     price = ctx["price"]
     atr = ctx.get("atr") or (price * 0.01)
@@ -35,165 +52,135 @@ def compute_quality_score(ctx: dict[str, Any]) -> dict[str, Any]:
     bias_1d = _bias(ind_1d)
     direction = "long" if bias_1d == "bullish" else "short" if bias_1d == "bearish" else None
     bull = direction == "long"
+    want = "bullish" if bull else "bearish"
 
-    scores: dict[str, int] = {s: 0 for s in SECTIONS}
+    scores: dict[str, float] = {k: 0 for k, _, _ in FACTORS}
     notes: dict[str, str] = {}
 
-    # 1. Trend alignment across 1D / 12H / 4H.
-    biases = [bias_1d, _bias(ind_12h), _bias(ind_4h)]
-    want = "bullish" if bull else "bearish"
-    agree = sum(1 for b in biases if b == want)
-    struct_1d = ctx.get("structure_1d", {})
-    s = agree * 3  # 0,3,6,9
-    if struct_1d.get("trend") == want:
-        s += 1
-    scores["trend_alignment"] = min(s, 10)
-    notes["trend_alignment"] = f"1D/12H/4H совпадают: {agree}/3; структура 1D: {struct_1d.get('sequence')}"
+    if direction is None:
+        # No tradable bias -> everything zero, NO TRADE.
+        plan = {"rr": None}
+        return {"direction": None, "scores": scores, "maxes": MAXES, "notes": notes,
+                "breakdown": _breakdown(scores), "overall": 0, "decision": "NO TRADE",
+                "plan": plan, "htf_bias": bias_1d}
 
-    # 2. Market structure (BOS/CHoCH + clean sequence + OB on 12H).
-    st12 = ctx.get("structure_12h", {})
+    st_1d = ctx.get("structure_1d", {})
+    st_12h = ctx.get("structure_12h", {})
     ob = ctx.get("order_blocks", {})
-    s = 0
-    ev = st12.get("last_event") or ""
-    if (bull and ev == "BOS_up") or (not bull and ev == "BOS_down"):
-        s += 5
-    elif (bull and ev == "CHoCH_up") or (not bull and ev == "CHoCH_down"):
-        s += 3
-    if st12.get("trend") == want:
-        s += 2
-    if (bull and ob.get("bullish_ob")) or (not bull and ob.get("bearish_ob")):
-        s += 3
-    scores["market_structure"] = min(s, 10)
-    notes["market_structure"] = f"12H event: {ev or '—'}, OB: {'да' if (ob.get('bullish_ob') or ob.get('bearish_ob')) else 'нет'}"
+    fvg = ctx.get("fvg", {})
 
-    # 3. Liquidity (sweep + pools).
-    liq = ctx.get("liquidity", {})
-    s = 0
-    if (bull and liq.get("liquidity_swept_below")) or (not bull and liq.get("liquidity_swept_above")):
-        s += 5
-    if liq.get("reversal_candle"):
-        s += 2
-    if liq.get("equal_highs") or liq.get("equal_lows"):
-        s += 3
-    scores["liquidity"] = min(s, 10)
-    notes["liquidity"] = f"свип: {'да' if s >= 5 else 'нет'}"
+    # 1. Trend (20): 1D EMA bias + structure sequence + 12H agreement.
+    t = 0
+    if _bias(ind_1d) == want:
+        t += 10
+    if st_1d.get("trend") == want:
+        t += 6
+    if _bias(ind_12h) == want or st_12h.get("trend") == want:
+        t += 4
+    scores["trend"] = min(t, 20)
+    notes["trend"] = f"1D {bias_1d}, структура {st_1d.get('sequence')}"
 
-    # 4. Volume (vs average + CVD direction).
+    # 2. Structure / Order Block (15): BOS in direction + OB presence/reaction.
     s = 0
-    vol, avg = ind_4h.get("volume"), ind_4h.get("avg_volume")
-    if vol and avg and vol > avg * 1.5:
+    ev1, ev12 = st_1d.get("last_event") or "", st_12h.get("last_event") or ""
+    if (bull and "BOS_up" in (ev1, ev12)) or (not bull and "BOS_down" in (ev1, ev12)):
+        s += 7
+    elif (bull and "CHoCH_up" in (ev1, ev12)) or (not bull and "CHoCH_down" in (ev1, ev12)):
+        s += 4
+    has_ob = ob.get("bullish_ob") if bull else ob.get("bearish_ob")
+    if has_ob:
         s += 5
-    elif vol and avg and vol > avg:
+    in_ob = ob.get("price_in_bullish_ob") if bull else ob.get("price_in_bearish_ob")
+    if in_ob:
         s += 3
-    cvd = ctx.get("cvd", {})
-    if (bull and cvd.get("cvd_bullish")) or (not bull and cvd.get("cvd_bearish")):
-        s += 5
-    scores["volume"] = min(s, 10)
-    notes["volume"] = f"объём>{'1.5x' if (vol and avg and vol>avg*1.5) else 'avg' if (vol and avg and vol>avg) else 'norm'}; CVD {cvd.get('method')}"
+    scores["structure"] = min(s, 15)
+    notes["structure"] = f"event {ev1 or ev12 or '—'}, OB {'есть' if has_ob else 'нет'}"
 
-    # 5. Momentum on 4H (RSI/MACD/TSI/BBW).
-    s = 0
+    # 3. FVG (8).
+    in_fvg = fvg.get("price_in_bullish_fvg") if bull else fvg.get("price_in_bearish_fvg")
+    has_fvg = fvg.get("bullish_fvg") if bull else fvg.get("bearish_fvg")
+    scores["fvg"] = 8 if in_fvg else (3 if has_fvg else 0)
+
+    # 4-6. Oscillators on 4H (confirmation).
     rsi = ind_4h.get("rsi")
     if rsi is not None:
-        if bull and 40 <= rsi <= 70:
-            s += 2
-        if not bull and 30 <= rsi <= 60:
-            s += 2
-    if (bull and ind_4h.get("macd_bullish_cross")) or (not bull and ind_4h.get("macd_bearish_cross")):
-        s += 3
-    if (bull and ind_4h.get("tsi_bullish")) or (not bull and ind_4h.get("tsi_bearish")):
-        s += 3
-    if ind_4h.get("bb_squeeze") or (bull and ind_4h.get("bb_breakout_up")) or (not bull and ind_4h.get("bb_breakout_down")):
-        s += 2
-    scores["momentum"] = min(s, 10)
-    notes["momentum"] = f"RSI {round(rsi,1) if rsi else '—'}, TSI {'+' if ind_4h.get('tsi_bullish') else '-'}"
+        if bull:
+            scores["rsi"] = 8 if 40 <= rsi <= 65 else 6 if rsi < 40 else 2
+        else:
+            scores["rsi"] = 8 if 35 <= rsi <= 60 else 6 if rsi > 60 else 2
+    scores["macd"] = 8 if ((bull and ind_4h.get("macd_bullish_cross")) or
+                           (not bull and ind_4h.get("macd_bearish_cross"))) else (
+        5 if ((bull and (ind_4h.get("macd_hist") or 0) > 0) or
+              (not bull and (ind_4h.get("macd_hist") or 0) < 0)) else 0)
+    scores["tsi"] = 8 if ((bull and ind_4h.get("tsi_bullish")) or
+                          (not bull and ind_4h.get("tsi_bearish"))) else 0
 
-    # 6. Derivatives (funding sane, OI rising, L/S not extreme).
-    s = 5
+    # 7. Volume / CVD (8).
+    v = 0
+    vol, avg = ind_4h.get("volume"), ind_4h.get("avg_volume")
+    if vol and avg and vol > avg * 1.5:
+        v += 4
+    elif vol and avg and vol > avg:
+        v += 2
+    cvd = ctx.get("cvd", {})
+    if (bull and cvd.get("cvd_bullish")) or (not bull and cvd.get("cvd_bearish")):
+        v += 4
+    scores["volume"] = min(v, 8)
+
+    # 8. Derivatives (12): OI rising, funding not extreme/contrarian, crowd fuel.
+    d = 6
     funding = (ctx.get("funding") or {}).get("current")
     if funding is not None:
-        if abs(funding) > 0.0005:  # extreme funding -> crowded
-            s -= 3
+        if abs(funding) > 0.0005:
+            d -= 3
         if (bull and funding < 0) or (not bull and funding > 0):
-            s += 2  # contrarian funding supports the trade
-    oi_rising = ctx.get("oi_rising")
-    if oi_rising:
-        s += 2
+            d += 3
+    if ctx.get("oi_rising"):
+        d += 3
     lsr = (ctx.get("long_short_ratio") or {}).get("ratio")
-    if lsr is not None and (lsr > 2.0 or lsr < 0.5):
-        s -= 1  # crowded positioning
-    scores["derivatives"] = max(0, min(s, 10))
-    notes["derivatives"] = f"funding {funding}, OI {'рост' if oi_rising else 'плоско'}, L/S {lsr}"
+    if lsr is not None:
+        # Crowded opposite side = liquidation fuel in our direction.
+        if (bull and lsr < 0.8) or (not bull and lsr > 1.5):
+            d += 2
+        elif (bull and lsr > 2.0) or (not bull and lsr < 0.5):
+            d -= 1
+    scores["derivatives"] = max(0, min(d, 12))
+    notes["derivatives"] = f"funding {funding}, OI {'рост' if ctx.get('oi_rising') else 'плоско'}, L/S {lsr}"
 
-    # 7. Macro / correlation.
-    corr = ctx.get("correlation", {})
-    verdict = corr.get("verdict", "neutral")
-    if verdict == want:
-        scores["macro"] = 8
-    elif verdict == "neutral":
-        scores["macro"] = 5
-    else:
-        scores["macro"] = 2
-    notes["macro"] = f"корреляции: {verdict} ({corr.get('supportive')}/{corr.get('counted')})"
+    # 9. Correlation (5).
+    verdict = (ctx.get("correlation") or {}).get("verdict", "neutral")
+    scores["correlation"] = 5 if verdict == want else 2 if verdict == "neutral" else 0
 
-    # 8. Historical similarity skew.
+    # 10. Historical alignment (8).
     hist = ctx.get("historical", {})
-    bull_pct = hist.get("bullish_pct")
-    conf = hist.get("confidence") or 0
-    if bull_pct is not None:
-        skew = bull_pct if bull else (100 - bull_pct)
-        s = (skew / 100) * 7 + (conf / 100) * 3
-        scores["historical"] = int(round(min(s, 10)))
+    bp, conf = hist.get("bullish_pct"), hist.get("confidence") or 0
+    if bp is not None:
+        skew = bp if bull else (100 - bp)
+        scores["historical"] = round(skew / 100 * 5 + conf / 100 * 3, 1)
         notes["historical"] = f"{hist.get('matches')} аналогов, {skew:.0f}% в сторону сделки, conf {conf}"
-    else:
-        scores["historical"] = 0
-        notes["historical"] = "недостаточно истории"
 
-    # 9 & 10 need a structure-based stop/target.
     plan = _build_plan(ctx, direction, atr, price)
+    if plan.get("rr") is not None:
+        notes["plan"] = f"R:R ≈ {plan['rr']}"
 
-    rr = plan.get("rr")
-    if rr is None:
-        scores["risk_profile"] = 0
-    elif rr >= 4:
-        scores["risk_profile"] = 10
-    elif rr >= 3:
-        scores["risk_profile"] = 8
-    elif rr >= 2:
-        scores["risk_profile"] = 5
-    else:
-        scores["risk_profile"] = 2
-    notes["risk_profile"] = f"R:R ≈ {rr}"
-
-    # 10. Execution quality: price inside a 12H zone of interest.
-    fvg = ctx.get("fvg", {})
-    in_zone = (
-        (bull and (ob.get("price_in_bullish_ob") or fvg.get("price_in_bullish_fvg")))
-        or (not bull and (ob.get("price_in_bearish_ob") or fvg.get("price_in_bearish_fvg")))
-    )
-    vp = ctx.get("volume_profile", {})
-    poc = vp.get("poc")
-    mid_range = bool(poc and abs(price - poc) / price < 0.005)
-    s = 0
-    if in_zone:
-        s += 7
-    if not mid_range:
-        s += 3
-    scores["execution"] = min(s, 10)
-    notes["execution"] = f"в зоне интереса: {'да' if in_zone else 'нет'}"
-
-    overall = sum(scores.values()) if direction else 0
-
+    overall = round(sum(scores.values()))
     decision = _decide(overall, direction)
     return {
         "direction": direction,
         "scores": scores,
+        "maxes": MAXES,
+        "breakdown": _breakdown(scores),
         "notes": notes,
         "overall": overall,
         "decision": decision,
         "plan": plan,
         "htf_bias": bias_1d,
     }
+
+
+def _breakdown(scores: dict[str, float]) -> list[dict[str, Any]]:
+    return [{"key": k, "label": label, "earned": round(scores.get(k, 0), 1), "max": m}
+            for k, label, m in FACTORS]
 
 
 def _build_plan(ctx: dict[str, Any], direction: str | None, atr: float, price: float) -> dict[str, Any]:
@@ -215,33 +202,30 @@ def _build_plan(ctx: dict[str, Any], direction: str | None, atr: float, price: f
         risk = max(stop - price, atr * 0.5)
         target_struct = st12.get("last_swing_low")
 
-    tp1 = price + risk * 1.5 * (1 if bull else -1)
-    tp2 = price + risk * 3.0 * (1 if bull else -1)
-    tp3 = price + risk * 5.0 * (1 if bull else -1)
+    sign = 1 if bull else -1
+    tp1 = price + risk * 1.5 * sign
+    tp2 = price + risk * 3.0 * sign
+    tp3 = price + risk * 5.0 * sign
 
-    # Use the structural target only if it sits in the trade's direction;
-    # otherwise fall back to the synthetic 3R (TP2) target.
     valid_struct = target_struct and (
         (bull and target_struct > price) or (not bull and target_struct < price))
-    if valid_struct:
-        rr = abs(target_struct - price) / risk
-    else:
-        rr = 3.0
+    rr = abs(target_struct - price) / risk if valid_struct else 3.0
     return {
-        "entry": round(price, 2),
-        "stop": round(stop, 2),
-        "tp1": round(tp1, 2),
-        "tp2": round(tp2, 2),
-        "tp3": round(tp3, 2),
-        "risk": round(risk, 2),
-        "rr": round(rr, 2),
+        "entry": round(price, 2), "stop": round(stop, 2),
+        "tp1": round(tp1, 2), "tp2": round(tp2, 2), "tp3": round(tp3, 2),
+        "risk": round(risk, 2), "rr": round(rr, 2),
         "max_drawdown_pct": round(risk / price * 100, 2),
     }
 
 
 def _decide(overall: int, direction: str | None) -> str:
-    if direction is None or overall < 85:
+    if direction is None:
         return "NO TRADE"
-    if direction == "long":
-        return "STRONG BUY" if overall >= 92 else "BUY"
-    return "STRONG SELL" if overall >= 92 else "SELL"
+    side = "BUY" if direction == "long" else "SELL"
+    if overall >= 88:
+        return f"STRONG {side}"
+    if overall >= 75:
+        return side
+    if overall >= 62:
+        return f"WEAK {side}"
+    return "NO TRADE"

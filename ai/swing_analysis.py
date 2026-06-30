@@ -32,6 +32,16 @@ SYSTEM = (
 )
 
 
+def _struct(s: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Clarify that a missing structure event means 'range', not missing data."""
+    if not s:
+        return s
+    out = dict(s)
+    if out.get("last_event") is None:
+        out["last_event"] = "нет слома структуры (диапазон)"
+    return out
+
+
 def _payload(ctx: dict[str, Any], quality: dict[str, Any]) -> dict[str, Any]:
     return {
         "price": ctx.get("price"),
@@ -43,9 +53,9 @@ def _payload(ctx: dict[str, Any], quality: dict[str, Any]) -> dict[str, Any]:
         "section_notes": quality.get("notes"),
         "plan": quality.get("plan"),
         "structure": {
-            "1d": ctx.get("structure_1d"),
-            "12h": ctx.get("structure_12h"),
-            "4h": ctx.get("structure_4h"),
+            "1d": _struct(ctx.get("structure_1d")),
+            "12h": _struct(ctx.get("structure_12h")),
+            "4h": _struct(ctx.get("structure_4h")),
         },
         "derivatives": {
             "funding": (ctx.get("funding") or {}).get("current"),
