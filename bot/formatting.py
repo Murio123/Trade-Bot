@@ -137,6 +137,13 @@ def _nearest_sr(ctx: dict[str, Any], price: float | None) -> tuple[float | None,
         z = (ctx.get("order_blocks", {}) or {}).get(ob_key)
         if z:
             pts += [z["low"], z["high"]]
+    # Key EMAs (dynamic levels) from 1D and 4H.
+    inds = ctx.get("inds_by_tf", {})
+    for tf in ("1d", "4h"):
+        for span in ("ema50", "ema200"):
+            v = inds.get(tf, {}).get(span)
+            if v:
+                pts.append(v)
 
     above = [p for p in pts if p > price * 1.0005]
     below = [p for p in pts if p < price * 0.9995]
@@ -347,6 +354,22 @@ def format_levels(ctx: dict[str, Any]) -> str:
         lines.append(f"  Равновесие: {_fmt_price(eq.get('eq'))} | сейчас {zone_ru} "
                      f"({int(eq.get('pos', 0.5) * 100)}%)")
 
+    # EMA dynamic levels (1D / 4H, 50 & 200).
+    inds = ctx.get("inds_by_tf", {})
+    ema_rows = []
+    for tf in ("1d", "4h"):
+        for span in ("ema200", "ema50"):
+            v = inds.get(tf, {}).get(span)
+            if v and price:
+                arrow = "🔺" if v > price else "🔻"
+                sign = "+" if v > price else "−"
+                ema_rows.append(f"  • {tf.upper()} {span.upper()}: {_fmt_price(v)} "
+                                f"({sign}{abs(v - price) / price * 100:.1f}%) {arrow}")
+    if ema_rows:
+        lines.append("")
+        lines.append("📈 EMA (динамические уровни):")
+        lines += ema_rows
+
     ind = ctx.get("ind_signal", {})
     bbw = ind.get("bbw")
     if bbw is not None:
@@ -354,7 +377,57 @@ def format_levels(ctx: dict[str, Any]) -> str:
             "расширение 🔶" if ind.get("bb_expansion") else "норма")
         lines.append("")
         lines.append(f"📏 BBW: {bbw:.4f} ({regime})")
+
+    # Synthesis.
+    support, resistance = _nearest_sr(ctx, price)
+    lines.append("")
+    lines += _levels_conclusion(ctx, price, support, resistance)
     return "\n".join(lines)
+
+
+def _levels_conclusion(ctx: dict[str, Any], price: float | None,
+                       support: float | None, resistance: float | None) -> list[str]:
+    if not price:
+        return []
+    inds = ctx.get("inds_by_tf", {})
+    eq = ctx.get("equilibrium", {})
+    ema200_1d = inds.get("1d", {}).get("ema200")
+
+    trend = None
+    if ema200_1d:
+        trend = "бычий" if price > ema200_1d else "медвежий"
+    zone = eq.get("zone")
+    zone_ru = {"discount": "дисконте", "premium": "премиуме",
+               "equilibrium": "равновесии"}.get(zone)
+
+    out = ["📌 Вывод:"]
+    parts = []
+    if trend:
+        parts.append(f"цена {'над' if trend == 'бычий' else 'под'} 1D EMA200 "
+                     f"(глобальный тренд {trend})")
+    if zone_ru:
+        parts.append(f"в {zone_ru} диапазона")
+    if parts:
+        out.append("• " + ", ".join(parts) + ".")
+
+    if resistance and support:
+        out.append(f"• Диапазон работы: поддержка {_fmt_price(support)} "
+                   f"(−{(price - support) / price * 100:.1f}%) ↔ сопротивление "
+                   f"{_fmt_price(resistance)} (+{(resistance - price) / price * 100:.1f}%).")
+
+    # Directional lean from trend + premium/discount.
+    if trend == "бычий" and zone == "discount":
+        lean = "🟢 Преимущество у покупателей: откат в дисконте по тренду вверх — зона интереса для лонгов."
+    elif trend == "бычий" and zone == "premium":
+        lean = "🟡 Тренд вверх, но цена в премиуме — лонги дороже, ждать отката/подтверждения."
+    elif trend == "медвежий" and zone == "premium":
+        lean = "🔴 Преимущество у продавцов: отскок в премиуме по тренду вниз — зона интереса для шортов."
+    elif trend == "медвежий" and zone == "discount":
+        lean = "🟡 Тренд вниз, но цена в дисконте — возможен отскок, шорты рискованнее."
+    else:
+        lean = "⚪ Чёткого перевеса нет — ждать реакции от ближайшего уровня."
+    out.append(lean)
+    return out
 
 
 def format_funding(funding: dict[str, Any], ls_ratio: dict[str, Any]) -> str:
