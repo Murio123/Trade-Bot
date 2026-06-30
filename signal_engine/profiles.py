@@ -24,8 +24,8 @@ PROFILES: dict[str, dict[str, Any]] = {
         "label": "ИНТРАДЕЙ",
         "emoji": "⚡",
         "entry": "15m",
-        "htf": "4h",
-        "mtf": ["15m", "1h", "4h", "12h"],  # 15m entry / 1H+4H timing / 12H filter
+        "htf": "1h",
+        "mtf": ["15m", "1h", "4h"],  # 15m entry / 1H trend / 4H context
         "cooldown_hours": 2,
         "atr_mult": 1.2,
         "targets": (1.0, 2.0),

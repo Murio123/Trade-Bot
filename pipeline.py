@@ -56,7 +56,8 @@ async def gather_market_context(binance: BinanceClient,
     profile = get_profile(profile_name)
     signal_timeframe = signal_timeframe or profile["entry"]
 
-    needed = {"1h", "4h", "1d", signal_timeframe} | set(profile["mtf"])
+    # 1h/4h/12h/1d always fetched: HTF bias, sessions, and the 4-TF reversal read.
+    needed = {"1h", "4h", "12h", "1d", signal_timeframe} | set(profile["mtf"])
     tfs = sorted(needed)
     frames = await asyncio.gather(*[binance.klines(tf, limit=300) for tf in tfs])
     dfs = dict(zip(tfs, frames))
