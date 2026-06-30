@@ -26,6 +26,7 @@ HELP_TEXT = (
     "/signal — свинг-сигнал (вход 4H, тренд 1D/12H)\n"
     "/intraday — интрадей-сигнал (вход 15m, тренд 4H/1H)\n"
     "/deep — глубокий институциональный анализ (1D/12H/4H, score /100)\n"
+    "/reversal — поиск дна/пика (истощение тренда)\n"
     "/levels — ключевые уровни (OB, ликвидность, volume profile)\n"
     "/funding — funding rate + аномальность\n"
     "/fear — индекс страха/жадности\n"
@@ -102,6 +103,16 @@ async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def intraday_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _run_signal(update, context, "intraday")
+
+
+async def reversal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text("🔄 Ищу признаки дна/пика…")
+    try:
+        ctx = await _fresh_context(context, profile_name="swing")
+    except Exception as exc:  # noqa: BLE001
+        await update.effective_message.reply_text(f"⚠️ Ошибка: {exc}")
+        return
+    await update.effective_message.reply_text(formatting.format_reversal(ctx))
 
 
 async def levels_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -302,6 +313,7 @@ COMMAND_DISPATCH = {
     "signal": signal_cmd,
     "intraday": intraday_cmd,
     "deep": deep_cmd,
+    "reversal": reversal_cmd,
     "levels": levels_cmd,
     "funding": funding_cmd,
     "fear": fear_cmd,
@@ -316,6 +328,7 @@ BOT_COMMANDS = [
     ("signal", "Свинг-сигнал (4H)"),
     ("intraday", "Интрадей-сигнал (15m)"),
     ("deep", "Глубокий институциональный анализ"),
+    ("reversal", "Поиск дна/пика (разворот)"),
     ("levels", "Ключевые уровни"),
     ("funding", "Funding rate"),
     ("fear", "Индекс страха/жадности"),
@@ -348,6 +361,7 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("signal", signal_cmd))
     application.add_handler(CommandHandler("intraday", intraday_cmd))
     application.add_handler(CommandHandler("deep", deep_cmd))
+    application.add_handler(CommandHandler("reversal", reversal_cmd))
     application.add_handler(CommandHandler("levels", levels_cmd))
     application.add_handler(CommandHandler("funding", funding_cmd))
     application.add_handler(CommandHandler("fear", fear_cmd))

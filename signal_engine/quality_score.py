@@ -93,8 +93,15 @@ def compute_quality_score(ctx: dict[str, Any]) -> dict[str, Any]:
     in_ob = ob.get("price_in_bullish_ob") if bull else ob.get("price_in_bearish_ob")
     if in_ob:
         s += 3
+    # Reversal/exhaustion at an extreme adds structural conviction.
+    rev = ctx.get("reversal", {})
+    rev_ok = rev.get("bullish_reversal") if bull else rev.get("bearish_reversal")
+    if rev_ok:
+        s += 3 if (rev.get("bull_strong") if bull else rev.get("bear_strong")) else 2
     scores["structure"] = min(s, 15)
-    notes["structure"] = f"event {ev1 or ev12 or '—'}, OB {'есть' if has_ob else 'нет'}"
+    rev_factors = (rev.get("factors_bull") if bull else rev.get("factors_bear")) or []
+    notes["structure"] = (f"event {ev1 or ev12 or '—'}, OB {'есть' if has_ob else 'нет'}"
+                          + (f", разворот: {', '.join(rev_factors)}" if rev_factors else ""))
 
     # 3. FVG (8).
     in_fvg = fvg.get("price_in_bullish_fvg") if bull else fvg.get("price_in_bearish_fvg")

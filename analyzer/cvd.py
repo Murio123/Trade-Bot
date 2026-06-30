@@ -54,6 +54,22 @@ def compute_cvd_from_klines(df: pd.DataFrame, lookback: int = 50) -> dict[str, A
     }
 
 
+def cvd_series(df: pd.DataFrame) -> pd.Series:
+    """Cumulative Volume Delta as a per-candle running series (for divergence).
+
+    Uses exact taker volume when available, otherwise the OHLCV estimate.
+    """
+    if df is None or len(df) == 0:
+        return pd.Series(dtype=float)
+    if "taker_buy_base" in df.columns and df["taker_buy_base"].notna().any():
+        delta = 2 * df["taker_buy_base"].fillna(0) - df["volume"]
+    else:
+        rng = (df["high"] - df["low"]).replace(0, np.nan)
+        loc = ((2 * df["close"] - df["high"] - df["low"]) / rng).fillna(0).clip(-1, 1)
+        delta = df["volume"] * loc
+    return delta.cumsum()
+
+
 def compute_cvd(agg_trades: list[dict[str, Any]]) -> dict[str, Any]:
     cvd = 0.0
     buy_vol = 0.0

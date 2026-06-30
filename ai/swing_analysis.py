@@ -66,6 +66,12 @@ def _payload(ctx: dict[str, Any], quality: dict[str, Any]) -> dict[str, Any]:
         "volatility": ctx.get("volatility"),
         "historical": ctx.get("historical"),
         "correlation": ctx.get("correlation"),
+        "reversal": {
+            "bullish": (ctx.get("reversal") or {}).get("bullish_reversal"),
+            "bearish": (ctx.get("reversal") or {}).get("bearish_reversal"),
+            "factors_bull": (ctx.get("reversal") or {}).get("factors_bull"),
+            "factors_bear": (ctx.get("reversal") or {}).get("factors_bear"),
+        },
     }
 
 

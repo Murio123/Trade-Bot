@@ -13,6 +13,7 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
 BTN_SIGNAL = "📊 Свинг"
 BTN_INTRADAY = "⚡ Интрадей"
 BTN_DEEP = "🏛 Глубокий анализ"
+BTN_REVERSAL = "🔄 Дно/Пик"
 BTN_LEVELS = "📐 Уровни"
 BTN_FUNDING = "💸 Funding"
 BTN_FEAR = "😱 Fear & Greed"
@@ -27,10 +28,11 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
             [KeyboardButton(BTN_SIGNAL), KeyboardButton(BTN_INTRADAY)],
-            [KeyboardButton(BTN_DEEP), KeyboardButton(BTN_LEVELS)],
-            [KeyboardButton(BTN_FUNDING), KeyboardButton(BTN_FEAR)],
-            [KeyboardButton(BTN_JOURNAL), KeyboardButton(BTN_BACKTEST)],
-            [KeyboardButton(BTN_ASK), KeyboardButton(BTN_STATUS), KeyboardButton(BTN_HELP)],
+            [KeyboardButton(BTN_DEEP), KeyboardButton(BTN_REVERSAL)],
+            [KeyboardButton(BTN_LEVELS), KeyboardButton(BTN_FUNDING)],
+            [KeyboardButton(BTN_FEAR), KeyboardButton(BTN_JOURNAL)],
+            [KeyboardButton(BTN_BACKTEST), KeyboardButton(BTN_ASK)],
+            [KeyboardButton(BTN_STATUS), KeyboardButton(BTN_HELP)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите команду или задайте вопрос…",
@@ -46,6 +48,7 @@ def main_inline_keyboard() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(BTN_DEEP, callback_data="cmd:deep"),
+                InlineKeyboardButton(BTN_REVERSAL, callback_data="cmd:reversal"),
             ],
             [
                 InlineKeyboardButton(BTN_LEVELS, callback_data="cmd:levels"),
@@ -67,6 +70,7 @@ LABEL_TO_COMMAND = {
     BTN_SIGNAL: "signal",
     BTN_INTRADAY: "intraday",
     BTN_DEEP: "deep",
+    BTN_REVERSAL: "reversal",
     BTN_LEVELS: "levels",
     BTN_FUNDING: "funding",
     BTN_FEAR: "fear",

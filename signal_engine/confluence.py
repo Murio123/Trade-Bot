@@ -84,6 +84,14 @@ def calculate_confluence_score(data: dict[str, Any], direction: str) -> tuple[in
         scores["structure"] += 2
         reasons.append("Цена в медвежьем FVG (имбаланс)")
 
+    # Reversal / exhaustion at an extreme (catching a bottom / top).
+    if bull and data.get("bullish_reversal"):
+        scores["structure"] += 3 if data.get("reversal_strong_bull") else 2
+        reasons.append("Разворотный сетап — признаки дна")
+    if not bull and data.get("bearish_reversal"):
+        scores["structure"] += 3 if data.get("reversal_strong_bear") else 2
+        reasons.append("Разворотный сетап — признаки пика")
+
     # --- volume ----------------------------------------------------------
     volume = data.get("volume")
     avg_volume = data.get("avg_volume")

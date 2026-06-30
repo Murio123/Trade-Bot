@@ -15,7 +15,8 @@ from typing import Any
 import config
 from analyzer.binance import BinanceClient
 from analyzer.correlation import get_correlations
-from analyzer.cvd import compute_cvd_from_klines
+from analyzer.cvd import compute_cvd_from_klines, cvd_series
+from analyzer.reversal import detect_reversal
 from analyzer.divergence import detect_divergence
 from analyzer.fvg import detect_fvg
 from analyzer.historical import find_analogues
@@ -92,6 +93,7 @@ async def gather_market_context(binance: BinanceClient,
     liquidity = detect_liquidity(df_signal, atr_value=atr_value)
     volume_profile = compute_volume_profile(df_signal)
     fvg = detect_fvg(df_signal, atr_value=atr_value)
+    reversal = detect_reversal(df_signal, ind_signal, cvd_series(df_signal))
 
     # Divergence on both RSI(14) and MACD; combine (either one counts).
     series = ind_signal.get("_series", {})
@@ -137,6 +139,7 @@ async def gather_market_context(binance: BinanceClient,
         "liquidity": liquidity,
         "volume_profile": volume_profile,
         "fvg": fvg,
+        "reversal": reversal,
         "divergence": divergence,
         "liquidation_map": liq_map,
         "sweep_signal": sweep,
@@ -204,6 +207,8 @@ async def gather_swing_context(binance: BinanceClient) -> dict[str, Any]:
 
     historical = find_analogues(df_4h, horizon=42, tf_hours=4.0)
     volatility = analyze_volatility(df_4h, tf_per_day=6.0)
+    # Reversal read on the 4H entry frame.
+    reversal = detect_reversal(df_4h, ind_4h, cvd_series(df_4h))
 
     return {
         "symbol": config.SYMBOL,
@@ -220,6 +225,7 @@ async def gather_swing_context(binance: BinanceClient) -> dict[str, Any]:
         "fvg": fvg,
         "liquidity": liquidity,
         "volume_profile": volume_profile,
+        "reversal": reversal,
         "funding": funding,
         "open_interest": oi,
         "oi_rising": _oi_rising(oi_hist),
@@ -246,6 +252,10 @@ def _flatten_for_confluence(ctx: dict[str, Any]) -> dict[str, Any]:
         "reversal_candle": ctx["liquidity"].get("reversal_candle"),
         "price_in_bullish_fvg": ctx.get("fvg", {}).get("price_in_bullish_fvg"),
         "price_in_bearish_fvg": ctx.get("fvg", {}).get("price_in_bearish_fvg"),
+        "bullish_reversal": ctx.get("reversal", {}).get("bullish_reversal"),
+        "bearish_reversal": ctx.get("reversal", {}).get("bearish_reversal"),
+        "reversal_strong_bull": ctx.get("reversal", {}).get("bull_strong"),
+        "reversal_strong_bear": ctx.get("reversal", {}).get("bear_strong"),
         "cvd_bullish": ctx["cvd"].get("cvd_bullish"),
         "cvd_bearish": ctx["cvd"].get("cvd_bearish"),
         "funding": (ctx["funding"] or {}).get("current"),

@@ -69,6 +69,43 @@ def format_signal(signal: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_reversal(ctx: dict[str, Any]) -> str:
+    rev = ctx.get("reversal", {})
+    price = ctx.get("price")
+    lines = [
+        f"🔄 Анализ разворота {config.SYMBOL_DISPLAY} | {ctx.get('timeframe', '').upper()}",
+        f"Цена: {_fmt_price(price)}",
+        "",
+    ]
+    bull = rev.get("factors_bull") or []
+    bear = rev.get("factors_bear") or []
+    if not bull and not bear:
+        lines.append("Признаков истощения/разворота сейчас нет.")
+        lines.append("Цена не на свинговом экстремуме — жду формирования дна/пика.")
+        return "\n".join(lines)
+
+    if rev.get("bullish_reversal"):
+        lines.append(f"🟢 Возможное ДНО{' (сильное)' if rev.get('bull_strong') else ''} — "
+                     f"{rev.get('bull_score')} подтверждения:")
+        lines += [f"  • {f}" for f in bull]
+    elif bull:
+        lines.append(f"🟢 Слабые признаки дна ({rev.get('bull_score')}/2):")
+        lines += [f"  • {f}" for f in bull]
+
+    if rev.get("bearish_reversal"):
+        lines.append(f"🔴 Возможный ПИК{' (сильный)' if rev.get('bear_strong') else ''} — "
+                     f"{rev.get('bear_score')} подтверждения:")
+        lines += [f"  • {f}" for f in bear]
+    elif bear:
+        lines.append(f"🔴 Слабые признаки пика ({rev.get('bear_score')}/2):")
+        lines += [f"  • {f}" for f in bear]
+
+    lines.append("")
+    lines.append("⚠️ Развороты — это фейд движения: ниже винрейт, выше R:R. "
+                 "Лучше брать в сторону старшего тренда.")
+    return "\n".join(lines)
+
+
 def format_levels(ctx: dict[str, Any]) -> str:
     ob = ctx.get("order_blocks", {})
     liq = ctx.get("liquidity", {})
@@ -246,6 +283,18 @@ def format_deep(quality: dict[str, Any], ctx: dict[str, Any], ai_text: str) -> s
             "",
             f"ℹ️ Если бы вход ({'ЛОНГ' if direction == 'long' else 'ШОРТ'}): "
             f"стоп {_fmt_price(plan.get('stop'))}, R:R ≈ {plan.get('rr')}",
+        ]
+
+    rev = ctx.get("reversal", {})
+    if rev.get("bullish_reversal") or rev.get("bearish_reversal"):
+        is_bull = rev.get("bullish_reversal")
+        factors = rev.get("factors_bull") if is_bull else rev.get("factors_bear")
+        strong = rev.get("bull_strong") if is_bull else rev.get("bear_strong")
+        lines += [
+            "",
+            f"🔄 Истощение тренда: {'возможное ДНО 🟢' if is_bull else 'возможный ПИК 🔴'}"
+            f"{' (сильное)' if strong else ''}",
+            "  • " + "\n  • ".join(factors),
         ]
 
     em = (vol.get("expected_move") or {}).get("7d", {})
