@@ -1,0 +1,7 @@
+# Pin the build for Railway / Nixpacks.
+# Forces Python 3.11 (every pinned dependency has a prebuilt wheel for 3.11,
+# so the build never needs to compile from source). Install + start are left
+# to Nixpacks defaults: it runs `pip install -r requirements.txt` and uses the
+# Procfile `worker` process.
+[phases.setup]
+nixPkgs = ["python311"]
