@@ -10,7 +10,7 @@ import logging
 import signal as os_signal
 
 import config
-from analyzer.binance import BinanceClient
+from analyzer.exchange import create_market_client
 from bot.handlers import register_handlers
 from database import db
 from scheduler import build_scheduler
@@ -35,7 +35,7 @@ async def _amain() -> None:
 
     await db.connect()
 
-    binance = BinanceClient()
+    binance = create_market_client()
 
     application = (
         Application.builder()
@@ -47,7 +47,8 @@ async def _amain() -> None:
 
     scheduler = build_scheduler(application)
 
-    log.info("Starting bot (DRY_RUN=%s, symbol=%s)…", config.DRY_RUN, config.SYMBOL)
+    log.info("Starting bot (DRY_RUN=%s, symbol=%s, exchange=%s)…",
+             config.DRY_RUN, config.SYMBOL, config.EXCHANGE)
 
     await application.initialize()
     await application.start()

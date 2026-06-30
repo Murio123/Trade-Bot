@@ -66,6 +66,12 @@ DATABASE_URL = _get("DATABASE_URL")
 SYMBOL = _get("SYMBOL", "BTCUSDT")
 SYMBOL_DISPLAY = _get("SYMBOL_DISPLAY", "BTC")
 
+# --- Exchange selection ---------------------------------------------------
+# Which market-data backend to prefer: "binance", "bybit", or "auto".
+# "auto" tries Bybit first (broadly reachable from cloud regions) and falls
+# back to Binance — and vice-versa — automatically on geo-block (HTTP 451).
+EXCHANGE = (_get("EXCHANGE", "auto") or "auto").lower()
+
 # --- Signal engine tuning -------------------------------------------------
 MIN_DIVERSE_CATEGORIES = _get_int("MIN_DIVERSE_CATEGORIES", 3)
 COOLDOWN_HOURS = _get_int("COOLDOWN_HOURS", 4)
