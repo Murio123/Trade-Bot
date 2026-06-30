@@ -14,7 +14,7 @@ from telegram.ext import ContextTypes
 import config
 from analyzer.news import get_fear_greed
 from ai import claude
-from bot import formatting, journal, keyboards
+from bot import formatting, guide, journal, keyboards
 from database import db
 from pipeline import gather_market_context, run_cascade
 
@@ -33,6 +33,7 @@ HELP_TEXT = (
     "/backtest — результаты стратегии за период\n"
     "/journal — статистика журнала (винрейт, R/R)\n"
     "/status — статус бота (источник данных, режим, БД, сделки)\n"
+    "/guide — 📖 гид по всем функциям\n"
     "/ask <вопрос> — свободный вопрос к Claude с рыночным контекстом\n\n"
     "💬 Любой текст без команды я восприму как вопрос к ИИ."
 )
@@ -71,6 +72,26 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         HELP_TEXT, reply_markup=keyboards.main_reply_keyboard()
     )
+
+
+async def guide_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.effective_message.reply_text(
+        guide.INTRO, reply_markup=guide.menu_keyboard()
+    )
+
+
+async def guide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle guide navigation (callback_data 'help:<topic>')."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    key = (query.data or "").split(":", 1)[1] if ":" in (query.data or "") else "menu"
+    if key == "menu":
+        await query.edit_message_text(guide.INTRO, reply_markup=guide.menu_keyboard())
+    else:
+        await query.edit_message_text(guide.get_topic(key),
+                                      reply_markup=guide.back_keyboard())
 
 
 async def _run_signal(update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -320,6 +341,7 @@ COMMAND_DISPATCH = {
     "journal": journal_cmd,
     "backtest": backtest_cmd,
     "status": status_cmd,
+    "guide": guide_cmd,
     "help": help_cmd,
 }
 
@@ -335,6 +357,7 @@ BOT_COMMANDS = [
     ("journal", "Статистика журнала"),
     ("backtest", "Бэктест стратегии"),
     ("status", "Статус бота"),
+    ("guide", "Гид по функциям"),
     ("ask", "Вопрос к ИИ"),
     ("help", "Помощь"),
 ]
@@ -368,8 +391,10 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("journal", journal_cmd))
     application.add_handler(CommandHandler("backtest", backtest_cmd))
     application.add_handler(CommandHandler("status", status_cmd))
+    application.add_handler(CommandHandler("guide", guide_cmd))
     application.add_handler(CommandHandler("ask", ask_cmd))
     application.add_handler(CallbackQueryHandler(button_callback, pattern=r"^cmd:"))
+    application.add_handler(CallbackQueryHandler(guide_callback, pattern=r"^help:"))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_message)
     )
