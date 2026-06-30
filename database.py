@@ -198,6 +198,42 @@ class Database:
             await conn.execute("UPDATE signals SET delivered=TRUE WHERE id=$1", signal_id)
 
     # --- journal ----------------------------------------------------------
+    async def insert_trade(self, trade: dict[str, Any]) -> int:
+        if not self.pool:
+            return self._mem.insert_trade(trade)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO trades_journal
+                    (signal_id, direction, entry_price, stop_loss, target, outcome)
+                VALUES ($1,$2,$3,$4,$5,'open')
+                RETURNING id
+                """,
+                trade.get("signal_id"), trade.get("direction"), trade.get("entry_price"),
+                trade.get("stop_loss"), trade.get("target"),
+            )
+            return int(row["id"])
+
+    async def open_trades(self) -> list[dict[str, Any]]:
+        if not self.pool:
+            return self._mem.open_trades()
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM trades_journal WHERE outcome = 'open' ORDER BY opened_at"
+            )
+            return [dict(r) for r in rows]
+
+    async def close_trade(self, trade_id: int, exit_price: float,
+                          outcome: str, pnl_r: float) -> None:
+        if not self.pool:
+            return self._mem.close_trade(trade_id, exit_price, outcome, pnl_r)
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE trades_journal SET exit_price=$1, outcome=$2, pnl_r=$3, "
+                "closed_at=now() WHERE id=$4",
+                exit_price, outcome, pnl_r, trade_id,
+            )
+
     async def journal_stats(self, symbol: str) -> dict[str, Any]:
         if not self.pool:
             return self._mem.journal_stats(symbol)
@@ -258,6 +294,7 @@ def _aggregate_journal(rows) -> dict[str, Any]:
     losses = sum(1 for r in rows if (r["outcome"] == "loss"))
     r_values = [r["pnl_r"] for r in rows if r["pnl_r"] is not None]
     avg_r = sum(r_values) / len(r_values) if r_values else 0.0
+    total_r = sum(r_values) if r_values else 0.0
     winrate = (wins / total * 100) if total else 0.0
     return {
         "total": total,
@@ -265,6 +302,9 @@ def _aggregate_journal(rows) -> dict[str, Any]:
         "losses": losses,
         "winrate": round(winrate, 1),
         "avg_r": round(avg_r, 2),
+        "total_r": round(total_r, 2),
+        "best_r": round(max(r_values), 2) if r_values else 0.0,
+        "worst_r": round(min(r_values), 2) if r_values else 0.0,
     }
 
 
@@ -274,8 +314,10 @@ class _MemoryStore:
     def __init__(self) -> None:
         self.signals: list[dict[str, Any]] = []
         self.alerts: list[dict[str, Any]] = []
+        self.trades: list[dict[str, Any]] = []
         self._sid = 0
         self._aid = 0
+        self._tid = 0
 
     def insert_signal(self, sig: dict[str, Any]) -> int:
         self._sid += 1
@@ -311,8 +353,30 @@ class _MemoryStore:
             if s["id"] == signal_id:
                 s["delivered"] = True
 
+    def insert_trade(self, trade: dict[str, Any]) -> int:
+        self._tid += 1
+        rec = dict(trade)
+        rec["id"] = self._tid
+        rec["outcome"] = "open"
+        rec.setdefault("opened_at", utcnow())
+        self.trades.append(rec)
+        return self._tid
+
+    def open_trades(self):
+        return [t for t in self.trades if t.get("outcome") == "open"]
+
+    def close_trade(self, trade_id: int, exit_price: float, outcome: str, pnl_r: float):
+        for t in self.trades:
+            if t["id"] == trade_id:
+                t["exit_price"] = exit_price
+                t["outcome"] = outcome
+                t["pnl_r"] = pnl_r
+                t["closed_at"] = utcnow()
+
     def journal_stats(self, symbol: str):
-        return {"total": 0, "wins": 0, "losses": 0, "winrate": 0.0, "avg_r": 0.0}
+        closed = [t for t in self.trades
+                  if t.get("outcome") and t["outcome"] != "open"]
+        return _aggregate_journal(closed)
 
     def add_price_alert(self, chat_id, symbol, level, direction, note):
         self._aid += 1

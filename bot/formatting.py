@@ -147,13 +147,23 @@ def format_fear(fng: dict[str, Any]) -> str:
     return f"{emoji} Индекс страха и жадности: {val}/100 ({cls})"
 
 
-def format_journal(stats: dict[str, Any]) -> str:
-    return "\n".join([
+def format_journal(stats: dict[str, Any], open_count: int = 0) -> str:
+    total = stats.get("total", 0)
+    lines = [
         "📒 Статистика журнала сделок",
-        f"Всего сделок: {stats.get('total', 0)}",
-        f"Винрейт: {stats.get('winrate', 0)}%  ({stats.get('wins', 0)}W / {stats.get('losses', 0)}L)",
-        f"Средний R/R: {stats.get('avg_r', 0)}R",
-    ])
+        f"Закрыто сделок: {total}",
+    ]
+    if total:
+        lines += [
+            f"Винрейт: {stats.get('winrate', 0)}%  ({stats.get('wins', 0)}W / {stats.get('losses', 0)}L)",
+            f"Средний результат: {stats.get('avg_r', 0):+}R",
+            f"Суммарно: {stats.get('total_r', 0):+}R",
+            f"Лучшая: {stats.get('best_r', 0):+}R | Худшая: {stats.get('worst_r', 0):+}R",
+        ]
+    else:
+        lines.append("Пока нет закрытых сделок — статистика появится после первых исходов.")
+    lines.append(f"Открыто сейчас: {open_count}")
+    return "\n".join(lines)
 
 
 HTF_LINE = {

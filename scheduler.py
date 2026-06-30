@@ -75,6 +75,41 @@ async def price_alert_job(application) -> None:
             await db.trigger_price_alert(a["id"])
 
 
+async def resolve_trades_job(application) -> None:
+    """Check open journal trades for stop/target hits and record outcomes."""
+    binance = application.bot_data["binance"]
+    open_trades = await db.open_trades()
+    if not open_trades:
+        return
+    try:
+        df = await binance.klines("1h", limit=1000)  # ~41 days of coverage
+        price = float(df["close"].iloc[-1])
+    except Exception:  # noqa: BLE001
+        log.exception("resolve_trades_job: failed to fetch klines")
+        return
+
+    for trade in open_trades:
+        result = journal.resolve_trade(trade, df, price)
+        if not result:
+            continue
+        await db.close_trade(trade["id"], result["exit_price"],
+                             result["outcome"], result["pnl_r"])
+        log.info("Trade #%s closed: %s (%.2fR)",
+                 trade["id"], result["outcome"], result["pnl_r"])
+        await _notify_trade_closed(application, trade, result)
+
+
+async def _notify_trade_closed(application, trade: dict, result: dict) -> None:
+    emoji = {"win": "✅", "loss": "🛑", "breakeven": "➖"}.get(result["outcome"], "ℹ️")
+    direction = "ЛОНГ" if trade.get("direction") == "long" else "ШОРТ"
+    outcome_ru = {"win": "цель достигнута", "loss": "стоп",
+                  "breakeven": "закрыта по времени"}.get(result["outcome"], result["outcome"])
+    text = (f"{emoji} Сделка закрыта: {direction} {config.SYMBOL_DISPLAY}\n"
+            f"Итог: {outcome_ru} | {result['pnl_r']:+.2f}R\n"
+            f"Выход: {result['exit_price']:,.0f}")
+    await alerts.broadcast(application.bot, text)
+
+
 def build_scheduler(application) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
     # Primary analysis on the main timeframe (e.g. 4h) every N hours.
@@ -92,5 +127,9 @@ def build_scheduler(application) -> AsyncIOScheduler:
     scheduler.add_job(
         price_alert_job, "interval", minutes=config.ALERT_CHECK_INTERVAL_MINUTES,
         args=[application], id="price_alerts",
+    )
+    scheduler.add_job(
+        resolve_trades_job, "interval", minutes=config.TRADE_CHECK_INTERVAL_MINUTES,
+        args=[application], id="resolve_trades",
     )
     return scheduler

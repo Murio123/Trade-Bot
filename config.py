@@ -87,6 +87,8 @@ SCORE_JOURNAL_MIN = _get_int("SCORE_JOURNAL_MIN", 5)  # 5-7 -> store, available 
 # --- Scheduler ------------------------------------------------------------
 ANALYSIS_INTERVAL_HOURS = _get_int("ANALYSIS_INTERVAL_HOURS", 4)
 ALERT_CHECK_INTERVAL_MINUTES = _get_int("ALERT_CHECK_INTERVAL_MINUTES", 5)
+# How often open trades are checked for stop/target hits.
+TRADE_CHECK_INTERVAL_MINUTES = _get_int("TRADE_CHECK_INTERVAL_MINUTES", 15)
 # Primary timeframe used by the scheduled analysis and the /signal command.
 SIGNAL_TIMEFRAME = _get("SIGNAL_TIMEFRAME", "4h")
 

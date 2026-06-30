@@ -113,7 +113,10 @@ async def fear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def journal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     stats = await journal.get_stats(config.SYMBOL)
-    await update.effective_message.reply_text(formatting.format_journal(stats))
+    open_trades = await db.open_trades()
+    await update.effective_message.reply_text(
+        formatting.format_journal(stats, open_count=len(open_trades))
+    )
 
 
 async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
