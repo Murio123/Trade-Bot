@@ -18,6 +18,7 @@ BTN_FEAR = "😱 Fear & Greed"
 BTN_JOURNAL = "📒 Журнал"
 BTN_BACKTEST = "📈 Бэктест"
 BTN_ASK = "🧠 Спросить ИИ"
+BTN_STATUS = "🩺 Статус"
 BTN_HELP = "❓ Помощь"
 
 
@@ -28,7 +29,7 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
             [KeyboardButton(BTN_LEVELS), KeyboardButton(BTN_FUNDING)],
             [KeyboardButton(BTN_FEAR), KeyboardButton(BTN_JOURNAL)],
             [KeyboardButton(BTN_BACKTEST), KeyboardButton(BTN_ASK)],
-            [KeyboardButton(BTN_HELP)],
+            [KeyboardButton(BTN_STATUS), KeyboardButton(BTN_HELP)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите команду или задайте вопрос…",
@@ -66,6 +67,7 @@ LABEL_TO_COMMAND = {
     BTN_FEAR: "fear",
     BTN_JOURNAL: "journal",
     BTN_BACKTEST: "backtest",
+    BTN_STATUS: "status",
     BTN_HELP: "help",
     BTN_ASK: "ask_prompt",
 }

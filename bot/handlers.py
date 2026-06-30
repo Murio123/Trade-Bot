@@ -30,6 +30,7 @@ HELP_TEXT = (
     "/fear — индекс страха/жадности\n"
     "/backtest — результаты стратегии за период\n"
     "/journal — статистика журнала (винрейт, R/R)\n"
+    "/status — статус бота (источник данных, режим, БД, сделки)\n"
     "/ask <вопрос> — свободный вопрос к Claude с рыночным контекстом\n\n"
     "💬 Любой текст без команды я восприму как вопрос к ИИ."
 )
@@ -130,6 +131,45 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text(f"⚠️ Ошибка бэктеста: {exc}")
         return
     await update.effective_message.reply_text(report)
+
+
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    binance = _binance(context)
+    bot_data = context.application.bot_data
+
+    price = None
+    try:
+        price = await binance.current_price()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("status_cmd: price fetch failed: %s", exc)
+
+    try:
+        signals_today = len(await db.signals_today(config.SYMBOL))
+        open_trades = len(await db.open_trades())
+        stats = await db.journal_stats(config.SYMBOL)
+    except Exception:  # noqa: BLE001
+        signals_today, open_trades, stats = 0, 0, {}
+
+    s = {
+        "exchange_pref": config.EXCHANGE,
+        "exchange_active": getattr(binance, "active_name", None),
+        "price": price,
+        "db_connected": db.pool is not None,
+        "dry_run": config.DRY_RUN,
+        "alert_chats": len(config.TELEGRAM_ALERT_CHAT_IDS),
+        "last_analysis_at": bot_data.get("last_analysis_at"),
+        "last_analysis_tf": bot_data.get("last_analysis_tf"),
+        "last_analysis_status": bot_data.get("last_analysis_status"),
+        "last_analysis_blocked_at": bot_data.get("last_analysis_blocked_at"),
+        "signal_tf": config.SIGNAL_TIMEFRAME,
+        "fast_tf": config.FAST_TIMEFRAME if config.ENABLE_FAST_ANALYSIS else "—",
+        "signals_today": signals_today,
+        "max_per_day": config.MAX_SIGNALS_PER_DAY,
+        "open_trades": open_trades,
+        "closed_trades": stats.get("total", 0),
+        "winrate": stats.get("winrate", 0),
+    }
+    await update.effective_message.reply_text(formatting.format_status(s))
 
 
 async def deep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -249,6 +289,7 @@ COMMAND_DISPATCH = {
     "fear": fear_cmd,
     "journal": journal_cmd,
     "backtest": backtest_cmd,
+    "status": status_cmd,
     "help": help_cmd,
 }
 
@@ -261,6 +302,7 @@ BOT_COMMANDS = [
     ("fear", "Индекс страха/жадности"),
     ("journal", "Статистика журнала"),
     ("backtest", "Бэктест стратегии"),
+    ("status", "Статус бота"),
     ("ask", "Вопрос к ИИ"),
     ("help", "Помощь"),
 ]
@@ -291,6 +333,7 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("fear", fear_cmd))
     application.add_handler(CommandHandler("journal", journal_cmd))
     application.add_handler(CommandHandler("backtest", backtest_cmd))
+    application.add_handler(CommandHandler("status", status_cmd))
     application.add_handler(CommandHandler("ask", ask_cmd))
     application.add_handler(CallbackQueryHandler(button_callback, pattern=r"^cmd:"))
     application.add_handler(

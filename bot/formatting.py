@@ -254,6 +254,54 @@ def format_deep(quality: dict[str, Any], ctx: dict[str, Any], ai_text: str) -> s
         lines += ["", "💡 Кэш — тоже позиция. Сделка не форсируется."]
 
     return "\n".join(lines)
+
+
+def _ago(dt) -> str:
+    if dt is None:
+        return "ещё не было"
+    from datetime import datetime, timezone
+    if isinstance(dt, str):
+        return dt
+    delta = datetime.now(timezone.utc) - dt
+    mins = int(delta.total_seconds() // 60)
+    if mins < 1:
+        return "только что"
+    if mins < 60:
+        return f"{mins} мин назад"
+    return f"{mins // 60} ч {mins % 60} мин назад"
+
+
+def format_status(s: dict[str, Any]) -> str:
+    dry = s.get("dry_run")
+    db_ok = s.get("db_connected")
+    lines = [
+        "🩺 Статус бота",
+        "",
+        f"💱 Источник данных: {s.get('exchange_active') or s.get('exchange_pref')}",
+        f"💰 Цена {config.SYMBOL_DISPLAY}: {_fmt_price(s.get('price'))}",
+        f"🗄 База данных: {'PostgreSQL ✅' if db_ok else 'in-memory ⚠️ (без персистентности)'}",
+        f"📡 Режим: {'DRY-RUN 🧪 (уведомления НЕ шлются)' if dry else 'LIVE ✅ (уведомления включены)'}",
+        f"🔔 Получатели алертов: {s.get('alert_chats', 0)}",
+        "",
+        f"⏱ Последний анализ: {_ago(s.get('last_analysis_at'))}"
+        + (f" ({s.get('last_analysis_tf')})" if s.get('last_analysis_tf') else ""),
+    ]
+    st = s.get("last_analysis_status")
+    if st == "blocked":
+        lines.append(f"   └ результат: заблокирован ({s.get('last_analysis_blocked_at')})")
+    elif st:
+        lines.append(f"   └ результат: {st}")
+    lines += [
+        "",
+        f"📈 Таймфреймы: {s.get('signal_tf')} осн. + {s.get('fast_tf')} быстрый",
+        f"📨 Сигналов за сутки: {s.get('signals_today', 0)} (лимит {s.get('max_per_day')})",
+        f"📒 Открытых сделок: {s.get('open_trades', 0)} | закрыто: {s.get('closed_trades', 0)}"
+        + (f", винрейт {s.get('winrate')}%" if s.get('closed_trades') else ""),
+    ]
+    return "\n".join(lines)
+
+
+def format_blocked(result: dict[str, Any]) -> str:
     stage = result.get("blocked_at")
     bias = result.get("htf_bias", "neutral")
     long_s = result.get("long_score")

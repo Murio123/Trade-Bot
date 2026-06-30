@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -35,6 +36,12 @@ async def analysis_job(application, timeframe: str | None = None) -> None:
     except Exception:  # noqa: BLE001
         log.exception("analysis_job (%s) failed", timeframe)
         return
+
+    # Record run telemetry for /status.
+    application.bot_data["last_analysis_at"] = datetime.now(timezone.utc)
+    application.bot_data["last_analysis_tf"] = timeframe
+    application.bot_data["last_analysis_status"] = result.get("status")
+    application.bot_data["last_analysis_blocked_at"] = result.get("blocked_at")
 
     status = result.get("status")
     if status == "blocked":
