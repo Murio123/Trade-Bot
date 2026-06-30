@@ -24,6 +24,7 @@ HELP_TEXT = (
     "🤖 BTC Signal Bot\n\n"
     "Нажимай кнопки ниже или используй команды:\n"
     "/signal — текущий сигнал (включая слабые 5-7)\n"
+    "/deep — глубокий институциональный анализ (1D/12H/4H, score /100)\n"
     "/levels — ключевые уровни (OB, ликвидность, volume profile)\n"
     "/funding — funding rate + аномальность\n"
     "/fear — индекс страха/жадности\n"
@@ -128,6 +129,26 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.effective_message.reply_text(report)
 
 
+async def deep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    from pipeline import gather_swing_context
+    from signal_engine.quality_score import compute_quality_score
+    from ai import swing_analysis
+
+    await update.effective_message.reply_text(
+        "🏛 Запускаю глубокий институциональный анализ (1D/12H/4H)… это займёт ~10-20с."
+    )
+    binance = _binance(context)
+    try:
+        ctx = await gather_swing_context(binance)
+        quality = compute_quality_score(ctx)
+        ai_text = await swing_analysis.generate_report(ctx, quality)
+    except Exception as exc:  # noqa: BLE001
+        log.exception("deep_cmd failed")
+        await update.effective_message.reply_text(f"⚠️ Ошибка глубокого анализа: {exc}")
+        return
+    await update.effective_message.reply_text(formatting.format_deep(quality, ctx, ai_text))
+
+
 async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     question = " ".join(context.args) if context.args else ""
     if not question:
@@ -219,6 +240,7 @@ def _ask_context(ctx: dict[str, Any]) -> dict[str, Any]:
 # buttons and inline-menu callbacks alike).
 COMMAND_DISPATCH = {
     "signal": signal_cmd,
+    "deep": deep_cmd,
     "levels": levels_cmd,
     "funding": funding_cmd,
     "fear": fear_cmd,
@@ -230,6 +252,7 @@ COMMAND_DISPATCH = {
 # Shown in the Telegram "/" command menu.
 BOT_COMMANDS = [
     ("signal", "Текущий сигнал"),
+    ("deep", "Глубокий институциональный анализ"),
     ("levels", "Ключевые уровни"),
     ("funding", "Funding rate"),
     ("fear", "Индекс страха/жадности"),
@@ -259,6 +282,7 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("signal", signal_cmd))
+    application.add_handler(CommandHandler("deep", deep_cmd))
     application.add_handler(CommandHandler("levels", levels_cmd))
     application.add_handler(CommandHandler("funding", funding_cmd))
     application.add_handler(CommandHandler("fear", fear_cmd))

@@ -53,6 +53,26 @@ def bollinger(series: pd.Series, length: int = 20, std: float = 2.0) -> pd.DataF
     return pd.DataFrame({"bb_mid": mid, "bb_upper": upper, "bb_lower": lower, "bbw": width})
 
 
+def tsi(series: pd.Series, long: int = 25, short: int = 13, signal: int = 13) -> pd.DataFrame:
+    """True Strength Index: double-smoothed momentum oscillator."""
+    momentum = series.diff()
+    abs_mom = momentum.abs()
+    ema_long = momentum.ewm(span=long, adjust=False).mean()
+    ema_short = ema_long.ewm(span=short, adjust=False).mean()
+    abs_long = abs_mom.ewm(span=long, adjust=False).mean()
+    abs_short = abs_long.ewm(span=short, adjust=False).mean()
+    tsi_line = 100 * (ema_short / abs_short.replace(0, np.nan))
+    tsi_signal = tsi_line.ewm(span=signal, adjust=False).mean()
+    return pd.DataFrame({"tsi": tsi_line, "tsi_signal": tsi_signal})
+
+
+def vwap(df: pd.DataFrame) -> pd.Series:
+    """Anchored VWAP over the supplied window (cumulative from the first bar)."""
+    typical = (df["high"] + df["low"] + df["close"]) / 3
+    cum_vol = df["volume"].cumsum().replace(0, np.nan)
+    return (typical * df["volume"]).cumsum() / cum_vol
+
+
 def atr(df: pd.DataFrame, length: int = 14) -> pd.Series:
     high, low, close = df["high"], df["low"], df["close"]
     prev_close = close.shift(1)
@@ -78,6 +98,8 @@ def compute_indicators(df: pd.DataFrame) -> dict[str, Any]:
     macd_df = macd(close)
     bb = bollinger(close)
     atr14 = atr(df, 14)
+    tsi_df = tsi(close)
+    vwap_series = vwap(df)
 
     avg_volume = df["volume"].rolling(20).mean()
 
@@ -100,9 +122,21 @@ def compute_indicators(df: pd.DataFrame) -> dict[str, Any]:
         "bbw": _f(bb["bbw"].iloc[last]),
         "bbw_avg": _f(bb["bbw"].rolling(50).mean().iloc[last]),
         "atr": _f(atr14.iloc[last]),
+        "tsi": _f(tsi_df["tsi"].iloc[last]),
+        "tsi_signal": _f(tsi_df["tsi_signal"].iloc[last]),
+        "vwap": _f(vwap_series.iloc[last]),
         "volume": float(df["volume"].iloc[last]),
         "avg_volume": _f(avg_volume.iloc[last]),
     })
+
+    # TSI momentum confirmation + VWAP location.
+    tsi_line = out["tsi"]
+    tsi_sig = out["tsi_signal"]
+    out["tsi_bullish"] = bool(tsi_line is not None and tsi_sig is not None and tsi_line > tsi_sig)
+    out["tsi_bearish"] = bool(tsi_line is not None and tsi_sig is not None and tsi_line < tsi_sig)
+    vw = out["vwap"]
+    out["price_above_vwap"] = bool(vw is not None and out["price"] > vw)
+    out["price_below_vwap"] = bool(vw is not None and out["price"] < vw)
 
     # Derived booleans used by the confluence engine.
     macd_hist = macd_df["hist"]

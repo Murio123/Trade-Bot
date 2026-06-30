@@ -14,10 +14,14 @@ from typing import Any
 
 import config
 from analyzer.binance import BinanceClient
+from analyzer.correlation import get_correlations
 from analyzer.cvd import compute_cvd_from_klines
 from analyzer.divergence import detect_divergence
 from analyzer.fvg import detect_fvg
+from analyzer.historical import find_analogues
 from analyzer.indicators import compute_indicators
+from analyzer.structure import analyze_structure
+from analyzer.volatility import analyze_volatility
 from analyzer.liquidation_map import get_liquidation_map, nearest_sweep_signal
 from analyzer.liquidity import detect_liquidity
 from analyzer.macro import get_macro
@@ -137,6 +141,92 @@ async def gather_market_context(binance: BinanceClient,
         "sessions": sessions,
     }
     return context
+
+
+def _oi_rising(oi_hist: list[dict[str, Any]]) -> bool | None:
+    """Detect whether open interest is trending up over the history window."""
+    if not oi_hist or len(oi_hist) < 2:
+        return None
+    def _val(item: dict[str, Any]) -> float | None:
+        for key in ("sumOpenInterest", "openInterest", "sumOpenInterestValue"):
+            if key in item:
+                try:
+                    return float(item[key])
+                except (TypeError, ValueError):
+                    return None
+        return None
+    first, last = _val(oi_hist[0]), _val(oi_hist[-1])
+    if first is None or last is None or first == 0:
+        return None
+    return last > first
+
+
+async def gather_swing_context(binance: BinanceClient) -> dict[str, Any]:
+    """Assemble the advanced swing context across 1D / 12H / 4H.
+
+    Trend on 1D, zones of interest on 12H, entry confirmation on 4H, plus
+    derivatives, volatility, real historical analogues and correlations.
+    """
+    df_4h, df_12h, df_1d = await asyncio.gather(
+        binance.klines("4h", limit=500),
+        binance.klines("12h", limit=400),
+        binance.klines("1d", limit=400),
+    )
+    ind_4h = compute_indicators(df_4h)
+    ind_12h = compute_indicators(df_12h)
+    ind_1d = compute_indicators(df_1d)
+    atr_value = ind_4h.get("atr") or 0.0
+
+    # Derivatives + correlations (tolerate failures).
+    (funding, oi, oi_hist, ls_ratio, corr) = await asyncio.gather(
+        binance.funding_rate(),
+        binance.open_interest(),
+        binance.open_interest_hist(period="4h", limit=30),
+        binance.long_short_ratio(),
+        get_correlations(binance, df_1d),
+        return_exceptions=True,
+    )
+    funding = _safe(funding, {})
+    oi = _safe(oi, 0.0)
+    oi_hist = _safe(oi_hist, [])
+    ls_ratio = _safe(ls_ratio, {})
+    corr = _safe(corr, {})
+
+    cvd = compute_cvd_from_klines(df_4h)
+
+    # Zones of interest computed on the 12H frame.
+    order_blocks = detect_order_blocks(df_12h)
+    fvg = detect_fvg(df_12h, atr_value=ind_12h.get("atr") or atr_value)
+    liquidity = detect_liquidity(df_12h, atr_value=ind_12h.get("atr") or atr_value)
+    volume_profile = compute_volume_profile(df_12h)
+
+    historical = find_analogues(df_4h, horizon=42, tf_hours=4.0)
+    volatility = analyze_volatility(df_4h, tf_per_day=6.0)
+
+    return {
+        "symbol": config.SYMBOL,
+        "timestamp": datetime.now(timezone.utc),
+        "price": ind_4h["price"],
+        "atr": atr_value,
+        "ind_1d": ind_1d,
+        "ind_12h": ind_12h,
+        "ind_4h": ind_4h,
+        "structure_1d": analyze_structure(df_1d),
+        "structure_12h": analyze_structure(df_12h),
+        "structure_4h": analyze_structure(df_4h),
+        "order_blocks": order_blocks,
+        "fvg": fvg,
+        "liquidity": liquidity,
+        "volume_profile": volume_profile,
+        "funding": funding,
+        "open_interest": oi,
+        "oi_rising": _oi_rising(oi_hist),
+        "long_short_ratio": ls_ratio,
+        "cvd": cvd,
+        "volatility": volatility,
+        "historical": historical,
+        "correlation": corr,
+    }
 
 
 def _flatten_for_confluence(ctx: dict[str, Any]) -> dict[str, Any]:

@@ -176,7 +176,74 @@ BLOCK_HINT = {
 }
 
 
-def format_blocked(result: dict[str, Any]) -> str:
+DECISION_EMOJI = {
+    "STRONG BUY": "🟢🟢", "BUY": "🟢", "WEAK BUY": "🟢",
+    "NO TRADE": "⚪", "WEAK SELL": "🔴", "SELL": "🔴", "STRONG SELL": "🔴🔴",
+}
+
+SECTION_LABEL = {
+    "trend_alignment": "Тренд",
+    "market_structure": "Структура",
+    "liquidity": "Ликвидность",
+    "volume": "Объём",
+    "momentum": "Импульс",
+    "derivatives": "Деривативы",
+    "macro": "Макро",
+    "historical": "История",
+    "risk_profile": "R:R",
+    "execution": "Исполнение",
+}
+
+
+def format_deep(quality: dict[str, Any], ctx: dict[str, Any], ai_text: str) -> str:
+    decision = quality.get("decision", "NO TRADE")
+    overall = quality.get("overall", 0)
+    direction = quality.get("direction")
+    scores = quality.get("scores", {})
+    plan = quality.get("plan", {})
+    hist = ctx.get("historical", {})
+    vol = ctx.get("volatility", {})
+
+    lines = [
+        f"🏛 ГЛУБОКИЙ АНАЛИЗ {config.SYMBOL_DISPLAY} | 1D/12H/4H",
+        f"Цена: {_fmt_price(ctx.get('price'))}",
+        "",
+        f"{DECISION_EMOJI.get(decision, '')} Решение: {decision}",
+        f"📊 Trade Quality Score: {overall}/100",
+        "",
+        "Разбивка (0-10):",
+    ]
+    for key in scores:
+        lines.append(f"• {SECTION_LABEL.get(key, key)}: {scores[key]}")
+
+    if direction and decision != "NO TRADE":
+        lines += [
+            "",
+            f"🎯 План ({'ЛОНГ' if direction == 'long' else 'ШОРТ'}):",
+            f"Вход: {_fmt_price(plan.get('entry'))}",
+            f"🛑 Стоп: {_fmt_price(plan.get('stop'))} (за структурой)",
+            f"🎯 TP1: {_fmt_price(plan.get('tp1'))}",
+            f"🎯 TP2: {_fmt_price(plan.get('tp2'))}",
+            f"🎯 TP3: {_fmt_price(plan.get('tp3'))}",
+            f"R:R ≈ {plan.get('rr')} | макс. просадка {plan.get('max_drawdown_pct')}%",
+        ]
+
+    em = (vol.get("expected_move") or {}).get("7d", {})
+    lines += [
+        "",
+        f"📈 Волатильность: {vol.get('regime')} (ATR {vol.get('atr_percentile')}‰)",
+        f"Ожидаемое движение 7д: ±{em.get('pct')}%" if em else "",
+        f"🕰 Аналоги: {hist.get('matches', 0)} | бычьих {hist.get('bullish_pct')}% | "
+        f"ср. {hist.get('avg_return')}% | conf {hist.get('confidence')}",
+    ]
+
+    if ai_text:
+        lines += ["", "— — —", ai_text]
+
+    if decision == "NO TRADE":
+        lines += ["", "💡 Кэш — тоже позиция. Сделка не форсируется."]
+
+    return "\n".join(lines)
     stage = result.get("blocked_at")
     bias = result.get("htf_bias", "neutral")
     long_s = result.get("long_score")

@@ -11,6 +11,7 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
 
 # --- reply keyboard labels (also used for routing button presses) ---------
 BTN_SIGNAL = "📊 Сигнал"
+BTN_DEEP = "🏛 Глубокий анализ"
 BTN_LEVELS = "📐 Уровни"
 BTN_FUNDING = "💸 Funding"
 BTN_FEAR = "😱 Fear & Greed"
@@ -23,10 +24,11 @@ BTN_HELP = "❓ Помощь"
 def main_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         [
-            [KeyboardButton(BTN_SIGNAL), KeyboardButton(BTN_LEVELS)],
-            [KeyboardButton(BTN_FUNDING), KeyboardButton(BTN_FEAR)],
-            [KeyboardButton(BTN_JOURNAL), KeyboardButton(BTN_BACKTEST)],
-            [KeyboardButton(BTN_ASK), KeyboardButton(BTN_HELP)],
+            [KeyboardButton(BTN_SIGNAL), KeyboardButton(BTN_DEEP)],
+            [KeyboardButton(BTN_LEVELS), KeyboardButton(BTN_FUNDING)],
+            [KeyboardButton(BTN_FEAR), KeyboardButton(BTN_JOURNAL)],
+            [KeyboardButton(BTN_BACKTEST), KeyboardButton(BTN_ASK)],
+            [KeyboardButton(BTN_HELP)],
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите команду или задайте вопрос…",
@@ -38,14 +40,17 @@ def main_inline_keyboard() -> InlineKeyboardMarkup:
         [
             [
                 InlineKeyboardButton(BTN_SIGNAL, callback_data="cmd:signal"),
+                InlineKeyboardButton(BTN_DEEP, callback_data="cmd:deep"),
+            ],
+            [
                 InlineKeyboardButton(BTN_LEVELS, callback_data="cmd:levels"),
-            ],
-            [
                 InlineKeyboardButton(BTN_FUNDING, callback_data="cmd:funding"),
-                InlineKeyboardButton(BTN_FEAR, callback_data="cmd:fear"),
             ],
             [
+                InlineKeyboardButton(BTN_FEAR, callback_data="cmd:fear"),
                 InlineKeyboardButton(BTN_JOURNAL, callback_data="cmd:journal"),
+            ],
+            [
                 InlineKeyboardButton(BTN_BACKTEST, callback_data="cmd:backtest"),
             ],
         ]
@@ -55,6 +60,7 @@ def main_inline_keyboard() -> InlineKeyboardMarkup:
 # Map reply-keyboard label -> internal command name.
 LABEL_TO_COMMAND = {
     BTN_SIGNAL: "signal",
+    BTN_DEEP: "deep",
     BTN_LEVELS: "levels",
     BTN_FUNDING: "funding",
     BTN_FEAR: "fear",
