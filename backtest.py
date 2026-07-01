@@ -4,8 +4,9 @@ Walks the profile's entry timeframe (swing 1H / intraday 15m) and reconstructs
 the market context as-of each bar exactly like the live engine: HTF bias from
 the trend timeframe, Order Blocks / FVG from the higher zone timeframes,
 premium/discount, liquidity sweep, reversal — then the same confluence score
-and gates. Each qualified setup is resolved once (ATR stop vs target-1), and
-results are aggregated over a score-threshold sweep with the profile cooldown.
+and gates. Each qualified setup is resolved with the same lifecycle the live
+journal uses (stop / TP1->breakeven / TP2), net of trading costs, and results
+are aggregated over a score-threshold sweep with the profile cooldown.
 
 Note: funding / on-chain history is unavailable, so those macro points are not
 scored — the estimate is approximate but faithful to the price-based logic.
@@ -181,26 +182,39 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
 
 
 def _resolve(df, entry_idx: int, direction: str, pos: dict[str, Any]) -> dict[str, Any] | None:
-    stop, target = pos["stop_loss"], pos["target_1"]
+    """Replay the LIVE trade lifecycle (same as bot/journal.evaluate_trade):
+
+        stop hit            -> loss  (-1R)
+        TP1 hit             -> stop moves to breakeven
+        then back to entry  -> breakeven (0R)
+        then TP2 hit        -> win (full R to TP2)
+
+    Conservative: within a candle the stop is assumed to hit first.
+    """
+    entry, stop = pos["entry_price"], pos["stop_loss"]
+    tp1, tp2 = pos["target_1"], pos["target_2"]
+    risk = abs(entry - stop)
+    long = direction == "long"
+    hit_tp1 = False
+
     for j in range(entry_idx + 1, len(df)):
         high, low = float(df["high"].iloc[j]), float(df["low"].iloc[j])
-        if direction == "long":
-            if low <= stop:
+        if not hit_tp1:
+            stop_hit = (low <= stop) if long else (high >= stop)
+            tp1_hit = (high >= tp1) if long else (low <= tp1)
+            if stop_hit:
                 return {"outcome": "loss", "r": -1.0}
-            if high >= target:
-                return {"outcome": "win", "r": _r_multiple(pos)}
-        else:
-            if high >= stop:
-                return {"outcome": "loss", "r": -1.0}
-            if low <= target:
-                return {"outcome": "win", "r": _r_multiple(pos)}
+            if tp1_hit:
+                hit_tp1 = True
+        if hit_tp1:
+            be_hit = (low <= entry) if long else (high >= entry)
+            tp2_hit = (high >= tp2) if long else (low <= tp2)
+            if be_hit:
+                return {"outcome": "breakeven", "r": 0.0}
+            if tp2_hit:
+                r = round(abs(tp2 - entry) / risk, 2) if risk else 0.0
+                return {"outcome": "win", "r": r}
     return None
-
-
-def _r_multiple(pos: dict[str, Any]) -> float:
-    risk = abs(pos["entry_price"] - pos["stop_loss"])
-    reward = abs(pos["target_1"] - pos["entry_price"])
-    return round(reward / risk, 2) if risk else 0.0
 
 
 def _aggregate(setups: list[dict[str, Any]], threshold: int, cooldown_bars: int) -> dict[str, Any]:

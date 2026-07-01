@@ -1,7 +1,9 @@
-"""APScheduler wiring: periodic analysis + price-alert checks.
+"""APScheduler wiring: analysis streams, trade resolution, price alerts.
 
-- Full analysis every ANALYSIS_INTERVAL_HOURS (default 4h) on the 4H/1H frame.
-- A daily job re-evaluates the 1D bias.
+- Swing analysis hourly (1H entry) and intraday every 15m (15m entry) — the
+  cadence comes from each profile's interval_minutes.
+- resolve_trades_job replays open trades on their own timeframe every
+  TRADE_CHECK_INTERVAL_MINUTES.
 - Price-alert checks every ALERT_CHECK_INTERVAL_MINUTES.
 """
 from __future__ import annotations
@@ -89,19 +91,32 @@ async def price_alert_job(application) -> None:
 
 
 async def resolve_trades_job(application) -> None:
-    """Check open journal trades for stop/target hits and record outcomes."""
+    """Check open journal trades for stop/target hits and record outcomes.
+
+    Each trade is replayed on its OWN timeframe (a 15m intraday trade judged
+    on 1H candles would often see both stop and target inside one bar and be
+    scored as a loss by the conservative rule). Falls back to 1H when the
+    trade's timeframe history no longer reaches back to its open time.
+    """
     binance = application.bot_data["binance"]
     open_trades = await db.open_trades()
     if not open_trades:
         return
-    try:
-        df = await binance.klines("1h", limit=1000)  # ~41 days of coverage
-        price = float(df["close"].iloc[-1])
-    except Exception:  # noqa: BLE001
-        log.exception("resolve_trades_job: failed to fetch klines")
+
+    # Fetch each needed timeframe once.
+    needed = {trade.get("timeframe") or "1h" for trade in open_trades} | {"1h"}
+    frames: dict[str, object] = {}
+    for tf in needed:
+        try:
+            frames[tf] = await binance.klines(tf, limit=1000)
+        except Exception:  # noqa: BLE001
+            log.exception("resolve_trades_job: failed to fetch %s klines", tf)
+    if "1h" not in frames:
         return
+    price = float(frames["1h"]["close"].iloc[-1])
 
     for trade in open_trades:
+        df = journal.pick_frame(trade, frames)
         evaluation = journal.evaluate_trade(trade, df, price)
         if not evaluation:
             continue

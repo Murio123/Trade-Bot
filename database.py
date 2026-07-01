@@ -91,6 +91,8 @@ ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS tp1 DOUBLE PRECISION;
 ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS tp2 DOUBLE PRECISION;
 ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS stage TEXT DEFAULT 'open';
 ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS current_stop DOUBLE PRECISION;
+ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS timeframe TEXT;
+ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS symbol TEXT;
 """
 
 
@@ -227,13 +229,14 @@ class Database:
                 """
                 INSERT INTO trades_journal
                     (signal_id, direction, entry_price, stop_loss, target,
-                     tp1, tp2, stage, current_stop, outcome)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,'open',$8,'open')
+                     tp1, tp2, stage, current_stop, outcome, timeframe, symbol)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,'open',$8,'open',$9,$10)
                 RETURNING id
                 """,
                 trade.get("signal_id"), trade.get("direction"), trade.get("entry_price"),
                 trade.get("stop_loss"), trade.get("target"),
                 trade.get("tp1"), trade.get("tp2"), trade.get("stop_loss"),
+                trade.get("timeframe"), trade.get("symbol"),
             )
             return int(row["id"])
 
@@ -271,9 +274,11 @@ class Database:
         if not self.pool:
             return self._mem.journal_stats(symbol)
         async with self.pool.acquire() as conn:
+            # symbol IS NULL keeps trades recorded before the column existed.
             rows = await conn.fetch(
                 "SELECT outcome, pnl_r FROM trades_journal WHERE outcome IS NOT NULL "
-                "AND outcome <> 'open'"
+                "AND outcome <> 'open' AND (symbol = $1 OR symbol IS NULL)",
+                symbol,
             )
         return _aggregate_journal(rows)
 
@@ -417,7 +422,8 @@ class _MemoryStore:
 
     def journal_stats(self, symbol: str):
         closed = [t for t in self.trades
-                  if t.get("outcome") and t["outcome"] != "open"]
+                  if t.get("outcome") and t["outcome"] != "open"
+                  and t.get("symbol") in (None, symbol)]
         return _aggregate_journal(closed)
 
     def add_price_alert(self, chat_id, symbol, level, direction, note):

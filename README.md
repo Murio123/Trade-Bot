@@ -1,108 +1,108 @@
 # BTC Signal Bot 🤖
 
-AI-powered Telegram бот для торговых сигналов BTC/USDT (фьючерсы). Анализирует
-рынок на нескольких таймфреймах, прогоняет каждый потенциальный сигнал через
-семиуровневый каскад шумоподавления и формулирует итоговый сигнал текстом через
-Claude.
+AI-Telegram-бот для торговых сигналов BTC/USDT (фьючерсы). Два независимых
+потока сигналов (свинг и интрадей), Smart-Money анализ по зонам старших
+таймфреймов, 7-уровневый каскад шумоподавления, ведение сделок по этапам и
+честный бэктест с учётом комиссий.
 
 > ⚠️ Не является финансовой рекомендацией. Используйте на свой риск.
 
-## Архитектура
+## Два потока сигналов
 
-```
-main.py            — точка входа: Telegram polling + APScheduler
-pipeline.py        — сбор рыночного контекста + запуск каскада
-scheduler.py       — анализ каждые 4ч, проверка ценовых алертов
-config.py          — конфигурация из переменных окружения
-database.py        — PostgreSQL (asyncpg) + in-memory fallback
-backtest.py        — упрощённый бэктест стратегии
-
-analyzer/          — источники данных и индикаторы
-  binance.py         цена, klines, funding, OI, long/short ratio, aggTrades
-  indicators.py      EMA / RSI / MACD / Bollinger+BBW / ATR
-  divergence.py      авто-детект RSI/MACD дивергенций
-  order_blocks.py    Order Blocks + Break-of-Structure
-  liquidity.py       equal highs/lows + sweep detection
-  volume_profile.py  POC / VAH / VAL
-  liquidation_map.py Coinglass / OI-based зоны ликвидаций
-  cvd.py             Cumulative Volume Delta из aggTrades
-  macro.py           DXY / US10Y корреляция (FRED или Stooq)
-  session_stats.py   волатильность по сессиям (Азия/Лондон/Нью-Йорк)
-  onchain.py         Glassnode (netflow, MVRV, SOPR, whales)
-  news.py            NewsAPI sentiment + Fear & Greed
-
-signal_engine/     — каскад генерации сигнала (уровни 1-7)
-  htf_filter.py      L1: HTF bias filter (блокирующий)
-  confluence.py      L2-3: confluence scoring + категориальное разнообразие
-  conflict_resolver.py L4: разрешение конфликтов
-  mtf_confidence.py  L5: мультитаймфреймовое согласие
-  cooldown.py        L6: cooldown + дедупликация
-  daily_limiter.py   L7: дневной лимит сигналов
-
-risk/position_sizing.py — ATR-based sizing
-ai/claude.py            — интерпретация сигнала + /ask чат-режим
-bot/                    — Telegram интерфейс
-  handlers.py            команды
-  alerts.py              отправка уведомлений (учитывает DRY_RUN)
-  journal.py             журнал сделок + статистика
-  formatting.py          рендер сообщений
-```
-
-## Каскад генерации сигнала
-
-| Уровень | Модуль | Тип |
+| | 📊 Свинг | ⚡ Интрадей |
 |---|---|---|
-| 1. HTF Bias Filter | `htf_filter` | блокирующий |
-| 2. Confluence Scoring | `confluence` | скоринг |
-| 3. Категориальное разнообразие (≥3) | `confluence` | блокирующий |
-| 4. Conflict Resolution | `conflict_resolver` | блокирующий |
-| 5. MTF Confidence | `mtf_confidence` | модификатор |
-| 6. Cooldown / дедуп | `cooldown` | блокирующий |
-| 7. Дневной лимит | `daily_limiter` | блокирующий |
+| Вход | 1H | 15m |
+| Тренд (HTF-фильтр) | 1D | 1H |
+| Зоны (OB/FVG/цели) | 12H + 4H | 4H + 1H |
+| Согласие ТФ | 1H/4H/12H/1D | 15m/1H/4H |
+| Cooldown | 8 ч | 2 ч |
+| Анализ | каждый час | каждые 15 мин |
 
-Итоговая классификация по score: **8-10** → Telegram уведомление; **5-7** →
-запись в БД (доступно по `/signal`); **<5** → игнорируется.
+Параметры профилей: `signal_engine/profiles.py` (цели/стоп настраиваются через
+`SWING_TARGETS`, `INTRADAY_TARGETS`, `*_ATR_MULT`).
+
+## Каскад шумоподавления (7 уровней)
+
+1. **HTF-фильтр** — сигнал против старшего тренда блокируется полностью.
+2. **Confluence Score** — очки в 5 категорий (тренд/импульс/объём/структура/макро);
+   Smart-Money факторы весят больше: HTF Order Block +3, снятие ликвидности +3,
+   FVG +2, premium/discount +2, разворот на экстремуме +2/+3.
+3. **Разнообразие** — минимум 3 разные категории (`MIN_DIVERSE_CATEGORIES`).
+4. **Конфликты** — при вероятном свипе ликвидности вход откладывается.
+5. **Согласие ТФ** — направленный множитель уверенности (4/4 → ×1.2, против → ×0.7).
+6. **Cooldown/дедуп** — по каждому потоку отдельно.
+7. **Дневной лимит** — `MAX_SIGNALS_PER_DAY` (по таймфрейму), только топовые.
+
+Классификация: score ≥8 → авто-уведомление; 5-7 → журнал (`/signal`); <5 → игнор.
 
 ## Команды
 
 | Команда | Действие |
 |---|---|
-| `/signal` | Текущий сигнал (включая слабые 5-7) |
-| `/levels` | Order Blocks, ликвидность, volume profile |
-| `/funding` | Funding rate + историческая аномальность |
-| `/fear` | Индекс страха/жадности |
-| `/backtest` | Результаты стратегии за период |
-| `/journal` | Винрейт и средний R/R |
-| `/ask <вопрос>` | Свободный вопрос к Claude с рыночным контекстом |
+| `/signal`, `/intraday` | Свинг / интрадей сигнал по запросу |
+| `/deep` | Институциональный разбор 1D/12H/4H со взвешенным score /100 |
+| `/reversal` | Дно/пик: истощение тренда сразу по 1H/4H/12H/1D (≥2 ТФ = подтверждение) |
+| `/levels` | Ближайшие S/R, OB/FVG с HTF, Volume Profile, ликвидации, EMA, вывод |
+| `/funding`, `/fear` | Деривативы и индекс страха/жадности |
+| `/journal` | Реальный винрейт и R по закрытым сделкам |
+| `/backtest [swing\|intraday]` | Перебор порогов на истории, NET (с комиссиями), проекция %/мес |
+| `/status`, `/testalert` | Здоровье бота и проверка канала уведомлений |
+| `/guide` | Встроенный гид по всем функциям |
+| `/ask <вопрос>` | Вопрос к Claude с рыночным контекстом (любой текст = /ask) |
 
-Любое текстовое сообщение без команды обрабатывается как `/ask`.
+Интерфейс — кнопки (reply-клавиатура + inline-меню), появляются после `/start`.
 
-## Деплой на Railway
+## Ведение сделок
 
-1. Создайте проект и подключите этот репозиторий.
-2. Добавьте плагин **PostgreSQL** — Railway проставит `DATABASE_URL`.
-3. Заполните переменные окружения (см. `.env.example`). Обязательны:
-   `TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`, `DATABASE_URL`.
-4. `Procfile` уже задаёт процесс: `worker: python main.py`.
-5. **Dry-run**: оставьте `DRY_RUN=true` для теста на реальных данных без
-   отправки уведомлений. Убедитесь, что анализ идёт (логи), затем поставьте
-   `DRY_RUN=false` и задайте `TELEGRAM_ALERT_CHAT_IDS`.
+Каждый отправленный сигнал ведётся как позиция:
+`TP1 достигнут → стоп в безубыток → TP2 (win) / возврат к БУ (0R) / стоп (−1R)`,
+с уведомлением на каждом этапе. Исходы проверяются на **родном таймфрейме**
+сделки каждые 15 минут; статистика — в `/journal`.
 
-## Локальный запуск
+## Архитектура
 
-```bash
-pip install -r requirements.txt
-cp .env.example .env   # заполните ключи
-export $(grep -v '^#' .env | xargs)
-python main.py
+```
+main.py                 точка входа: Telegram polling + APScheduler
+pipeline.py             сбор контекста (HTF-зоны, равновесие, развороты) + каскад
+scheduler.py            свинг/интрадей анализ, resolve сделок, ценовые алерты
+backtest.py             бэктест живых профилей: NET результат, порог, проекция
+config.py               конфигурация из env (см. .env.example)
+database.py             PostgreSQL (asyncpg) + in-memory fallback, миграции
+
+analyzer/               binance, bybit, exchange (auto-failover 451→запасная),
+                        indicators (EMA/RSI/MACD/BB/ATR/TSI/VWAP/StochRSI),
+                        order_blocks, fvg, liquidity, volume_profile,
+                        equilibrium (premium/discount), reversal (6 факторов),
+                        divergence, cvd, structure (BOS/CHoCH), volatility,
+                        historical (аналоги), correlation, macro, onchain, news
+
+signal_engine/          htf_filter, confluence, conflict_resolver,
+                        mtf_confidence, cooldown, daily_limiter,
+                        profiles (свинг/интрадей), quality_score (/100 для /deep)
+
+bot/                    handlers (+гейткипер доступа), keyboards, formatting,
+                        alerts (DRY_RUN-aware), journal (лайфцикл), guide
+ai/                     claude (сигналы, /ask), swing_analysis (/deep нарратив)
+tests/                  pytest: каскад, лайфцикл сделок, анализаторы
 ```
 
-Без `DATABASE_URL` бот использует in-memory хранилище; без опциональных
-ключей соответствующие модули просто не дают очков (graceful degradation).
+## Деплой (Railway)
 
-## Graceful degradation
+1. Подключить репозиторий + плагин **PostgreSQL** (`DATABASE_URL` через
+   `${{Postgres.DATABASE_URL}}`).
+2. Обязательные переменные: `TELEGRAM_BOT_TOKEN`, `ANTHROPIC_API_KEY`,
+   `TELEGRAM_ALERT_CHAT_IDS` (chat_id получателя).
+3. Безопасность: `TELEGRAM_ALLOWED_CHAT_IDS` — кто вообще может писать боту
+   (по умолчанию = получатели алертов; чужие отклоняются).
+4. Старт в **`DRY_RUN=true`**: анализ идёт, уведомления не шлются. Проверить
+   `/status` и `/testalert`, затем `DRY_RUN=false`.
+5. Источник данных: `EXCHANGE=auto` (Bybit↔Binance c автофейловером при 451).
 
-Каждый внешний источник опционален. Если ключ не задан или API недоступно —
-модуль возвращает нейтральный результат, а движок продолжает работу на
-доступных данных. Обязателен только Binance (публичные эндпоинты), Telegram и
-Anthropic (для текста сигнала; есть детерминированный fallback).
+Полный список переменных — в `.env.example`. Все внешние источники, кроме
+биржи/Telegram/Anthropic, опциональны (graceful degradation).
+
+## Тесты
+
+```bash
+pip install pytest && python -m pytest tests/ -q
+```

@@ -36,10 +36,34 @@ async def record_signal_as_trade(signal_id: int, signal: dict[str, Any]) -> int 
             "target": signal.get("target_1"),
             "tp1": signal.get("target_1"),
             "tp2": signal.get("target_2"),
+            "timeframe": signal.get("timeframe"),
+            "symbol": signal.get("symbol"),
         })
     except Exception as exc:  # noqa: BLE001
         log.warning("record_signal_as_trade failed: %s", exc)
         return None
+
+
+def pick_frame(trade: dict[str, Any], frames: dict[str, Any]):
+    """Choose the klines frame to replay a trade on.
+
+    Prefer the trade's own timeframe, but only if that history still covers
+    the trade's open time (15m frames span ~10 days); otherwise fall back to
+    1H, which reaches ~41 days back.
+    """
+    tf = trade.get("timeframe") or "1h"
+    df = frames.get(tf)
+    fallback = frames.get("1h")
+    if df is None or len(df) == 0:
+        return fallback
+    opened_at = trade.get("opened_at")
+    if opened_at is not None and "open_time" in df.columns:
+        ts = pd.Timestamp(opened_at)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        if df["open_time"].iloc[0] > ts and fallback is not None:
+            return fallback
+    return df
 
 
 def _r(entry: float, stop: float, exit_price: float, direction: str) -> float:

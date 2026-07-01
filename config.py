@@ -95,7 +95,8 @@ TAKER_FEE_PCT = _get_float("TAKER_FEE_PCT", 0.05)   # % per side (Binance future
 SLIPPAGE_PCT = _get_float("SLIPPAGE_PCT", 0.03)     # % per round trip, conservative
 
 # --- Scheduler ------------------------------------------------------------
-ANALYSIS_INTERVAL_HOURS = _get_int("ANALYSIS_INTERVAL_HOURS", 4)
+# Analysis cadence lives in signal_engine/profiles.py (per-profile
+# interval_minutes: swing hourly, intraday every 15m).
 ALERT_CHECK_INTERVAL_MINUTES = _get_int("ALERT_CHECK_INTERVAL_MINUTES", 5)
 # How often open trades are checked for stop/target hits.
 TRADE_CHECK_INTERVAL_MINUTES = _get_int("TRADE_CHECK_INTERVAL_MINUTES", 15)
@@ -104,13 +105,9 @@ TRADE_CHECK_INTERVAL_MINUTES = _get_int("TRADE_CHECK_INTERVAL_MINUTES", 15)
 ENABLE_REVERSAL_ALERTS = _get_bool("ENABLE_REVERSAL_ALERTS", True)
 REVERSAL_ALERT_MIN_FACTORS = _get_int("REVERSAL_ALERT_MIN_FACTORS", 3)
 REVERSAL_ALERT_COOLDOWN_HOURS = _get_int("REVERSAL_ALERT_COOLDOWN_HOURS", 4)
-# Primary timeframe used by the scheduled analysis and the /signal command.
-SIGNAL_TIMEFRAME = _get("SIGNAL_TIMEFRAME", "4h")
-
-# Fast intraday analysis on a shorter timeframe (e.g. 15m), run more often.
+# Toggle for the intraday (15m) analysis stream; its cadence/timeframes are
+# defined by the "intraday" profile in signal_engine/profiles.py.
 ENABLE_FAST_ANALYSIS = _get_bool("ENABLE_FAST_ANALYSIS", True)
-FAST_TIMEFRAME = _get("FAST_TIMEFRAME", "15m")
-FAST_INTERVAL_MINUTES = _get_int("FAST_INTERVAL_MINUTES", 15)
 
 # --- Operating mode -------------------------------------------------------
 # Dry-run: run the whole pipeline but do NOT send Telegram alerts (ТЗ step 10).
