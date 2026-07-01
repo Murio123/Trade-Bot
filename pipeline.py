@@ -269,6 +269,45 @@ def _build_htf_zones(dfs: dict[str, Any], inds: dict[str, Any], zone_tfs: list[s
     return {"order_blocks": ob, "fvg": fvg, "levels": levels}
 
 
+def _structural_stop(ctx: dict[str, Any], direction: str, entry: float,
+                     atr: float, profile: dict[str, Any]) -> float | None:
+    """Stop behind the nearest HTF structure (level or OB edge) + 0.5 ATR.
+
+    Only for profiles with structural_stop (swing). Falls back to None — i.e.
+    keep the ATR stop — when no structure sits below/above, when the
+    structural stop would be TIGHTER than the ATR stop (no protection), or
+    when it is absurdly far (> 8 ATR, unusable sizing).
+    """
+    if not profile.get("structural_stop") or not atr:
+        return None
+    levels = ctx.get("htf_levels", {}) or {}
+    ob = ctx.get("order_blocks", {}) or {}
+    buf = atr * 0.5
+
+    if direction == "long":
+        cands = [l for l in levels.get("lows", []) if l < entry]
+        z = ob.get("bullish_ob")
+        if z and z.get("low", entry) < entry:
+            cands.append(z["low"])
+        if not cands:
+            return None
+        stop = max(cands) - buf
+        risk = entry - stop
+    else:
+        cands = [h for h in levels.get("highs", []) if h > entry]
+        z = ob.get("bearish_ob")
+        if z and z.get("high", entry) > entry:
+            cands.append(z["high"])
+        if not cands:
+            return None
+        stop = min(cands) + buf
+        risk = stop - entry
+
+    if risk < atr * profile["atr_mult"] or risk > atr * 8:
+        return None
+    return stop
+
+
 def _structure_targets(ctx: dict[str, Any], direction: str, entry: float, risk: float,
                        fb1: float, fb2: float) -> tuple[float, float, bool]:
     """Targets at the nearest HTF liquidity / volume nodes, else ATR fallback."""
@@ -538,6 +577,23 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
                                   atr_multiplier=profile["atr_mult"],
                                   targets_r=profile["targets"])
 
+    # Swing: stop behind the HTF structure, not a 1H-ATR multiple — otherwise
+    # a "swing" trade degenerates into a scalp with an hours-long horizon.
+    stop_basis = "atr"
+    s_stop = _structural_stop(ctx, direction, ctx["price"], atr_value, profile)
+    if s_stop is not None:
+        sign = 1 if direction == "long" else -1
+        dist = abs(ctx["price"] - s_stop)
+        risk_amount = config.ACCOUNT_BALANCE * (config.RISK_PERCENT / 100)
+        position.update({
+            "stop_loss": round(s_stop, 2),
+            "stop_distance": round(dist, 2),
+            "position_size": round(risk_amount / dist, 4),
+            "target_1": round(ctx["price"] + sign * dist * profile["targets"][0], 2),
+            "target_2": round(ctx["price"] + sign * dist * profile["targets"][1], 2),
+        })
+        stop_basis = "structure"
+
     # Targets at HTF structure (nearest liquidity / volume nodes) when available,
     # otherwise the ATR-based R-multiples.
     risk = abs(ctx["price"] - position["stop_loss"])
@@ -561,6 +617,7 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         "hold_tp1_hours": hold[0],
         "hold_tp2_hours": hold[1],
         "targets_structure": struct_targets,
+        "stop_basis": stop_basis,
         "position_size": position["position_size"],
         "risk_amount": position["risk_amount"],
         "atr": atr_value,

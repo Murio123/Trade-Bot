@@ -35,6 +35,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "htf": "1d",
         "mtf": ["1h", "4h", "12h", "1d"],  # 1H entry / 4H+12H zones / 1D trend
         "zone_tfs": ["12h", "4h"],          # OB/FVG/targets from higher timeframes
+        "structural_stop": True,            # stop behind HTF structure, not 1H-ATR
         "cooldown_hours": 8,
         "atr_mult": _fnum("SWING_ATR_MULT", 1.5),
         "targets": _targets("SWING_TARGETS", (1.5, 3.0)),

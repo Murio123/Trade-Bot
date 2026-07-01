@@ -47,9 +47,9 @@ def format_signal(signal: dict[str, Any]) -> str:
         f"📊 Направление: {DIRECTION_LABEL.get(direction, direction)}",
         f"💰 Вход: {_fmt_price(signal.get('entry_price'))}",
         "",
-        "📐 Risk Management (ATR-based):",
+        "📐 Risk Management:",
         f"🛑 Стоп-лосс: {_fmt_price(signal.get('stop_loss'))} "
-        f"({signal.get('atr_multiplier_used', config.ATR_MULTIPLIER)}×ATR"
+        f"({'за структурой HTF' if signal.get('stop_basis') == 'structure' else str(signal.get('atr_multiplier_used', config.ATR_MULTIPLIER)) + '×ATR'}"
         f"{_stop_pct(signal)})",
         f"🎯 Цель 1: {_fmt_price(signal.get('target_1'))}"
         f"{' (HTF-структура)' if signal.get('targets_structure') else ''}",
@@ -718,6 +718,36 @@ def format_trade_event(trade: dict[str, Any], event: dict[str, Any]) -> str:
         f"{emoji} {label}",
         f"Результат: {pnl_r:+.2f}R | выход {_fmt_price(event.get('exit_price'))}",
     ])
+
+
+def format_last_signal_note(last: dict[str, Any] | None,
+                            max_age_hours: float = 24) -> str | None:
+    """A reminder of the still-relevant previous signal, or None if stale."""
+    if not last:
+        return None
+    from datetime import datetime, timezone
+    created = last.get("created_at") or last.get("timestamp")
+    if created is None:
+        return None
+    if isinstance(created, str):
+        try:
+            created = datetime.fromisoformat(created)
+        except ValueError:
+            return None
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    age_h = (datetime.now(timezone.utc) - created).total_seconds() / 3600
+    if age_h > max_age_hours:
+        return None
+    d = "🟢 ЛОНГ" if last.get("direction") == "long" else "🔴 ШОРТ"
+    return (
+        f"📌 Действующий сетап ({_ago(created)}): {d} от "
+        f"{_fmt_price(last.get('entry_price'))}\n"
+        f"🛑 SL {_fmt_price(last.get('stop_loss'))} | "
+        f"🎯 TP1 {_fmt_price(last.get('target_1'))} | "
+        f"TP2 {_fmt_price(last.get('target_2'))}\n"
+        "Новых сетапов сверх него сейчас нет."
+    )
 
 
 def format_blocked(result: dict[str, Any]) -> str:

@@ -145,9 +145,27 @@ async def _run_signal(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     if result.get("status") == "blocked":
-        await update.effective_message.reply_text(formatting.format_blocked(result))
+        text = formatting.format_blocked(result)
+        # Continuity: no NEW setup does not mean the previous one vanished.
+        note = formatting.format_last_signal_note(
+            last_signal, max_age_hours=profile["cooldown_hours"] * 3)
+        if note:
+            text += "\n\n" + note
+        await update.effective_message.reply_text(text)
         return
-    await update.effective_message.reply_text(formatting.format_signal(result))
+
+    # Persist what the user saw, so /signal has memory: cooldown works against
+    # it and the setup can be shown later instead of "нет позиций".
+    if result.get("status") in ("alert", "journal"):
+        record = {**result, "delivered": result["status"] == "alert"}
+        signal_id = await db.insert_signal(record)
+        if result["status"] == "alert":
+            await journal.record_signal_as_trade(signal_id, result)
+
+    text = formatting.format_signal(result)
+    if result.get("status") == "cooldown":
+        text += "\n\n⏳ Это действующий сетап (в пределах cooldown) — не новый вход."
+    await update.effective_message.reply_text(text)
     await _send_chart(update, ctx, result)
 
 

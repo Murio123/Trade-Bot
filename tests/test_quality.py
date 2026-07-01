@@ -44,3 +44,33 @@ def test_crowded_funding_blocks_joining_the_crowd():
     # normal funding never vetoes
     assert not crowded_funding("long", {"current": 0.0001, "zscore": 0.5})
     assert not crowded_funding("long", None)
+
+
+def test_structural_stop_for_swing():
+    from pipeline import _structural_stop
+    prof = {"structural_stop": True, "atr_mult": 1.5}
+    ctx = {"htf_levels": {"lows": [57200], "highs": [60100]},
+           "order_blocks": {}}
+    stop = _structural_stop(ctx, "long", 58700, 300, prof)
+    assert stop == 57200 - 150  # level minus 0.5 ATR buffer
+    # tighter than the ATR stop -> keep ATR (returns None)
+    assert _structural_stop({"htf_levels": {"lows": [58600]},
+                             "order_blocks": {}}, "long", 58700, 300, prof) is None
+    # absurdly far (> 8 ATR) -> keep ATR
+    assert _structural_stop({"htf_levels": {"lows": [50000]},
+                             "order_blocks": {}}, "long", 58700, 300, prof) is None
+    # profile without the flag (intraday) -> never structural
+    assert _structural_stop(ctx, "long", 58700, 300, {"atr_mult": 1.2}) is None
+
+
+def test_last_signal_note_recent_vs_stale():
+    from datetime import datetime, timedelta, timezone
+    from bot.formatting import format_last_signal_note
+    base = {"direction": "long", "entry_price": 58100, "stop_loss": 57050,
+            "target_1": 59700, "target_2": 61300}
+    recent = dict(base, created_at=datetime.now(timezone.utc) - timedelta(hours=1))
+    note = format_last_signal_note(recent, max_age_hours=24)
+    assert note and "Действующий сетап" in note and "58 100" in note
+    stale = dict(base, created_at=datetime.now(timezone.utc) - timedelta(hours=30))
+    assert format_last_signal_note(stale, max_age_hours=24) is None
+    assert format_last_signal_note(None) is None
