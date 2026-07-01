@@ -35,7 +35,7 @@ log = logging.getLogger(__name__)
 
 THRESHOLDS = [5, 6, 7, 8, 9, 10]
 MIN_TRADES_FOR_REC = 8
-MAX_BARS = 500          # entry bars to walk (bounds runtime)
+MAX_BARS = 800          # entry bars to walk (bounds runtime)
 _TF_HOURS = {"15m": 0.25, "1h": 1.0, "4h": 4.0, "12h": 12.0, "1d": 24.0}
 
 
