@@ -6,7 +6,26 @@ risk/cooldown parameters tuned to that horizon.
 """
 from __future__ import annotations
 
+import os
 from typing import Any
+
+
+def _targets(name: str, default: tuple[float, float]) -> tuple[float, float]:
+    raw = os.getenv(name)
+    if raw:
+        try:
+            a, b = [float(x) for x in raw.split(",")[:2]]
+            return (a, b)
+        except (ValueError, TypeError):
+            pass
+    return default
+
+
+def _fnum(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, default))
+    except (ValueError, TypeError):
+        return default
 
 PROFILES: dict[str, dict[str, Any]] = {
     "swing": {
@@ -17,8 +36,8 @@ PROFILES: dict[str, dict[str, Any]] = {
         "mtf": ["1h", "4h", "12h", "1d"],  # 1H entry / 4H+12H zones / 1D trend
         "zone_tfs": ["12h", "4h"],          # OB/FVG/targets from higher timeframes
         "cooldown_hours": 8,
-        "atr_mult": 1.5,
-        "targets": (1.5, 3.0),
+        "atr_mult": _fnum("SWING_ATR_MULT", 1.5),
+        "targets": _targets("SWING_TARGETS", (1.5, 3.0)),
         "interval_minutes": 60,    # scheduled hourly (matches 1H entry)
     },
     "intraday": {
@@ -29,8 +48,8 @@ PROFILES: dict[str, dict[str, Any]] = {
         "mtf": ["15m", "1h", "4h"],  # 15m entry / 1H trend / 4H context
         "zone_tfs": ["4h", "1h"],     # OB/FVG/targets from higher timeframes
         "cooldown_hours": 2,
-        "atr_mult": 1.2,
-        "targets": (1.0, 2.0),
+        "atr_mult": _fnum("INTRADAY_ATR_MULT", 1.2),
+        "targets": _targets("INTRADAY_TARGETS", (1.0, 2.0)),
         "interval_minutes": 15,    # scheduled every 15m
     },
 }
