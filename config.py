@@ -41,6 +41,12 @@ TELEGRAM_BOT_TOKEN = _get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_ALERT_CHAT_IDS = [
     c.strip() for c in (_get("TELEGRAM_ALERT_CHAT_IDS", "") or "").split(",") if c.strip()
 ]
+# Who may talk to the bot at all. Every message costs money (/ask hits the
+# Anthropic API), so unknown users are rejected. Falls back to the alert
+# recipients; empty result = open mode (a warning is logged at startup).
+TELEGRAM_ALLOWED_CHAT_IDS = [
+    c.strip() for c in (_get("TELEGRAM_ALLOWED_CHAT_IDS", "") or "").split(",") if c.strip()
+] or list(TELEGRAM_ALERT_CHAT_IDS)
 
 # --- Anthropic ------------------------------------------------------------
 ANTHROPIC_API_KEY = _get("ANTHROPIC_API_KEY")
@@ -83,6 +89,10 @@ ACCOUNT_BALANCE = _get_float("ACCOUNT_BALANCE", 10000.0)
 # Score thresholds (see ТЗ "Финальная классификация").
 SCORE_ALERT_MIN = _get_int("SCORE_ALERT_MIN", 8)     # 8-10 -> push to Telegram
 SCORE_JOURNAL_MIN = _get_int("SCORE_JOURNAL_MIN", 5)  # 5-7 -> store, available via /signal
+
+# --- Trading costs (used by the backtest to report NET results) ------------
+TAKER_FEE_PCT = _get_float("TAKER_FEE_PCT", 0.05)   # % per side (Binance futures taker)
+SLIPPAGE_PCT = _get_float("SLIPPAGE_PCT", 0.03)     # % per round trip, conservative
 
 # --- Scheduler ------------------------------------------------------------
 ANALYSIS_INTERVAL_HOURS = _get_int("ANALYSIS_INTERVAL_HOURS", 4)

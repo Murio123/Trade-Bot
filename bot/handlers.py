@@ -45,6 +45,37 @@ WELCOME_TEXT = (
 )
 
 
+async def _gatekeeper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Reject unknown users before any handler runs.
+
+    Every message costs money (/ask calls the Anthropic API, /backtest burns
+    CPU), so only whitelisted chat/user ids may interact. Empty whitelist =
+    open mode (warned at startup).
+    """
+    from telegram.ext import ApplicationHandlerStop
+
+    allowed = set(config.TELEGRAM_ALLOWED_CHAT_IDS)
+    if not allowed:
+        return
+    ids = set()
+    if update.effective_chat:
+        ids.add(str(update.effective_chat.id))
+    if update.effective_user:
+        ids.add(str(update.effective_user.id))
+    if ids & allowed:
+        return
+    log.warning("Rejected unauthorized access from %s", ids or "unknown")
+    try:
+        if update.callback_query:
+            await update.callback_query.answer("⛔ Доступ ограничен", show_alert=False)
+        elif update.effective_message:
+            await update.effective_message.reply_text(
+                "⛔ Это приватный бот, доступ ограничен.")
+    except Exception:  # noqa: BLE001
+        pass
+    raise ApplicationHandlerStop
+
+
 def _binance(context: ContextTypes.DEFAULT_TYPE):
     return context.application.bot_data["binance"]
 
@@ -411,7 +442,14 @@ async def _post_init(application) -> None:
 
 def register_handlers(application) -> None:
     from telegram.ext import (CallbackQueryHandler, CommandHandler,
-                              MessageHandler, filters)
+                              MessageHandler, TypeHandler, filters)
+
+    # Access control runs before everything else (group -1).
+    if config.TELEGRAM_ALLOWED_CHAT_IDS:
+        application.add_handler(TypeHandler(Update, _gatekeeper), group=-1)
+    else:
+        log.warning("TELEGRAM_ALLOWED_CHAT_IDS is empty -> bot is OPEN to anyone; "
+                    "any stranger can spend your Anthropic tokens via /ask")
 
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CommandHandler("help", help_cmd))

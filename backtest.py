@@ -75,7 +75,21 @@ async def run_backtest(binance: BinanceClient, profile_name: str = "swing",
     )
     dfs = {entry_tf: entry_df}
     dfs.update(dict(zip(other_tfs, other_frames)))
+
+    # The bar-by-bar walk is CPU-heavy pandas work (~10s); run it off the event
+    # loop so Telegram handlers and the scheduler stay responsive.
+    return await asyncio.to_thread(_walk, dfs, profile, warmup)
+
+
+def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
+    entry_tf = profile["entry"]
+    htf = profile["htf"]
+    zone_tfs = profile["zone_tfs"]
+    entry_df = dfs[entry_tf]
     n = len(entry_df)
+
+    # Round-trip trading cost as a fraction of price (entry+exit fees + slippage).
+    cost_pct = (2 * config.TAKER_FEE_PCT + config.SLIPPAGE_PCT) / 100
 
     setups: list[dict[str, Any]] = []
     start = max(warmup, n - MAX_BARS)
@@ -156,6 +170,10 @@ async def run_backtest(binance: BinanceClient, profile_name: str = "swing",
         outcome = _resolve(entry_df, i, direction, pos)
         if outcome is None:
             continue
+        # Net result: subtract the round-trip cost expressed in R.
+        risk_dist = abs(price - pos["stop_loss"])
+        cost_r = (cost_pct * price / risk_dist) if risk_dist else 0.0
+        outcome["r"] = round(outcome["r"] - cost_r, 2)
         setups.append({"idx": i, "score": total, "direction": direction, **outcome})
 
     cooldown_bars = max(1, int(round(profile["cooldown_hours"] / _TF_HOURS.get(entry_tf, 1))))
@@ -212,7 +230,8 @@ def _report(setups: list[dict[str, Any]], profile: dict[str, Any],
     rows = [_aggregate(setups, t, cooldown_bars) for t in THRESHOLDS]
     lines = [
         f"📊 Бэктест {label} | вход {entry}, зоны {'/'.join(t.upper() for t in profile['zone_tfs'])}",
-        f"История: ~{bars} свечей {entry}",
+        f"История: ~{bars} свечей {entry} | NET: комиссии 2×{config.TAKER_FEE_PCT:g}% "
+        f"+ проскальзывание {config.SLIPPAGE_PCT:g}%",
         "",
         "Порог │ Сделок │ Винрейт │   Σ R  │ Ср.R",
         "──────┼────────┼─────────┼────────┼──────",
