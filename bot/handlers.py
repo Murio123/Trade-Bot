@@ -182,6 +182,35 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await update.effective_message.reply_text(report)
 
 
+async def testalert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Diagnose why auto-alerts may not arrive, and send a test if configured."""
+    from bot import alerts
+    problems = []
+    if config.DRY_RUN:
+        problems.append("• DRY_RUN=true — реальная отправка ВЫКЛЮЧЕНА. "
+                        "Поставь DRY_RUN=false в Railway.")
+    if not config.TELEGRAM_ALERT_CHAT_IDS:
+        problems.append("• TELEGRAM_ALERT_CHAT_IDS пуст — нет получателей. "
+                        "Впиши свой chat_id (узнать: @userinfobot).")
+    if problems:
+        await update.effective_message.reply_text(
+            "❌ Автосигналы сейчас НЕ придут:\n" + "\n".join(problems)
+            + "\n\nПосле исправления снова нажми /testalert."
+        )
+        return
+    await alerts.broadcast(
+        context.application.bot,
+        "✅ Тестовый алерт: канал автосигналов настроен и работает.\n"
+        "Реальные сигналы придут сюда же, когда сетап наберёт порог.")
+    await update.effective_message.reply_text(
+        f"✅ Конфигурация в порядке (LIVE, получателей: "
+        f"{len(config.TELEGRAM_ALERT_CHAT_IDS)}).\n"
+        "Отправил тестовый алерт получателям — проверь, что он пришёл.\n\n"
+        "Если тест пришёл, но сигналов нет — значит сетап пока не набирает "
+        "порог (score ≥8). Это нормально: используй /signal, чтобы видеть "
+        "текущий расклад, или снизь SCORE_ALERT_MIN.")
+
+
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     binance = _binance(context)
     bot_data = context.application.bot_data
@@ -341,6 +370,7 @@ COMMAND_DISPATCH = {
     "journal": journal_cmd,
     "backtest": backtest_cmd,
     "status": status_cmd,
+    "testalert": testalert_cmd,
     "guide": guide_cmd,
     "help": help_cmd,
 }
@@ -357,6 +387,7 @@ BOT_COMMANDS = [
     ("journal", "Статистика журнала"),
     ("backtest", "Бэктест стратегии"),
     ("status", "Статус бота"),
+    ("testalert", "Проверить отправку алертов"),
     ("guide", "Гид по функциям"),
     ("ask", "Вопрос к ИИ"),
     ("help", "Помощь"),
@@ -391,6 +422,7 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("journal", journal_cmd))
     application.add_handler(CommandHandler("backtest", backtest_cmd))
     application.add_handler(CommandHandler("status", status_cmd))
+    application.add_handler(CommandHandler("testalert", testalert_cmd))
     application.add_handler(CommandHandler("guide", guide_cmd))
     application.add_handler(CommandHandler("ask", ask_cmd))
     application.add_handler(CallbackQueryHandler(button_callback, pattern=r"^cmd:"))
