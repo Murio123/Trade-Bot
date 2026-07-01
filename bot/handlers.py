@@ -32,6 +32,7 @@ HELP_TEXT = (
     "/fear — индекс страха/жадности\n"
     "/backtest — результаты стратегии за период\n"
     "/journal — статистика журнала (винрейт, R/R)\n"
+    "/setalert <цена> — разовый алерт по уровню (/alerts — список)\n"
     "/status — статус бота (источник данных, режим, БД, сделки)\n"
     "/guide — 📖 гид по всем функциям\n"
     "/ask <вопрос> — свободный вопрос к Claude с рыночным контекстом\n\n"
@@ -232,6 +233,66 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text(f"⚠️ Ошибка бэктеста: {exc}")
         return
     await update.effective_message.reply_text(report)
+
+
+async def setalert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/setalert <цена> [above|below] — notify when price crosses the level."""
+    binance = _binance(context)
+    args = context.args or []
+    if not args:
+        await update.effective_message.reply_text(
+            "Использование: /setalert <цена> [above|below]\n"
+            "Например: /setalert 60000 — направление определю сам по текущей цене.")
+        return
+    try:
+        level = float(args[0].replace(",", "").replace(" ", ""))
+    except ValueError:
+        await update.effective_message.reply_text("⚠️ Не понял цену. Пример: /setalert 60000")
+        return
+
+    direction = args[1].lower() if len(args) > 1 and args[1].lower() in ("above", "below") else None
+    if direction is None:
+        try:
+            price = await binance.current_price()
+            direction = "above" if level > price else "below"
+        except Exception:  # noqa: BLE001
+            direction = "above"
+
+    chat_id = str(update.effective_chat.id)
+    alert_id = await db.add_price_alert(chat_id, config.SYMBOL, level, direction)
+    arrow = "выше ↑" if direction == "above" else "ниже ↓"
+    level_str = f"{level:,.0f}".replace(",", " ")
+    await update.effective_message.reply_text(
+        f"🔔 Алерт #{alert_id}: сообщу, когда {config.SYMBOL_DISPLAY} будет "
+        f"{arrow} {level_str}\n"
+        f"(проверка каждые {config.ALERT_CHECK_INTERVAL_MINUTES} мин; "
+        "список — /alerts)")
+
+
+async def alerts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = str(update.effective_chat.id)
+    items = [a for a in await db.active_price_alerts(config.SYMBOL)
+             if str(a.get("chat_id")) == chat_id]
+    if not items:
+        await update.effective_message.reply_text(
+            "Активных алертов нет. Создать: /setalert <цена>")
+        return
+    lines = ["🔔 Твои ценовые алерты:"]
+    for a in items:
+        arrow = "↑ выше" if a["direction"] == "above" else "↓ ниже"
+        lines.append(f"  #{a['id']}: {arrow} {a['level']:,.0f}".replace(",", " "))
+    lines.append("\nУдалить: /delalert <id>")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def delalert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    args = context.args or []
+    if not args or not args[0].isdigit():
+        await update.effective_message.reply_text("Использование: /delalert <id> (см. /alerts)")
+        return
+    ok = await db.delete_price_alert(int(args[0]), str(update.effective_chat.id))
+    await update.effective_message.reply_text(
+        "🗑 Алерт удалён." if ok else "⚠️ Алерт не найден (см. /alerts).")
 
 
 async def testalert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -438,6 +499,8 @@ BOT_COMMANDS = [
     ("fear", "Индекс страха/жадности"),
     ("journal", "Статистика журнала"),
     ("backtest", "Бэктест стратегии"),
+    ("setalert", "Алерт по цене"),
+    ("alerts", "Мои ценовые алерты"),
     ("status", "Статус бота"),
     ("testalert", "Проверить отправку алертов"),
     ("guide", "Гид по функциям"),
@@ -482,6 +545,9 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("backtest", backtest_cmd))
     application.add_handler(CommandHandler("status", status_cmd))
     application.add_handler(CommandHandler("testalert", testalert_cmd))
+    application.add_handler(CommandHandler("setalert", setalert_cmd))
+    application.add_handler(CommandHandler("alerts", alerts_cmd))
+    application.add_handler(CommandHandler("delalert", delalert_cmd))
     application.add_handler(CommandHandler("guide", guide_cmd))
     application.add_handler(CommandHandler("ask", ask_cmd))
     application.add_handler(CallbackQueryHandler(button_callback, pattern=r"^cmd:"))

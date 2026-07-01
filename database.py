@@ -313,6 +313,17 @@ class Database:
                 "UPDATE price_alerts SET triggered=TRUE WHERE id=$1", alert_id
             )
 
+    async def delete_price_alert(self, alert_id: int, chat_id: str) -> bool:
+        """Delete an alert; the chat_id guard stops deleting others' alerts."""
+        if not self.pool:
+            return self._mem.delete_price_alert(alert_id, chat_id)
+        async with self.pool.acquire() as conn:
+            res = await conn.execute(
+                "DELETE FROM price_alerts WHERE id=$1 AND chat_id=$2",
+                alert_id, chat_id,
+            )
+            return res.endswith("1")
+
 
 def _row_to_signal(row) -> dict[str, Any]:
     d = dict(row)
@@ -441,6 +452,12 @@ class _MemoryStore:
         for a in self.alerts:
             if a["id"] == alert_id:
                 a["triggered"] = True
+
+    def delete_price_alert(self, alert_id: int, chat_id: str) -> bool:
+        before = len(self.alerts)
+        self.alerts = [a for a in self.alerts
+                       if not (a["id"] == alert_id and str(a["chat_id"]) == str(chat_id))]
+        return len(self.alerts) < before
 
 
 # Singleton used across the app.
