@@ -233,8 +233,34 @@ def _report(setups: list[dict[str, Any]], profile: dict[str, Any],
         lines.append(f"✅ Рекомендация: порог {best['threshold']} — "
                      f"ср. {best['avg_r']:+.2f}R при {best['trades']} сделках.")
         lines.append(f"Поставь SCORE_ALERT_MIN={best['threshold']} в Railway.")
+        lines += _monthly_projection(best, profile, bars)
     else:
-        lines.append("⚠️ Ни один порог не дал устойчивого плюса на этой истории.")
+        lines.append("⚠️ Ни один порог не дал устойчивого плюса на этой истории — "
+                     "цель 10%/мес пока не обоснована. Смягчи фильтры или поменяй TP.")
     lines.append("")
-    lines.append("ℹ️ Без funding/on-chain истории — оценка приблизительная.")
+    lines.append("ℹ️ Без funding/on-chain истории — оценка приблизительная. "
+                 "Прошлые результаты не гарантируют будущие.")
     return "\n".join(lines)
+
+
+def _monthly_projection(row: dict[str, Any], profile: dict[str, Any], bars: int) -> list[str]:
+    from config import RISK_PERCENT
+    tf_hours = _TF_HOURS.get(profile["entry"], 1)
+    period_days = max(bars * tf_hours / 24, 1)
+    per_month = 30 / period_days
+    trades_pm = row["trades"] * per_month
+    r_pm = row["total_r"] * per_month
+    ret_pm = r_pm * RISK_PERCENT   # each 1R == RISK_PERCENT of the account
+    out = [
+        "",
+        f"📅 Проекция (риск {RISK_PERCENT:g}%/сделку, история ~{period_days:.0f} дн):",
+        f"  ~{trades_pm:.0f} сделок/мес | ~{r_pm:+.1f}R/мес | ≈ {ret_pm:+.1f}%/мес",
+    ]
+    if r_pm > 0:
+        req = 10 / r_pm
+        out.append(f"  🎯 Для +10%/мес: риск ~{req:.1f}%/сделку "
+                   f"(либо больше сделок/выше R).")
+        if req > 3:
+            out.append("  ⚠️ Нужный риск >3%/сделку — агрессивно; цель 10%/мес "
+                       "на этом edge труднодостижима без роста R или частоты.")
+    return out
