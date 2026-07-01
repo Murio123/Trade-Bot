@@ -36,3 +36,17 @@ async def broadcast(bot, text: str, chat_ids: Iterable[str] | None = None) -> No
 
 async def send_signal_alert(bot, text: str) -> None:
     await broadcast(bot, text)
+
+
+async def broadcast_photo(bot, photo_path: str, caption: str = "",
+                          chat_ids: Iterable[str] | None = None) -> None:
+    chat_ids = list(chat_ids) if chat_ids is not None else config.TELEGRAM_ALERT_CHAT_IDS
+    if config.DRY_RUN:
+        log.info("[DRY_RUN] would send photo %s to %s", photo_path, chat_ids)
+        return
+    for cid in chat_ids:
+        try:
+            with open(photo_path, "rb") as fh:
+                await bot.send_photo(chat_id=cid, photo=fh, caption=caption[:1024])
+        except Exception as exc:  # noqa: BLE001
+            log.error("Failed to send photo to %s: %s", cid, exc)

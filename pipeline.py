@@ -145,6 +145,8 @@ async def gather_market_context(binance: BinanceClient,
         "ind_4h": ind_4h,
         "ind_1d": ind_1d,
         "ind_signal": ind_signal,
+        # Raw entry-timeframe candles (for chart rendering).
+        "df_signal": df_signal,
         # Indicator snapshots keyed by timeframe (incl. 12h / 15m when fetched),
         # used by the cascade to resolve a profile's HTF/MTF references.
         "inds_by_tf": inds,

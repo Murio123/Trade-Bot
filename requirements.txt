@@ -5,3 +5,4 @@ numpy==1.26.4
 asyncpg==0.30.0
 APScheduler==3.10.4
 anthropic==0.39.0
+matplotlib==3.9.2

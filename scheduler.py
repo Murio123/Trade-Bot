@@ -64,6 +64,7 @@ async def analysis_job(application, profile_name: str = "swing") -> None:
         if status == "alert":
             text = formatting.format_signal(result)
             await alerts.send_signal_alert(application.bot, text)
+            await _send_signal_chart(application, ctx, result)
             await db.mark_delivered(signal_id)
             await journal.record_signal_as_trade(signal_id, result)
             log.info("Delivered alert signal #%s (score %s)", signal_id, result["score"])
@@ -133,6 +134,17 @@ async def resolve_trades_job(application) -> None:
         for event in evaluation["events"]:
             text = formatting.format_trade_event(trade, event)
             await alerts.broadcast(application.bot, text)
+
+
+async def _send_signal_chart(application, ctx: dict, signal: dict) -> None:
+    """Attach a chart to a delivered auto-signal; failures never block it."""
+    import asyncio
+    from bot import charts
+    try:
+        path = await asyncio.to_thread(charts.render_signal_chart, ctx, signal)
+        await alerts.broadcast_photo(application.bot, path)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("signal chart failed: %s", exc)
 
 
 async def _maybe_reversal_alert(application, ctx: dict, profile_name: str,

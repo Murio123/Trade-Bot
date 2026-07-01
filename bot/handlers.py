@@ -147,6 +147,23 @@ async def _run_signal(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await update.effective_message.reply_text(formatting.format_blocked(result))
         return
     await update.effective_message.reply_text(formatting.format_signal(result))
+    await _send_chart(update, ctx, result)
+
+
+async def _send_chart(update: Update, ctx: dict[str, Any],
+                      signal: dict[str, Any] | None = None) -> None:
+    """Render and attach a chart; chart failures never break the reply."""
+    import asyncio
+    from bot import charts
+    try:
+        if signal is not None:
+            path = await asyncio.to_thread(charts.render_signal_chart, ctx, signal)
+        else:
+            path = await asyncio.to_thread(charts.render_levels_chart, ctx)
+        with open(path, "rb") as fh:
+            await update.effective_message.reply_photo(photo=fh)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("chart rendering failed: %s", exc)
 
 
 async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -174,6 +191,7 @@ async def levels_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         await update.effective_message.reply_text(f"⚠️ Ошибка: {exc}")
         return
     await update.effective_message.reply_text(formatting.format_levels(ctx))
+    await _send_chart(update, ctx)
 
 
 async def funding_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
