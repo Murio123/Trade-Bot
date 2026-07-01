@@ -31,6 +31,7 @@ from signal_engine.confluence import (calculate_confluence_score,
                                       has_diverse_confirmation)
 from signal_engine.htf_filter import filter_by_htf, get_htf_bias
 from signal_engine.profiles import get_profile
+from signal_engine.vetoes import dead_zone
 
 log = logging.getLogger(__name__)
 
@@ -163,6 +164,9 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
         if not has_diverse_confirmation(scores, config.MIN_DIVERSE_CATEGORIES):
             continue
         if total < min(THRESHOLDS):
+            continue
+        # Dead-zone veto, same as live (crowded-funding needs history we lack).
+        if dead_zone(scores.get("structure", 0), eq):
             continue
 
         pos = calculate_position(price, atr, direction=direction,

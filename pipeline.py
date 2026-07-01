@@ -41,6 +41,7 @@ from signal_engine.daily_limiter import beats_weakest, within_daily_limit
 from signal_engine.htf_filter import filter_by_htf, get_htf_bias
 from signal_engine.mtf_confidence import mtf_confidence_factor, trend_label
 from signal_engine.profiles import get_profile
+from signal_engine.vetoes import crowded_funding, dead_zone
 
 log = logging.getLogger(__name__)
 
@@ -61,7 +62,8 @@ async def gather_market_context(binance: BinanceClient,
     needed = {"1h", "4h", "12h", "1d", signal_timeframe} | set(profile["mtf"])
     tfs = sorted(needed)
     frames = await asyncio.gather(*[binance.klines(tf, limit=300) for tf in tfs])
-    dfs = dict(zip(tfs, frames))
+    # Closed candles only: the exchange includes the forming bar as the last row.
+    dfs = {tf: _drop_unclosed(df) for tf, df in zip(tfs, frames)}
     inds = {tf: compute_indicators(df) for tf, df in dfs.items()}
 
     df_1h, df_4h, df_1d = dfs["1h"], dfs["4h"], dfs["1d"]
@@ -171,6 +173,21 @@ async def gather_market_context(binance: BinanceClient,
         "sessions": sessions,
     }
     return context
+
+
+def _drop_unclosed(df):
+    """Drop the still-forming last candle the exchanges include in klines.
+
+    Indicators computed on a partial candle repaint (a mid-hour "hammer" can
+    close as a full bearish bar), so live analysis must see closed bars only —
+    exactly what the backtest walks.
+    """
+    import pandas as pd
+    if df is None or len(df) == 0 or "close_time" not in df.columns:
+        return df
+    if df["close_time"].iloc[-1] > pd.Timestamp.now(tz="UTC"):
+        return df.iloc[:-1].reset_index(drop=True)
+    return df
 
 
 def _entry_rejection(df) -> bool:
@@ -349,6 +366,8 @@ async def gather_swing_context(binance: BinanceClient) -> dict[str, Any]:
         binance.klines("12h", limit=400),
         binance.klines("1d", limit=400),
     )
+    df_4h, df_12h, df_1d = (_drop_unclosed(df_4h), _drop_unclosed(df_12h),
+                            _drop_unclosed(df_1d))
     ind_4h = compute_indicators(df_4h)
     ind_12h = compute_indicators(df_12h)
     ind_1d = compute_indicators(df_1d)
@@ -483,6 +502,14 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     # Below journal threshold -> ignored entirely.
     if total < config.SCORE_JOURNAL_MIN:
         return _blocked("below_threshold", direction=direction, score=total,
+                        category_scores=scores, reasons=reasons, **diag)
+
+    # Quality vetoes ("when NOT to trade").
+    if dead_zone(scores.get("structure", 0), ctx.get("equilibrium")):
+        return _blocked("dead_zone", direction=direction, score=total,
+                        category_scores=scores, reasons=reasons, **diag)
+    if crowded_funding(direction, ctx.get("funding")):
+        return _blocked("crowded_funding", direction=direction, score=total,
                         category_scores=scores, reasons=reasons, **diag)
 
     # Level 4: conflict resolution.
