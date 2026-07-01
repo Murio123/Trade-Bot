@@ -53,13 +53,15 @@ class BybitClient:
 
     # --- klines -----------------------------------------------------------
     async def klines(self, interval: str, limit: int = 300,
-                     symbol: str | None = None) -> pd.DataFrame:
+                     symbol: str | None = None,
+                     end_time: int | None = None) -> pd.DataFrame:
         symbol = self._symbol(symbol)
         bybit_interval = INTERVALS.get(interval, interval)
-        result = await self._get("/v5/market/kline", {
-            "category": "linear", "symbol": symbol,
-            "interval": bybit_interval, "limit": min(limit, 1000),
-        })
+        params = {"category": "linear", "symbol": symbol,
+                  "interval": bybit_interval, "limit": min(limit, 1000)}
+        if end_time is not None:
+            params["end"] = int(end_time)
+        result = await self._get("/v5/market/kline", params)
         rows = result.get("list", [])
         # Bybit returns newest-first; reverse to chronological order.
         rows = list(reversed(rows))

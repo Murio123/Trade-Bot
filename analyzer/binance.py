@@ -43,13 +43,14 @@ class BinanceClient:
 
     # --- klines -----------------------------------------------------------
     async def klines(self, interval: str, limit: int = 300,
-                     symbol: str | None = None) -> pd.DataFrame:
+                     symbol: str | None = None,
+                     end_time: int | None = None) -> pd.DataFrame:
         symbol = symbol or config.SYMBOL
         binance_interval = INTERVALS.get(interval, interval)
-        raw = await self._get(
-            "/fapi/v1/klines",
-            {"symbol": symbol, "interval": binance_interval, "limit": limit},
-        )
+        params = {"symbol": symbol, "interval": binance_interval, "limit": limit}
+        if end_time is not None:
+            params["endTime"] = int(end_time)
+        raw = await self._get("/fapi/v1/klines", params)
         cols = [
             "open_time", "open", "high", "low", "close", "volume",
             "close_time", "quote_volume", "trades", "taker_buy_base",

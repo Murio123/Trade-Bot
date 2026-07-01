@@ -67,8 +67,9 @@ class MarketClient:
         raise last_exc if last_exc else RuntimeError(f"No backend served {method}")
 
     # --- delegated methods (identical signatures across both clients) -----
-    async def klines(self, interval: str, limit: int = 300, symbol: str | None = None):
-        return await self._call("klines", interval, limit, symbol)
+    async def klines(self, interval: str, limit: int = 300, symbol: str | None = None,
+                     end_time: int | None = None):
+        return await self._call("klines", interval, limit, symbol, end_time=end_time)
 
     async def current_price(self, symbol: str | None = None) -> float:
         return await self._call("current_price", symbol)

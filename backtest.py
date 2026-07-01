@@ -35,7 +35,27 @@ log = logging.getLogger(__name__)
 
 THRESHOLDS = [5, 6, 7, 8, 9, 10]
 MIN_TRADES_FOR_REC = 8
-MAX_BARS = 800          # entry bars to walk (bounds runtime)
+MAX_BARS = 1200          # entry bars to walk (bounds runtime)
+ENTRY_HISTORY = 3000     # entry candles to page back for a stable sample
+
+
+async def _fetch_history(binance, interval: str, target: int) -> "pd.DataFrame":
+    """Page klines backwards to assemble `target` candles for a stable sample."""
+    import pandas as pd
+    frames, end = [], None
+    for _ in range(12):  # safety cap on pages
+        df = await binance.klines(interval, limit=1000, end_time=end)
+        if df is None or len(df) == 0:
+            break
+        frames.append(df)
+        if sum(len(f) for f in frames) >= target or len(df) < 1000:
+            break
+        end = int(df["open_time"].iloc[0].timestamp() * 1000) - 1
+    if not frames:
+        return await binance.klines(interval, limit=1000)
+    full = (pd.concat(frames).drop_duplicates("open_time")
+            .sort_values("open_time").reset_index(drop=True))
+    return full.iloc[-target:].reset_index(drop=True)
 _TF_HOURS = {"15m": 0.25, "1h": 1.0, "4h": 4.0, "12h": 12.0, "1d": 24.0}
 
 
@@ -46,12 +66,15 @@ async def run_backtest(binance: BinanceClient, profile_name: str = "swing",
     htf = profile["htf"]
     zone_tfs = profile["zone_tfs"]
 
-    tfs = {entry_tf, htf, "1d"} | set(zone_tfs)
-    limits = {t: (1000 if t == entry_tf else 500) for t in tfs}
-    tf_list = list(tfs)
-    frames = await asyncio.gather(*[binance.klines(t, limit=limits[t]) for t in tf_list])
-    dfs = dict(zip(tf_list, frames))
-    entry_df = dfs[entry_tf]
+    # Entry timeframe: page back for a large, stable sample. Higher timeframes
+    # already cover long history in one request.
+    other_tfs = [t for t in ({htf, "1d"} | set(zone_tfs)) if t != entry_tf]
+    entry_df, *other_frames = await asyncio.gather(
+        _fetch_history(binance, entry_tf, ENTRY_HISTORY),
+        *[binance.klines(t, limit=500) for t in other_tfs],
+    )
+    dfs = {entry_tf: entry_df}
+    dfs.update(dict(zip(other_tfs, other_frames)))
     n = len(entry_df)
 
     setups: list[dict[str, Any]] = []
