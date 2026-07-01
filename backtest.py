@@ -1,76 +1,124 @@
-"""Historical backtest with a score-threshold sweep.
+"""Historical backtest that replicates the LIVE profile logic.
 
-Walks forward over 4H candles, scoring each bar exactly like the live engine
-(HTF filter + confluence incl. FVG / reversal + diversity gate). Every qualified
-setup is resolved once (ATR stop vs target-1, whichever hits first), then the
-results are aggregated at each score threshold so we can see which threshold is
-actually profitable on history — and recommend one.
+Walks the profile's entry timeframe (swing 1H / intraday 15m) and reconstructs
+the market context as-of each bar exactly like the live engine: HTF bias from
+the trend timeframe, Order Blocks / FVG from the higher zone timeframes,
+premium/discount, liquidity sweep, reversal — then the same confluence score
+and gates. Each qualified setup is resolved once (ATR stop vs target-1), and
+results are aggregated over a score-threshold sweep with the profile cooldown.
+
+Note: funding / on-chain history is unavailable, so those macro points are not
+scored — the estimate is approximate but faithful to the price-based logic.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
 import config
 from analyzer.binance import BinanceClient
-from analyzer.cvd import cvd_series
+from analyzer.cvd import compute_cvd_from_klines, cvd_series
 from analyzer.divergence import detect_divergence
-from analyzer.fvg import detect_fvg
+from analyzer.equilibrium import compute_equilibrium
 from analyzer.indicators import compute_indicators
 from analyzer.liquidity import detect_liquidity
-from analyzer.order_blocks import detect_order_blocks
 from analyzer.reversal import detect_reversal
+from pipeline import _build_htf_zones, _near_key_level
 from risk.position_sizing import calculate_position
 from signal_engine.confluence import (calculate_confluence_score,
                                       has_diverse_confirmation)
 from signal_engine.htf_filter import filter_by_htf, get_htf_bias
+from signal_engine.profiles import get_profile
 
 log = logging.getLogger(__name__)
 
 THRESHOLDS = [5, 6, 7, 8, 9, 10]
-COOLDOWN_BARS = 6        # ~24h on 4H
-MIN_TRADES_FOR_REC = 8   # need a minimum sample to recommend a threshold
+MIN_TRADES_FOR_REC = 8
+MAX_BARS = 500          # entry bars to walk (bounds runtime)
+_TF_HOURS = {"15m": 0.25, "1h": 1.0, "4h": 4.0, "12h": 12.0, "1d": 24.0}
 
 
-async def run_backtest(binance: BinanceClient, warmup: int = 210) -> str:
-    df_4h = await binance.klines("4h", limit=1000)
-    df_1d = await binance.klines("1d", limit=400)
+async def run_backtest(binance: BinanceClient, profile_name: str = "swing",
+                       warmup: int = 210) -> str:
+    profile = get_profile(profile_name)
+    entry_tf = profile["entry"]
+    htf = profile["htf"]
+    zone_tfs = profile["zone_tfs"]
+
+    tfs = {entry_tf, htf, "1d"} | set(zone_tfs)
+    limits = {t: (1000 if t == entry_tf else 500) for t in tfs}
+    tf_list = list(tfs)
+    frames = await asyncio.gather(*[binance.klines(t, limit=limits[t]) for t in tf_list])
+    dfs = dict(zip(tf_list, frames))
+    entry_df = dfs[entry_tf]
+    n = len(entry_df)
 
     setups: list[dict[str, Any]] = []
-    n = len(df_4h)
+    start = max(warmup, n - MAX_BARS)
 
-    for i in range(warmup, n - 1):
-        sub = df_4h.iloc[: i + 1]
-        ind = compute_indicators(sub)
-        if ind.get("atr") in (None, 0):
+    for i in range(start, n - 1):
+        entry_sub = entry_df.iloc[max(0, i - 250):i + 1]
+        ind = compute_indicators(entry_sub)
+        atr = ind.get("atr")
+        if not atr:
             continue
+        t = entry_df["close_time"].iloc[i]
+        price = float(entry_df["close"].iloc[i])
 
-        close_time = sub["close_time"].iloc[-1]
-        daily_slice = df_1d[df_1d["close_time"] <= close_time]
-        if len(daily_slice) < 200:
+        # HTF bias, as-of this bar.
+        htf_slice = dfs[htf][dfs[htf]["close_time"] <= t].iloc[-250:]
+        if len(htf_slice) < 210:
             continue
-        htf_bias = get_htf_bias(compute_indicators(daily_slice))
+        htf_bias = get_htf_bias(compute_indicators(htf_slice))
+
+        # HTF zones (OB/FVG/levels) as-of this bar.
+        zdfs, zinds = {}, {}
+        for tf in zone_tfs:
+            s = dfs[tf][dfs[tf]["close_time"] <= t].iloc[-160:]
+            if len(s) >= 30:
+                zdfs[tf] = s
+                zinds[tf] = compute_indicators(s)
+        if not zdfs:
+            continue
+        zones = _build_htf_zones(zdfs, zinds, list(zdfs.keys()), price, entry_sub)
+        ob, fvg, levels = zones["order_blocks"], zones["fvg"], zones["levels"]
+
+        eq = compute_equilibrium(htf_slice)
+        liq = detect_liquidity(entry_sub, atr_value=atr)
+        at_level = _near_key_level(price, levels, ob, fvg, max(atr * 0.3, price * 0.002))
+        rev = detect_reversal(entry_sub, ind, cvd_series(entry_sub), at_key_level=at_level)
+        ser = ind.get("_series", {})
+        drsi = detect_divergence(entry_sub, ser.get("rsi"))
+        dmacd = detect_divergence(entry_sub, ser.get("macd"))
+        cvd = compute_cvd_from_klines(entry_sub)
 
         flat = dict(ind)
-        osc = ind.get("_series", {}).get("rsi")
-        flat.update(detect_divergence(sub, osc))
-        flat.update(detect_order_blocks(sub))
-        flat.update(detect_liquidity(sub, atr_value=ind["atr"]))
-        flat.update(detect_fvg(sub, atr_value=ind["atr"]))
-        rev = detect_reversal(sub, ind, cvd_series(sub))
         flat.update({
+            "bullish_divergence": drsi["bullish_divergence"] or dmacd["bullish_divergence"],
+            "bearish_divergence": drsi["bearish_divergence"] or dmacd["bearish_divergence"],
+            "price_in_bullish_ob": ob["price_in_bullish_ob"],
+            "price_in_bearish_ob": ob["price_in_bearish_ob"],
+            "rejection_wick": ob["rejection_wick"],
+            "liquidity_swept_below": liq["liquidity_swept_below"],
+            "liquidity_swept_above": liq["liquidity_swept_above"],
+            "reversal_candle": liq["reversal_candle"],
+            "price_in_bullish_fvg": fvg["price_in_bullish_fvg"],
+            "price_in_bearish_fvg": fvg["price_in_bearish_fvg"],
+            "in_discount": eq["zone"] == "discount",
+            "in_premium": eq["zone"] == "premium",
             "bullish_reversal": rev["bullish_reversal"],
             "bearish_reversal": rev["bearish_reversal"],
             "reversal_strong_bull": rev["bull_strong"],
             "reversal_strong_bear": rev["bear_strong"],
+            "cvd_bullish": cvd["cvd_bullish"],
+            "cvd_bearish": cvd["cvd_bearish"],
+            "funding": None, "exchange_netflow": None,
         })
 
-        long_total, long_scores, _ = calculate_confluence_score(flat, "long")
-        short_total, short_scores, _ = calculate_confluence_score(flat, "short")
-        if long_total >= short_total:
-            direction, total, scores = "long", long_total, long_scores
-        else:
-            direction, total, scores = "short", short_total, short_scores
+        lt, ls, _ = calculate_confluence_score(flat, "long")
+        st, ss, _ = calculate_confluence_score(flat, "short")
+        direction, total, scores = ("long", lt, ls) if lt >= st else ("short", st, ss)
 
         if filter_by_htf(direction, htf_bias) is None:
             continue
@@ -79,39 +127,16 @@ async def run_backtest(binance: BinanceClient, warmup: int = 210) -> str:
         if total < min(THRESHOLDS):
             continue
 
-        entry = float(sub["close"].iloc[-1])
-        pos = calculate_position(entry, ind["atr"], direction=direction)
-        outcome = _resolve(df_4h, i, direction, pos)
+        pos = calculate_position(price, atr, direction=direction,
+                                 atr_multiplier=profile["atr_mult"],
+                                 targets_r=profile["targets"])
+        outcome = _resolve(entry_df, i, direction, pos)
         if outcome is None:
             continue
         setups.append({"idx": i, "score": total, "direction": direction, **outcome})
 
-    return _report(setups, n - warmup)
-
-
-def _aggregate(setups: list[dict[str, Any]], threshold: int) -> dict[str, Any]:
-    """Apply the threshold + cooldown sequentially and compute metrics."""
-    taken = []
-    last_idx = -1000
-    for s in setups:
-        if s["score"] < threshold:
-            continue
-        if s["idx"] - last_idx < COOLDOWN_BARS:
-            continue
-        taken.append(s)
-        last_idx = s["idx"]
-    total = len(taken)
-    if total == 0:
-        return {"threshold": threshold, "trades": 0}
-    wins = sum(1 for t in taken if t["outcome"] == "win")
-    total_r = sum(t["r"] for t in taken)
-    return {
-        "threshold": threshold,
-        "trades": total,
-        "winrate": wins / total * 100,
-        "total_r": total_r,
-        "avg_r": total_r / total,
-    }
+    cooldown_bars = max(1, int(round(profile["cooldown_hours"] / _TF_HOURS.get(entry_tf, 1))))
+    return _report(setups, profile, cooldown_bars, n - start)
 
 
 def _resolve(df, entry_idx: int, direction: str, pos: dict[str, Any]) -> dict[str, Any] | None:
@@ -137,13 +162,34 @@ def _r_multiple(pos: dict[str, Any]) -> float:
     return round(reward / risk, 2) if risk else 0.0
 
 
-def _report(setups: list[dict[str, Any]], bars: int) -> str:
-    if not setups:
-        return "📊 Бэктест: подходящих сетапов не найдено на доступной истории."
+def _aggregate(setups: list[dict[str, Any]], threshold: int, cooldown_bars: int) -> dict[str, Any]:
+    taken, last_idx = [], -10 ** 9
+    for s in setups:
+        if s["score"] < threshold or s["idx"] - last_idx < cooldown_bars:
+            continue
+        taken.append(s)
+        last_idx = s["idx"]
+    total = len(taken)
+    if total == 0:
+        return {"threshold": threshold, "trades": 0}
+    wins = sum(1 for t in taken if t["outcome"] == "win")
+    total_r = sum(t["r"] for t in taken)
+    return {"threshold": threshold, "trades": total, "winrate": wins / total * 100,
+            "total_r": total_r, "avg_r": total_r / total}
 
-    rows = [_aggregate(setups, t) for t in THRESHOLDS]
+
+def _report(setups: list[dict[str, Any]], profile: dict[str, Any],
+            cooldown_bars: int, bars: int) -> str:
+    label = profile["label"]
+    entry = profile["entry"].upper()
+    if not setups:
+        return (f"📊 Бэктест {label} ({entry} вход): подходящих сетапов не найдено "
+                f"на доступной истории (~{bars} свечей).")
+
+    rows = [_aggregate(setups, t, cooldown_bars) for t in THRESHOLDS]
     lines = [
-        f"📊 Бэктест порогов ({config.SYMBOL_DISPLAY} 4H, ~{bars} свечей)",
+        f"📊 Бэктест {label} | вход {entry}, зоны {'/'.join(t.upper() for t in profile['zone_tfs'])}",
+        f"История: ~{bars} свечей {entry}",
         "",
         "Порог │ Сделок │ Винрейт │   Σ R  │ Ср.R",
         "──────┼────────┼─────────┼────────┼──────",
@@ -154,27 +200,18 @@ def _report(setups: list[dict[str, Any]], bars: int) -> str:
             continue
         lines.append(
             f"  {r['threshold']:>2}  │  {r['trades']:>3}   │  {r['winrate']:>4.0f}%  │ "
-            f"{r['total_r']:>+5.1f} │ {r['avg_r']:>+.2f}"
-        )
+            f"{r['total_r']:>+5.1f} │ {r['avg_r']:>+.2f}")
 
-    # Recommend the threshold with the best expectancy among those with enough
-    # trades and a positive edge.
     candidates = [r for r in rows if r.get("trades", 0) >= MIN_TRADES_FOR_REC
                   and r.get("avg_r", -9) > 0]
     lines.append("")
     if candidates:
         best = max(candidates, key=lambda r: r["avg_r"])
-        lines.append(
-            f"✅ Рекомендация: порог {best['threshold']} — "
-            f"лучший ср. результат {best['avg_r']:+.2f}R при {best['trades']} сделках."
-        )
+        lines.append(f"✅ Рекомендация: порог {best['threshold']} — "
+                     f"ср. {best['avg_r']:+.2f}R при {best['trades']} сделках.")
         lines.append(f"Поставь SCORE_ALERT_MIN={best['threshold']} в Railway.")
-        if best["threshold"] != config.SCORE_ALERT_MIN:
-            lines.append(f"(сейчас {config.SCORE_ALERT_MIN})")
     else:
-        lines.append("⚠️ Ни один порог не дал устойчивого плюса на этой истории — "
-                     "снижать порог рискованно. Текущий "
-                     f"{config.SCORE_ALERT_MIN} оставляем.")
+        lines.append("⚠️ Ни один порог не дал устойчивого плюса на этой истории.")
     lines.append("")
     lines.append("ℹ️ Без funding/on-chain истории — оценка приблизительная.")
     return "\n".join(lines)

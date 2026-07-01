@@ -171,10 +171,13 @@ async def journal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from backtest import run_backtest
-    await update.effective_message.reply_text("⏳ Запускаю бэктест…")
+    arg = (context.args[0].lower() if context.args else "swing")
+    profile = arg if arg in ("swing", "intraday") else "swing"
+    await update.effective_message.reply_text(
+        f"⏳ Запускаю бэктест ({profile})… это ~10-20с.")
     binance = _binance(context)
     try:
-        report = await run_backtest(binance)
+        report = await run_backtest(binance, profile_name=profile)
     except Exception as exc:  # noqa: BLE001
         log.exception("backtest failed")
         await update.effective_message.reply_text(f"⚠️ Ошибка бэктеста: {exc}")
