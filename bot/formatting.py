@@ -596,6 +596,38 @@ def format_funding(funding: dict[str, Any], ls_ratio: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_market(price: float | None, funding: dict[str, Any],
+                  ls_ratio: dict[str, Any], oi: float | None,
+                  fng: dict[str, Any]) -> str:
+    """One-screen market overview: price, funding, positioning, sentiment."""
+    lines = [f"💹 Рынок {config.SYMBOL_DISPLAY}", ""]
+    if price:
+        lines.append(f"💰 Цена: {_fmt_price(price)}")
+
+    cur = funding.get("current")
+    if cur is not None:
+        mood = ("⚠️ перегрев лонгов" if funding.get("anomalous") and cur > 0 else
+                "⚠️ перегрев шортов" if funding.get("anomalous") and cur < 0 else
+                "норма")
+        lines.append(f"💸 Funding: {cur * 100:.4f}% ({mood}, z={funding.get('zscore', 0):.1f})")
+
+    ratio = ls_ratio.get("ratio")
+    if ratio is not None:
+        crowd = "лонги переполнены" if ratio > 2 else \
+                "шорты переполнены" if ratio < 0.5 else "баланс"
+        lines.append(f"⚖️ Long/Short: {ratio:.2f} ({crowd})")
+
+    if oi:
+        lines.append(f"📊 Open Interest: {oi:,.0f}".replace(",", " "))
+
+    val = fng.get("value")
+    if val is not None:
+        emoji = "😱" if val < 25 else "😟" if val < 45 else "😐" if val < 55 else "🙂" if val < 75 else "🤑"
+        lines.append(f"{emoji} Fear & Greed: {val}/100 ({fng.get('classification')})")
+
+    return "\n".join(lines)
+
+
 def format_fear(fng: dict[str, Any]) -> str:
     val = fng.get("value")
     cls = fng.get("classification")

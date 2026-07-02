@@ -133,18 +133,11 @@ TOPICS: dict[str, tuple[str, str]] = {
     "commands": (
         "💬 Все команды",
         "💬 КОМАНДЫ\n\n"
-        "/signal — свинг-сигнал (4H)\n"
-        "/intraday — интрадей-сигнал (15m)\n"
-        "/deep — глубокий анализ /100\n"
-        "/reversal — дно/пик по 4 ТФ\n"
-        "/levels — ключевые уровни\n"
-        "/funding — funding + L/S\n"
-        "/fear — индекс страха/жадности\n"
-        "/journal — статистика сделок\n"
-        "/backtest — подбор порога по истории\n"
-        "/status — статус бота\n"
-        "/ask <вопрос> — вопрос к ИИ\n"
-        "/guide — этот гид\n\n"
+        "🎯 /signal (свинг 1H) · /intraday (15m)\n"
+        "🔍 /reversal (дно/пик) · /levels · /deep · /market\n"
+        "📒 /journal · /setalert <цена> · /alerts · /backtest\n"
+        "⚙️ /status · /testalert · /guide · /help\n\n"
+        "💹 /market = цена + funding + L/S + Fear&Greed одним экраном.\n"
         "Любой текст без команды → вопрос к ИИ."
     ),
 }

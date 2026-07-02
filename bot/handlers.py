@@ -21,22 +21,23 @@ from pipeline import gather_market_context, run_cascade
 log = logging.getLogger(__name__)
 
 HELP_TEXT = (
-    "🤖 BTC Signal Bot\n\n"
-    "Нажимай кнопки ниже или используй команды:\n"
-    "/signal — свинг-сигнал (вход 1H, тренд 1D/12H/4H)\n"
-    "/intraday — интрадей-сигнал (вход 15m, тренд 1H)\n"
-    "/deep — глубокий институциональный анализ (1D/12H/4H, score /100)\n"
-    "/reversal — поиск дна/пика (истощение тренда)\n"
-    "/levels — ключевые уровни (OB, ликвидность, volume profile)\n"
-    "/funding — funding rate + аномальность\n"
-    "/fear — индекс страха/жадности\n"
-    "/backtest — результаты стратегии за период\n"
-    "/journal — статистика журнала (винрейт, R/R)\n"
-    "/setalert <цена> — разовый алерт по уровню (/alerts — список)\n"
-    "/status — статус бота (источник данных, режим, БД, сделки)\n"
-    "/guide — 📖 гид по всем функциям\n"
-    "/ask <вопрос> — свободный вопрос к Claude с рыночным контекстом\n\n"
-    "💬 Любой текст без команды я восприму как вопрос к ИИ."
+    "🤖 BTC Signal Bot — все команды\n\n"
+    "🎯 Сигналы:\n"
+    "/signal — свинг (вход 1H, тренд 1D)\n"
+    "/intraday — интрадей (вход 15m, тренд 1H)\n\n"
+    "🔍 Анализ:\n"
+    "/reversal — дно/пик по 4 ТФ + план входа\n"
+    "/levels — ключевые уровни + график\n"
+    "/deep — глубокий разбор со score /100\n"
+    "/market — цена, funding, L/S, Fear&Greed\n\n"
+    "📒 Учёт:\n"
+    "/journal — винрейт и R по сделкам\n"
+    "/setalert <цена> — алерт по уровню (/alerts — список, /delalert — удалить)\n"
+    "/backtest [swing|intraday] — подбор порога по истории\n\n"
+    "⚙️ Сервис:\n"
+    "/status — здоровье бота | /testalert — проверка уведомлений\n"
+    "/guide — 📖 подробный гид по всем функциям\n\n"
+    "💬 Любой текст без команды — вопрос к ИИ с рыночным контекстом."
 )
 
 WELCOME_TEXT = (
@@ -222,6 +223,20 @@ async def funding_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await update.effective_message.reply_text(f"⚠️ Ошибка: {exc}")
         return
     await update.effective_message.reply_text(formatting.format_funding(funding, ls))
+
+
+async def market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """One-screen market overview (price, funding, L/S, OI, Fear & Greed)."""
+    binance = _binance(context)
+    import asyncio
+    price, funding, ls, oi, fng = await asyncio.gather(
+        binance.current_price(), binance.funding_rate(),
+        binance.long_short_ratio(), binance.open_interest(),
+        get_fear_greed(), return_exceptions=True)
+    def _ok(v, d):
+        return d if isinstance(v, Exception) else v
+    await update.effective_message.reply_text(formatting.format_market(
+        _ok(price, None), _ok(funding, {}), _ok(ls, {}), _ok(oi, None), _ok(fng, {})))
 
 
 async def fear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -496,9 +511,11 @@ COMMAND_DISPATCH = {
     "deep": deep_cmd,
     "reversal": reversal_cmd,
     "levels": levels_cmd,
+    "market": market_cmd,
     "funding": funding_cmd,
     "fear": fear_cmd,
     "journal": journal_cmd,
+    "alerts": alerts_cmd,
     "backtest": backtest_cmd,
     "status": status_cmd,
     "testalert": testalert_cmd,
@@ -508,22 +525,20 @@ COMMAND_DISPATCH = {
 
 # Shown in the Telegram "/" command menu.
 BOT_COMMANDS = [
-    ("signal", "Свинг-сигнал (1H)"),
-    ("intraday", "Интрадей-сигнал (15m, тренд 1H)"),
-    ("deep", "Глубокий институциональный анализ"),
-    ("reversal", "Поиск дна/пика (разворот)"),
-    ("levels", "Ключевые уровни"),
-    ("funding", "Funding rate"),
-    ("fear", "Индекс страха/жадности"),
-    ("journal", "Статистика журнала"),
-    ("backtest", "Бэктест стратегии"),
-    ("setalert", "Алерт по цене"),
-    ("alerts", "Мои ценовые алерты"),
-    ("status", "Статус бота"),
-    ("testalert", "Проверить отправку алертов"),
-    ("guide", "Гид по функциям"),
-    ("ask", "Вопрос к ИИ"),
-    ("help", "Помощь"),
+    ("signal", "📊 Свинг-сигнал (вход 1H)"),
+    ("intraday", "⚡ Интрадей-сигнал (вход 15m)"),
+    ("reversal", "🔄 Дно/пик по 4 ТФ"),
+    ("levels", "📐 Ключевые уровни"),
+    ("deep", "🏛 Глубокий анализ /100"),
+    ("market", "💹 Рынок: цена, funding, L/S, F&G"),
+    ("journal", "📒 Статистика сделок"),
+    ("setalert", "🔔 Поставить алерт по цене"),
+    ("alerts", "📋 Мои ценовые алерты"),
+    ("backtest", "📈 Подбор порога по истории"),
+    ("status", "🩺 Статус бота"),
+    ("guide", "📖 Гид по функциям"),
+    ("ask", "🧠 Вопрос к ИИ"),
+    ("help", "❓ Все команды"),
 ]
 
 
@@ -557,6 +572,7 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("deep", deep_cmd))
     application.add_handler(CommandHandler("reversal", reversal_cmd))
     application.add_handler(CommandHandler("levels", levels_cmd))
+    application.add_handler(CommandHandler("market", market_cmd))
     application.add_handler(CommandHandler("funding", funding_cmd))
     application.add_handler(CommandHandler("fear", fear_cmd))
     application.add_handler(CommandHandler("journal", journal_cmd))
