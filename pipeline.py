@@ -537,6 +537,15 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     htf_ind = inds.get(profile["htf"], ctx["ind_1d"])
     htf_bias = get_htf_bias(htf_ind)
 
+    # Trend + reversal linkage: a multi-TF bottom forming WITH a bullish HTF
+    # trend is a pullback entry — the prime setup (mirror for tops). The flags
+    # feed the confluence scorer below.
+    rev_mtf = ctx.get("reversal_mtf") or {}
+    flat["trend_aligned_bottom"] = bool(
+        htf_bias == "bullish" and rev_mtf.get("combined_bullish"))
+    flat["trend_aligned_top"] = bool(
+        htf_bias == "bearish" and rev_mtf.get("combined_bearish"))
+
     # Score both directions; the stronger one is the candidate.
     long_total, long_scores, long_reasons = calculate_confluence_score(flat, "long")
     short_total, short_scores, short_reasons = calculate_confluence_score(flat, "short")

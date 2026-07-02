@@ -127,9 +127,17 @@ def build_reversal_plan(ctx: dict[str, Any], direction: str) -> dict[str, Any] |
 
 def format_reversal_alert(ctx: dict[str, Any], direction: str,
                           factors: list[str], strong: bool,
-                          tfs: list[str] | None = None) -> str:
+                          tfs: list[str] | None = None,
+                          alignment: str = "neutral") -> str:
     bull = direction == "bull"
-    head = ("🟢 ДНО: разворот ВВЕРХ" if bull else "🔴 ПИК: разворот ВНИЗ")
+    if alignment == "aligned":
+        head = ("🎯 ДНО ОТКАТА ПО ТРЕНДУ — точка входа в ЛОНГ" if bull
+                else "🎯 ПИК ОТСКОКА ПО ТРЕНДУ — точка входа в ШОРТ")
+    elif alignment == "counter":
+        head = ("🟡 ДНО против тренда 1D" if bull
+                else "🟡 ПИК против тренда 1D")
+    else:
+        head = ("🟢 ДНО: разворот ВВЕРХ" if bull else "🔴 ПИК: разворот ВНИЗ")
     tf_str = ", ".join(_TF_LABEL.get(t, t.upper()) for t in (tfs or []))
     lines = [
         f"🔔 {head}{' — сильный сигнал' if strong else ''} | {config.SYMBOL_DISPLAY}",
@@ -151,10 +159,14 @@ def format_reversal_alert(ctx: dict[str, Any], direction: str,
             f"  🎯 TP2: {_fmt_price(plan['tp2'])}",
         ]
 
-    lines += [
-        "",
-        "⚠️ Разворот = вход против движения: держи риск ≤1% и уважай стоп.",
-    ]
+    if alignment == "aligned":
+        lines += ["", "✅ Разворот В СТОРОНУ тренда 1D — покупка отката, "
+                      "самый надёжный тип входа."]
+    elif alignment == "counter":
+        lines += ["", "⚠️ ПРОТИВ тренда 1D — контртренд: уменьшенный объём, "
+                      "быстрая фиксация, стоп неприкосновенен."]
+    else:
+        lines += ["", "⚠️ Тренд 1D не определён — торгуй от уровней, риск ≤1%."]
     return "\n".join(lines)
 
 

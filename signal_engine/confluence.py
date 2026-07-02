@@ -100,6 +100,15 @@ def calculate_confluence_score(data: dict[str, Any], direction: str) -> tuple[in
         scores["structure"] += 3 if data.get("reversal_strong_bear") else 2
         reasons.append("Разворотный сетап — признаки пика")
 
+    # Prime setup: multi-TF bottom/top forming WITH the HTF trend — a pullback
+    # entry in trend direction (дно отката в аптренде / пик отскока в даунтренде).
+    if bull and data.get("trend_aligned_bottom"):
+        scores["structure"] += 3
+        reasons.append("Дно отката по тренду (мультиТФ) — точка входа")
+    if not bull and data.get("trend_aligned_top"):
+        scores["structure"] += 3
+        reasons.append("Пик отскока по тренду (мультиТФ) — точка входа")
+
     # --- volume ----------------------------------------------------------
     volume = data.get("volume")
     avg_volume = data.get("avg_volume")

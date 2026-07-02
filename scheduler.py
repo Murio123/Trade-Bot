@@ -160,15 +160,25 @@ async def _maybe_reversal_alert(application, ctx: dict, profile_name: str,
     """
     if not config.ENABLE_REVERSAL_ALERTS:
         return
-    from signal_engine.vetoes import reversal_alert_allowed
+    from signal_engine.htf_filter import get_htf_bias
+    from signal_engine.vetoes import (reversal_alert_allowed,
+                                      reversal_alert_min_tfs,
+                                      reversal_trend_alignment)
 
     mtf = ctx.get("reversal_mtf") or {}
-    min_tfs = config.REVERSAL_ALERT_MIN_TFS
-    if mtf.get("combined_bullish") and mtf.get("bull_tf_count", 0) >= min_tfs:
+    if mtf.get("combined_bullish"):
         direction, tfs, confirmed = "bull", mtf["bull_tfs"], mtf.get("bull_candle_confirm")
-    elif mtf.get("combined_bearish") and mtf.get("bear_tf_count", 0) >= min_tfs:
+    elif mtf.get("combined_bearish"):
         direction, tfs, confirmed = "bear", mtf["bear_tfs"], mtf.get("bear_candle_confirm")
     else:
+        return
+
+    # Link to the HTF (1D) trend: with-trend reversals are prime entries,
+    # counter-trend ones must clear a higher multi-TF bar.
+    htf_bias = get_htf_bias(ctx.get("inds_by_tf", {}).get("1d") or ctx.get("ind_1d", {}))
+    alignment = reversal_trend_alignment(direction, htf_bias)
+    min_tfs = reversal_alert_min_tfs(config.REVERSAL_ALERT_MIN_TFS, alignment)
+    if len(tfs) < min_tfs:
         return
     if not confirmed:
         log.info("Reversal %s on %d TFs but no 1H confirmation candle yet — waiting",
@@ -190,13 +200,24 @@ async def _maybe_reversal_alert(application, ctx: dict, profile_name: str,
                 factors.append(f)
 
     text = formatting.format_reversal_alert(ctx, direction, factors,
-                                            len(tfs) >= 3, tfs)
+                                            len(tfs) >= 3, tfs,
+                                            alignment=alignment)
     await alerts.broadcast(application.bot, text)
+    # Prime (with-trend) entries also get the chart with the zones.
+    if alignment == "aligned" and ctx.get("df_signal") is not None:
+        try:
+            import asyncio
+            from bot import charts
+            path = await asyncio.to_thread(charts.render_levels_chart, ctx)
+            await alerts.broadcast_photo(application.bot, path)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("reversal chart failed: %s", exc)
     application.bot_data["last_reversal_alert"] = {
         "direction": direction, "price": ctx.get("price"),
         "time": now, "tf_count": len(tfs),
     }
-    log.info("Reversal alert: %s on %d TFs (%s)", direction, len(tfs), ",".join(tfs))
+    log.info("Reversal alert: %s on %d TFs (%s, %s)", direction, len(tfs),
+             ",".join(tfs), alignment)
 
 
 def build_scheduler(application) -> AsyncIOScheduler:

@@ -141,3 +141,43 @@ def test_stop_atr_uses_profile_stop_tf():
     assert _stop_atr({}, inds, 300) == 300
     # missing stop-tf data -> fall back to entry ATR
     assert _stop_atr({"stop_tf": "4h"}, inds, 90) == 90
+
+
+def test_reversal_trend_linkage():
+    from signal_engine.vetoes import (reversal_alert_min_tfs,
+                                      reversal_trend_alignment)
+    # bottom in an uptrend = prime pullback entry
+    assert reversal_trend_alignment("bull", "bullish") == "aligned"
+    assert reversal_trend_alignment("bear", "bearish") == "aligned"
+    # fading the trend = counter
+    assert reversal_trend_alignment("bull", "bearish") == "counter"
+    assert reversal_trend_alignment("bear", "bullish") == "counter"
+    assert reversal_trend_alignment("bull", "neutral") == "neutral"
+    # counter-trend needs one more confirming timeframe
+    assert reversal_alert_min_tfs(2, "aligned") == 2
+    assert reversal_alert_min_tfs(2, "neutral") == 2
+    assert reversal_alert_min_tfs(2, "counter") == 3
+
+
+def test_confluence_trend_aligned_reversal_bonus():
+    from signal_engine.confluence import calculate_confluence_score
+    flat = {"trend_aligned_bottom": True, "rsi": 28, "macd_bullish_cross": True}
+    total, scores, reasons = calculate_confluence_score(flat, "long")
+    assert scores["structure"] >= 3
+    assert any("точка входа" in r for r in reasons)
+    # the mirror direction gets nothing from it
+    _, s2, r2 = calculate_confluence_score(flat, "short")
+    assert s2["structure"] == 0
+
+
+def test_reversal_alert_header_by_alignment():
+    from bot.formatting import format_reversal_alert
+    ctx = {"price": 58000.0, "atr": 300.0, "inds_by_tf": {"1h": {"atr": 300.0}},
+           "htf_levels": {"lows": [57400], "highs": [59500]},
+           "volume_profile": {}, "liquidity": {}, "order_blocks": {}}
+    aligned = format_reversal_alert(ctx, "bull", ["x"], False, ["4h", "1d"],
+                                    alignment="aligned")
+    assert "ПО ТРЕНДУ — точка входа" in aligned and "самый надёжный" in aligned
+    counter = format_reversal_alert(ctx, "bull", ["x"], False, ["4h", "1d", "12h"],
+                                    alignment="counter")
+    assert "против тренда" in counter and "контртренд" in counter

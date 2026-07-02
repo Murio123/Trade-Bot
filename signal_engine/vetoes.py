@@ -28,6 +28,32 @@ def dead_zone(structure_score: float, eq: dict[str, Any] | None) -> bool:
     return DEAD_ZONE_LOW <= pos <= DEAD_ZONE_HIGH
 
 
+def reversal_trend_alignment(direction: str, htf_bias: str) -> str:
+    """How a reversal relates to the HTF trend.
+
+    'aligned'  — bottom in an uptrend / top in a downtrend: a pullback entry,
+                 the highest-quality setup;
+    'counter'  — fading the HTF trend: needs extra confirmation;
+    'neutral'  — no clear trend.
+    """
+    if direction == "bull":
+        if htf_bias == "bullish":
+            return "aligned"
+        if htf_bias == "bearish":
+            return "counter"
+    elif direction == "bear":
+        if htf_bias == "bearish":
+            return "aligned"
+        if htf_bias == "bullish":
+            return "counter"
+    return "neutral"
+
+
+def reversal_alert_min_tfs(base_min: int, alignment: str) -> int:
+    """Counter-trend reversals must clear a higher multi-TF bar."""
+    return base_min + 1 if alignment == "counter" else base_min
+
+
 def reversal_alert_allowed(last: dict[str, Any] | None, direction: str,
                            tf_count: int, now, cooldown_hours: float) -> bool:
     """Throttle reversal alerts.
