@@ -365,6 +365,16 @@ def _reversal_mtf(dfs: dict[str, Any], inds: dict[str, Any],
                                          at_key_level=at_key_level)
     bull_tfs = [tf for tf in REVERSAL_TFS if per_tf.get(tf, {}).get("bullish_reversal")]
     bear_tfs = [tf for tf in REVERSAL_TFS if per_tf.get(tf, {}).get("bearish_reversal")]
+
+    # Confirmation candle on 1H: don't call a bottom while the last closed
+    # hourly candle is still falling (knife-catching guard), and vice versa.
+    bull_candle = bear_candle = False
+    df_1h = dfs.get("1h")
+    if df_1h is not None and len(df_1h) > 0:
+        last = df_1h.iloc[-1]
+        bull_candle = float(last["close"]) > float(last["open"])
+        bear_candle = float(last["close"]) < float(last["open"])
+
     return {
         "per_tf": per_tf,
         "bull_tfs": bull_tfs,
@@ -373,6 +383,8 @@ def _reversal_mtf(dfs: dict[str, Any], inds: dict[str, Any],
         "bear_tf_count": len(bear_tfs),
         "combined_bullish": len(bull_tfs) >= 2,
         "combined_bearish": len(bear_tfs) >= 2,
+        "bull_candle_confirm": bull_candle,
+        "bear_candle_confirm": bear_candle,
     }
 
 

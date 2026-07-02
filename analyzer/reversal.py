@@ -1,13 +1,17 @@
 """Reversal / exhaustion detection — catching bottoms and tops.
 
-Combines several independent exhaustion signals at a swing extreme:
-  - CVD divergence (price new low, CVD higher low = buyer absorption, and mirror)
+Combines up to nine independent signals at a swing extreme:
   - exhaustion candle (hammer / shooting star: long rejection wick)
   - volume climax (capitulation / blow-off spike at the extreme)
   - Bollinger reversion (pierce the band, close back inside)
-  - RSI extreme + turn (out of 20/80)
+  - RSI extreme + turn (out of 20/80) and StochRSI extreme + turn
+  - CVD divergence (price new low, CVD higher low = absorption, and mirror)
+  - RSI divergence (extreme not confirmed by momentum)
+  - engulfing confirmation candle
+  - stop-hunt sweep (pierce the prior extreme, close back beyond it)
+  - at a key HTF level (amplifier, only with other factors present)
 
-A bullish reversal (bottom) needs >= 2 confirming factors; >= 3 is "strong".
+A reversal needs >= 3 confirming factors; >= 4 is "strong".
 """
 from __future__ import annotations
 
@@ -88,6 +92,34 @@ def detect_reversal(df: pd.DataFrame, ind: dict[str, Any],
         if div.get("bearish_divergence"):
             bear.append("CVD-дивергенция — поглощение продавцом")
 
+    # 6. RSI divergence (price extreme not confirmed by momentum).
+    rsi_series = (ind.get("_series") or {}).get("rsi")
+    if rsi_series is not None and len(rsi_series) == len(df):
+        div = detect_divergence(df, rsi_series)
+        if div.get("bullish_divergence"):
+            bull.append("RSI-дивергенция — минимум без импульса")
+        if div.get("bearish_divergence"):
+            bear.append("RSI-дивергенция — максимум без импульса")
+
+    # 7. Engulfing confirmation candle.
+    if len(df) >= 2:
+        prev = df.iloc[-2]
+        po, pc = float(prev["open"]), float(prev["close"])
+        if at_low and pc < po and c > o and c > po and o < pc:
+            bull.append("Бычье поглощение — подтверждающая свеча")
+        if at_high and pc > po and c < o and c < po and o > pc:
+            bear.append("Медвежье поглощение — подтверждающая свеча")
+
+    # 8. Stop-hunt sweep: pierce the prior extreme, close back beyond it.
+    if len(df) >= swing_n + 1:
+        prior = df.iloc[-(swing_n + 1):-1]
+        prior_low = float(prior["low"].min())
+        prior_high = float(prior["high"].max())
+        if l < prior_low and c > prior_low:
+            bull.append("Свип минимума — стоп-хант и возврат")
+        if h > prior_high and c < prior_high:
+            bear.append("Свип максимума — стоп-хант и возврат")
+
     # 6. Reversal at a key HTF level amplifies an existing directional read.
     if at_key_level:
         if bull:
@@ -99,8 +131,10 @@ def detect_reversal(df: pd.DataFrame, ind: dict[str, Any],
     out["factors_bear"] = bear
     out["bull_score"] = len(bull)
     out["bear_score"] = len(bear)
-    out["bullish_reversal"] = len(bull) >= 2
-    out["bearish_reversal"] = len(bear) >= 2
-    out["bull_strong"] = len(bull) >= 3
-    out["bear_strong"] = len(bear) >= 3
+    # With 9 possible factors the bars are higher than the original 6-factor
+    # detector: 3+ to flag a reversal, 4+ to call it strong.
+    out["bullish_reversal"] = len(bull) >= 3
+    out["bearish_reversal"] = len(bear) >= 3
+    out["bull_strong"] = len(bull) >= 4
+    out["bear_strong"] = len(bear) >= 4
     return out

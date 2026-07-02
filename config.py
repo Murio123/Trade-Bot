@@ -101,9 +101,10 @@ ALERT_CHECK_INTERVAL_MINUTES = _get_int("ALERT_CHECK_INTERVAL_MINUTES", 5)
 # How often open trades are checked for stop/target hits.
 TRADE_CHECK_INTERVAL_MINUTES = _get_int("TRADE_CHECK_INTERVAL_MINUTES", 15)
 
-# Proactive reversal (bottom/top) alerts when enough exhaustion factors align.
+# Proactive reversal (bottom/top) alerts.
 ENABLE_REVERSAL_ALERTS = _get_bool("ENABLE_REVERSAL_ALERTS", True)
-REVERSAL_ALERT_MIN_FACTORS = _get_int("REVERSAL_ALERT_MIN_FACTORS", 3)
+# How many timeframes (of 1H/4H/12H/1D) must confirm before alerting.
+REVERSAL_ALERT_MIN_TFS = _get_int("REVERSAL_ALERT_MIN_TFS", 2)
 REVERSAL_ALERT_COOLDOWN_HOURS = _get_int("REVERSAL_ALERT_COOLDOWN_HOURS", 4)
 # Toggle for the intraday (15m) analysis stream; its cadence/timeframes are
 # defined by the "intraday" profile in signal_engine/profiles.py.

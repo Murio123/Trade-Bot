@@ -28,6 +28,23 @@ def dead_zone(structure_score: float, eq: dict[str, Any] | None) -> bool:
     return DEAD_ZONE_LOW <= pos <= DEAD_ZONE_HIGH
 
 
+def reversal_alert_allowed(last: dict[str, Any] | None, direction: str,
+                           tf_count: int, now, cooldown_hours: float) -> bool:
+    """Throttle reversal alerts.
+
+    Within the cooldown the same direction may fire again ONLY as an
+    escalation — confirmation spread to MORE timeframes than the previous
+    alert. Price movement alone never re-arms it (that was the spam: every
+    new low re-triggered "дно" as the knife kept falling).
+    """
+    if last is None or last.get("direction") != direction:
+        return True
+    from datetime import timedelta
+    if now - last["time"] >= timedelta(hours=cooldown_hours):
+        return True
+    return tf_count > last.get("tf_count", 0)
+
+
 def crowded_funding(direction: str, funding: dict[str, Any] | None) -> bool:
     """Extreme funding with the crowd on our side -> squeeze risk against us.
 

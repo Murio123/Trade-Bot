@@ -74,3 +74,59 @@ def test_last_signal_note_recent_vs_stale():
     stale = dict(base, created_at=datetime.now(timezone.utc) - timedelta(hours=30))
     assert format_last_signal_note(stale, max_age_hours=24) is None
     assert format_last_signal_note(None) is None
+
+
+def test_reversal_alert_throttle():
+    from datetime import datetime, timezone
+    from signal_engine.vetoes import reversal_alert_allowed
+    now = datetime.now(timezone.utc)
+    last = {"direction": "bull", "time": now - timedelta(hours=1), "tf_count": 2}
+    # same direction, inside cooldown, same strength -> throttled (the old spam)
+    assert not reversal_alert_allowed(last, "bull", 2, now, cooldown_hours=4)
+    # escalation to more timeframes -> allowed
+    assert reversal_alert_allowed(last, "bull", 3, now, cooldown_hours=4)
+    # opposite direction -> allowed
+    assert reversal_alert_allowed(last, "bear", 2, now, cooldown_hours=4)
+    # cooldown expired -> allowed
+    old = {"direction": "bull", "time": now - timedelta(hours=5), "tf_count": 2}
+    assert reversal_alert_allowed(old, "bull", 2, now, cooldown_hours=4)
+    assert reversal_alert_allowed(None, "bull", 2, now, cooldown_hours=4)
+
+
+def test_reversal_new_factors_and_higher_bar():
+    import numpy as np
+    from analyzer.reversal import detect_reversal
+    rng = np.random.default_rng(7)
+    n = 40
+    base = np.linspace(60000, 57000, n)  # downtrend into the low
+    df = pd.DataFrame({
+        "open": base + 50, "close": base,
+        "high": base + 120, "low": base - 120,
+        "volume": np.abs(rng.normal(1000, 100, n)),
+    })
+    prior_low = float(df["low"].iloc[-11:-1].min())
+    # last candle: sweep of the prior low + bullish engulfing + hammer-ish
+    prev_o, prev_c = float(df["open"].iloc[-2]), float(df["close"].iloc[-2])
+    df.loc[df.index[-1], "low"] = prior_low - 200
+    df.loc[df.index[-1], "open"] = prev_c - 10
+    df.loc[df.index[-1], "close"] = prev_o + 60
+    df.loc[df.index[-1], "high"] = prev_o + 80
+    df.loc[df.index[-1], "volume"] = 4000
+    ind = {"avg_volume": 1000, "rsi": 28, "rsi_prev": 24}
+    rev = detect_reversal(df, ind)
+    assert "Свип минимума — стоп-хант и возврат" in rev["factors_bull"]
+    assert "Бычье поглощение — подтверждающая свеча" in rev["factors_bull"]
+    # 2 factors are no longer enough to flag a reversal
+    assert rev["bullish_reversal"] == (rev["bull_score"] >= 3)
+
+
+def test_reversal_plan_levels():
+    from bot.formatting import build_reversal_plan
+    ctx = {"price": 58000.0, "atr": 300.0,
+           "inds_by_tf": {"1h": {"atr": 300.0}},
+           "htf_levels": {"lows": [57400], "highs": [59500]},
+           "volume_profile": {}, "liquidity": {}, "order_blocks": {}}
+    plan = build_reversal_plan(ctx, "bull")
+    assert plan["stop"] == 57400 - 150          # support minus 0.5 ATR
+    assert plan["tp1"] == 59500                 # nearest resistance (>= 1R away)
+    assert plan["rr"] > 1.5

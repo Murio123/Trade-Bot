@@ -149,18 +149,38 @@ async def _send_signal_chart(application, ctx: dict, signal: dict) -> None:
 
 async def _maybe_reversal_alert(application, ctx: dict, profile_name: str,
                                 timeframe: str) -> None:
-    """Emit a proactive bottom/top alert when 2+ timeframes confirm a reversal."""
+    """Proactive bottom/top alert.
+
+    Fires only when ALL hold:
+      - reversal confirmed on >= REVERSAL_ALERT_MIN_TFS timeframes,
+      - the last closed 1H candle already turned in the reversal direction
+        (no knife-catching alerts while price is still falling),
+      - the throttle allows it (cooldown; re-fire inside the cooldown only
+        when MORE timeframes confirm than at the previous alert).
+    """
     if not config.ENABLE_REVERSAL_ALERTS:
         return
+    from signal_engine.vetoes import reversal_alert_allowed
+
     mtf = ctx.get("reversal_mtf") or {}
-    if mtf.get("combined_bullish"):
-        direction, tfs = "bull", mtf.get("bull_tfs", [])
-    elif mtf.get("combined_bearish"):
-        direction, tfs = "bear", mtf.get("bear_tfs", [])
+    min_tfs = config.REVERSAL_ALERT_MIN_TFS
+    if mtf.get("combined_bullish") and mtf.get("bull_tf_count", 0) >= min_tfs:
+        direction, tfs, confirmed = "bull", mtf["bull_tfs"], mtf.get("bull_candle_confirm")
+    elif mtf.get("combined_bearish") and mtf.get("bear_tf_count", 0) >= min_tfs:
+        direction, tfs, confirmed = "bear", mtf["bear_tfs"], mtf.get("bear_candle_confirm")
     else:
         return
+    if not confirmed:
+        log.info("Reversal %s on %d TFs but no 1H confirmation candle yet — waiting",
+                 direction, len(tfs))
+        return
 
-    # Aggregate the factors across the confirming timeframes.
+    now = datetime.now(timezone.utc)
+    last = application.bot_data.get("last_reversal_alert")
+    if not reversal_alert_allowed(last, direction, len(tfs), now,
+                                  config.REVERSAL_ALERT_COOLDOWN_HOURS):
+        return
+
     per_tf = mtf.get("per_tf", {})
     key_f = "factors_bull" if direction == "bull" else "factors_bear"
     factors: list[str] = []
@@ -169,21 +189,13 @@ async def _maybe_reversal_alert(application, ctx: dict, profile_name: str,
             if f not in factors:
                 factors.append(f)
 
-    # Global de-duplication (both profile jobs see the same 1H/4H/12H/1D read).
-    price = ctx.get("price")
-    atr = ctx.get("atr") or (price * 0.01 if price else 0)
-    last = application.bot_data.get("last_reversal_alert")
-    now = datetime.now(timezone.utc)
-    if last and last["direction"] == direction:
-        within_cooldown = (now - last["time"]) < timedelta(hours=config.REVERSAL_ALERT_COOLDOWN_HOURS)
-        near_price = price is not None and abs(price - last["price"]) < atr * 0.5
-        if within_cooldown and near_price:
-            return
-
-    strong = len(tfs) >= 3
-    text = formatting.format_reversal_alert(ctx, direction, factors, strong, tfs)
+    text = formatting.format_reversal_alert(ctx, direction, factors,
+                                            len(tfs) >= 3, tfs)
     await alerts.broadcast(application.bot, text)
-    application.bot_data["last_reversal_alert"] = {"direction": direction, "price": price, "time": now}
+    application.bot_data["last_reversal_alert"] = {
+        "direction": direction, "price": ctx.get("price"),
+        "time": now, "tf_count": len(tfs),
+    }
     log.info("Reversal alert: %s on %d TFs (%s)", direction, len(tfs), ",".join(tfs))
 
 

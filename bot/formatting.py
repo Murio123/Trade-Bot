@@ -98,22 +98,63 @@ def format_signal(signal: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def build_reversal_plan(ctx: dict[str, Any], direction: str) -> dict[str, Any] | None:
+    """Concrete entry/stop/targets for a confirmed reversal."""
+    price = ctx.get("price")
+    if not price:
+        return None
+    inds = ctx.get("inds_by_tf", {})
+    atr_1h = (inds.get("1h") or {}).get("atr") or ctx.get("atr") or price * 0.01
+    support, resistance = _nearest_sr(ctx, price)
+
+    if direction == "bull":
+        stop = (support - atr_1h * 0.5) if (support and support < price) else price - atr_1h * 2
+        risk = max(price - stop, atr_1h * 0.5)
+        tp1 = resistance if (resistance and resistance - price >= risk) else price + risk * 1.5
+        tp2 = price + risk * 3
+    else:
+        stop = (resistance + atr_1h * 0.5) if (resistance and resistance > price) else price + atr_1h * 2
+        risk = max(stop - price, atr_1h * 0.5)
+        tp1 = support if (support and price - support >= risk) else price - risk * 1.5
+        tp2 = price - risk * 3
+    return {
+        "entry": round(price, 2), "stop": round(stop, 2),
+        "tp1": round(tp1, 2), "tp2": round(tp2, 2),
+        "rr": round(abs(tp1 - price) / risk, 2),
+        "risk_pct": round(risk / price * 100, 2),
+    }
+
+
 def format_reversal_alert(ctx: dict[str, Any], direction: str,
                           factors: list[str], strong: bool,
                           tfs: list[str] | None = None) -> str:
-    head = "🟢 Возможное ДНО" if direction == "bull" else "🔴 Возможный ПИК"
+    bull = direction == "bull"
+    head = ("🟢 ДНО: разворот ВВЕРХ" if bull else "🔴 ПИК: разворот ВНИЗ")
     tf_str = ", ".join(_TF_LABEL.get(t, t.upper()) for t in (tfs or []))
     lines = [
-        f"🔔 {head}{' (сильное)' if strong else ''} | {config.SYMBOL_DISPLAY}",
-        f"Цена: {_fmt_price(ctx.get('price'))}",
-        f"Подтверждено на {len(tfs or [])} ТФ: {tf_str}",
+        f"🔔 {head}{' — сильный сигнал' if strong else ''} | {config.SYMBOL_DISPLAY}",
+        f"Подтверждено: {len(tfs or [])} ТФ ({tf_str}) + разворотная свеча 1H",
         "",
-        "Факторы:",
+        "Почему:",
     ]
-    lines += [f"  • {f}" for f in factors]
-    lines.append("")
-    lines.append("⚠️ Сигнал на истощение тренда — это фейд. Жди подтверждения "
-                 "входной свечой и учитывай старший тренд.")
+    lines += [f"  • {f}" for f in factors[:5]]
+
+    plan = build_reversal_plan(ctx, direction)
+    if plan:
+        d = "ЛОНГ" if bull else "ШОРТ"
+        lines += [
+            "",
+            f"🎯 План ({d}):",
+            f"  Вход: {_fmt_price(plan['entry'])} (по рынку)",
+            f"  🛑 Стоп: {_fmt_price(plan['stop'])} ({plan['risk_pct']}%)",
+            f"  🎯 TP1: {_fmt_price(plan['tp1'])} (R:R {plan['rr']})",
+            f"  🎯 TP2: {_fmt_price(plan['tp2'])}",
+        ]
+
+    lines += [
+        "",
+        "⚠️ Разворот = вход против движения: держи риск ≤1% и уважай стоп.",
+    ]
     return "\n".join(lines)
 
 
