@@ -557,14 +557,27 @@ def format_levels(ctx: dict[str, Any]) -> str:
     if ctx_bits:
         lines += ["", "⚖️ " + " · ".join(ctx_bits)]
 
-    support, resistance = _nearest_sr(ctx, price)
     lines.append("")
-    lines += _levels_conclusion(ctx, price, support, resistance)
+    lines += _levels_conclusion(ctx, price, res, sup)
     return "\n".join(lines)
 
 
+def _strong_cluster(clusters: list[dict], price: float) -> dict | None:
+    """Nearest multi-source (⭐) cluster; falls back to the nearest one, but
+    skips clusters closer than 0.5% — a working range of ±0.2% is noise."""
+    if not clusters:
+        return None
+    meaningful = [c for c in clusters if abs(c["mid"] - price) / price >= 0.005]
+    pool = meaningful or clusters
+    for c in pool:
+        if len(c["labels"]) >= 2:
+            return c
+    return pool[0]
+
+
 def _levels_conclusion(ctx: dict[str, Any], price: float | None,
-                       support: float | None, resistance: float | None) -> list[str]:
+                       res_clusters: list[dict] | None = None,
+                       sup_clusters: list[dict] | None = None) -> list[str]:
     if not price:
         return []
     inds = ctx.get("inds_by_tf", {})
@@ -588,10 +601,19 @@ def _levels_conclusion(ctx: dict[str, Any], price: float | None,
     if parts:
         out.append("• " + ", ".join(parts) + ".")
 
-    if resistance and support:
-        out.append(f"• Диапазон работы: поддержка {_fmt_price(support)} "
-                   f"(−{(price - support) / price * 100:.1f}%) ↔ сопротивление "
-                   f"{_fmt_price(resistance)} (+{(resistance - price) / price * 100:.1f}%).")
+    # Working range between the nearest STRONG clusters (not raw points —
+    # with dozens of sources something always sits 0.2% away, which made the
+    # range meaninglessly narrow).
+    res_c = _strong_cluster(res_clusters or [], price)
+    sup_c = _strong_cluster(sup_clusters or [], price)
+    if res_c and sup_c:
+        s_star = " ⭐" if len(sup_c["labels"]) >= 2 else ""
+        r_star = " ⭐" if len(res_c["labels"]) >= 2 else ""
+        out.append(
+            f"• Рабочий диапазон: {_fmt_price(sup_c['mid'])}{s_star} "
+            f"(−{(price - sup_c['mid']) / price * 100:.1f}%) ↔ "
+            f"{_fmt_price(res_c['mid'])}{r_star} "
+            f"(+{(res_c['mid'] - price) / price * 100:.1f}%).")
 
     # Directional lean from trend + premium/discount.
     if trend == "бычий" and zone == "discount":
