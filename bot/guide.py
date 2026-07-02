@@ -133,7 +133,7 @@ TOPICS: dict[str, tuple[str, str]] = {
     "commands": (
         "💬 Все команды",
         "💬 КОМАНДЫ\n\n"
-        "🎯 /signal (свинг 1H) · /intraday (15m)\n"
+        "🎯 /signal (1H) · /intraday (15m) · /position (4H, 2000-5000 пт)\n"
         "🔍 /reversal (дно/пик) · /levels · /deep · /market\n"
         "📒 /journal · /setalert <цена> · /alerts · /backtest\n"
         "⚙️ /status · /testalert · /guide · /help\n\n"

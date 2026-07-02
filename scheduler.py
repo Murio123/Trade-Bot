@@ -228,6 +228,13 @@ def build_scheduler(application) -> AsyncIOScheduler:
         analysis_job, "interval", minutes=PROFILES["swing"]["interval_minutes"],
         args=[application, "swing"], id="analysis_swing", next_run_time=None,
     )
+    # Position analysis (4H entry, 1D structure) for multi-day 2000-5000pt moves.
+    if config.ENABLE_POSITION_ANALYSIS:
+        scheduler.add_job(
+            analysis_job, "interval",
+            minutes=PROFILES["position"]["interval_minutes"],
+            args=[application, "position"], id="analysis_position", next_run_time=None,
+        )
     # Intraday analysis (15m entry, 4H/1H/15m) every M minutes.
     if config.ENABLE_FAST_ANALYSIS:
         scheduler.add_job(

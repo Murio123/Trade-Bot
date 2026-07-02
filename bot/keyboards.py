@@ -16,6 +16,7 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
 # --- current reply keyboard labels -----------------------------------------
 BTN_SIGNAL = "📊 Свинг"
 BTN_INTRADAY = "⚡ Интрадей"
+BTN_POSITION = "🌊 Позиция"
 BTN_REVERSAL = "🔄 Дно/Пик"
 BTN_LEVELS = "📐 Уровни"
 BTN_DEEP = "🏛 Глубокий анализ"
@@ -32,19 +33,18 @@ BTN_BACKTEST = "📈 Бэктест"
 BTN_ASK = "🧠 Спросить ИИ"
 BTN_HELP = "❓ Помощь"
 
-_ROWS = [
-    (BTN_SIGNAL, "signal"), (BTN_INTRADAY, "intraday"),
-    (BTN_REVERSAL, "reversal"), (BTN_LEVELS, "levels"),
-    (BTN_DEEP, "deep"), (BTN_MARKET, "market"),
-    (BTN_JOURNAL, "journal"), (BTN_ALERTS, "alerts"),
-    (BTN_STATUS, "status"), (BTN_GUIDE, "guide"),
+# Rows of (label, command); the first row holds the three signal streams.
+_LAYOUT = [
+    [(BTN_SIGNAL, "signal"), (BTN_INTRADAY, "intraday"), (BTN_POSITION, "position")],
+    [(BTN_REVERSAL, "reversal"), (BTN_LEVELS, "levels")],
+    [(BTN_DEEP, "deep"), (BTN_MARKET, "market")],
+    [(BTN_JOURNAL, "journal"), (BTN_ALERTS, "alerts")],
+    [(BTN_STATUS, "status"), (BTN_GUIDE, "guide")],
 ]
 
 
 def main_reply_keyboard() -> ReplyKeyboardMarkup:
-    labels = [label for label, _ in _ROWS]
-    rows = [[KeyboardButton(a), KeyboardButton(b)]
-            for a, b in zip(labels[::2], labels[1::2])]
+    rows = [[KeyboardButton(label) for label, _ in row] for row in _LAYOUT]
     return ReplyKeyboardMarkup(
         rows,
         resize_keyboard=True,
@@ -53,15 +53,13 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
 
 
 def main_inline_keyboard() -> InlineKeyboardMarkup:
-    rows = []
-    for (l1, c1), (l2, c2) in zip(_ROWS[::2], _ROWS[1::2]):
-        rows.append([InlineKeyboardButton(l1, callback_data=f"cmd:{c1}"),
-                     InlineKeyboardButton(l2, callback_data=f"cmd:{c2}")])
+    rows = [[InlineKeyboardButton(label, callback_data=f"cmd:{cmd}")
+             for label, cmd in row] for row in _LAYOUT]
     return InlineKeyboardMarkup(rows)
 
 
 # Map reply-keyboard label -> internal command name (incl. legacy labels).
-LABEL_TO_COMMAND = {label: cmd for label, cmd in _ROWS}
+LABEL_TO_COMMAND = {label: cmd for row in _LAYOUT for label, cmd in row}
 LABEL_TO_COMMAND.update({
     BTN_FUNDING: "funding",
     BTN_FEAR: "fear",

@@ -41,6 +41,22 @@ PROFILES: dict[str, dict[str, Any]] = {
         "targets": _targets("SWING_TARGETS", (1.5, 3.0)),
         "interval_minutes": 60,    # scheduled hourly (matches 1H entry)
     },
+    "position": {
+        "label": "ПОЗИЦИОННЫЙ",
+        "emoji": "🌊",
+        "entry": "4h",
+        "htf": "1d",
+        "mtf": ["4h", "12h", "1d"],
+        "zone_tfs": ["1d", "12h"],           # zones from the daily structure
+        "structural_stop": True,              # stop behind 1D/12H structure
+        "stop_tf": "1d",                      # ATR fallback from the DAILY ATR
+        "cooldown_hours": 24,
+        "atr_mult": _fnum("POSITION_ATR_MULT", 1.2),
+        # Calibrated for 2000-5000pt BTC moves: with a typical 1D ATR of
+        # 2.5-4%, TP1 lands at ~2100-3300pt and TP2 at ~4300-7000pt.
+        "targets": _targets("POSITION_TARGETS", (1.2, 2.5)),
+        "interval_minutes": 240,   # scheduled every 4h
+    },
     "intraday": {
         "label": "ИНТРАДЕЙ",
         "emoji": "⚡",

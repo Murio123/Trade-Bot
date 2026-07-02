@@ -24,7 +24,8 @@ HELP_TEXT = (
     "🤖 BTC Signal Bot — все команды\n\n"
     "🎯 Сигналы:\n"
     "/signal — свинг (вход 1H, тренд 1D)\n"
-    "/intraday — интрадей (вход 15m, тренд 1H)\n\n"
+    "/intraday — интрадей (вход 15m, тренд 1H)\n"
+    "/position — 🌊 позиционный (движения 2000-5000 пт, холд дни)\n\n"
     "🔍 Анализ:\n"
     "/reversal — дно/пик по 4 ТФ + план входа\n"
     "/levels — ключевые уровни + график\n"
@@ -194,6 +195,10 @@ async def intraday_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _run_signal(update, context, "intraday")
 
 
+async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _run_signal(update, context, "position")
+
+
 async def reversal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text("🔄 Ищу признаки дна/пика…")
     try:
@@ -255,7 +260,7 @@ async def journal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     from backtest import run_backtest
     arg = (context.args[0].lower() if context.args else "swing")
-    profile = arg if arg in ("swing", "intraday") else "swing"
+    profile = arg if arg in ("swing", "intraday", "position") else "swing"
     await update.effective_message.reply_text(
         f"⏳ Запускаю бэктест ({profile})… это ~10-20с.")
     binance = _binance(context)
@@ -508,6 +513,7 @@ def _ask_context(ctx: dict[str, Any]) -> dict[str, Any]:
 COMMAND_DISPATCH = {
     "signal": signal_cmd,
     "intraday": intraday_cmd,
+    "position": position_cmd,
     "deep": deep_cmd,
     "reversal": reversal_cmd,
     "levels": levels_cmd,
@@ -527,6 +533,7 @@ COMMAND_DISPATCH = {
 BOT_COMMANDS = [
     ("signal", "📊 Свинг-сигнал (вход 1H)"),
     ("intraday", "⚡ Интрадей-сигнал (вход 15m)"),
+    ("position", "🌊 Позиционный (движения 2000-5000 пт)"),
     ("reversal", "🔄 Дно/пик по 4 ТФ"),
     ("levels", "📐 Ключевые уровни"),
     ("deep", "🏛 Глубокий анализ /100"),
@@ -569,6 +576,7 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("help", help_cmd))
     application.add_handler(CommandHandler("signal", signal_cmd))
     application.add_handler(CommandHandler("intraday", intraday_cmd))
+    application.add_handler(CommandHandler("position", position_cmd))
     application.add_handler(CommandHandler("deep", deep_cmd))
     application.add_handler(CommandHandler("reversal", reversal_cmd))
     application.add_handler(CommandHandler("levels", levels_cmd))

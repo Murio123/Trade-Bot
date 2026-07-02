@@ -109,6 +109,9 @@ REVERSAL_ALERT_COOLDOWN_HOURS = _get_int("REVERSAL_ALERT_COOLDOWN_HOURS", 4)
 # Toggle for the intraday (15m) analysis stream; its cadence/timeframes are
 # defined by the "intraday" profile in signal_engine/profiles.py.
 ENABLE_FAST_ANALYSIS = _get_bool("ENABLE_FAST_ANALYSIS", True)
+# Toggle for the position (4H entry, 1D structure) stream targeting
+# multi-day 2000-5000pt moves.
+ENABLE_POSITION_ANALYSIS = _get_bool("ENABLE_POSITION_ANALYSIS", True)
 
 # --- Operating mode -------------------------------------------------------
 # Dry-run: run the whole pipeline but do NOT send Telegram alerts (ТЗ step 10).
