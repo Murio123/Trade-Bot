@@ -7,15 +7,61 @@ conditions where the edge statistically degrades:
   backing — chop territory, no side has the advantage;
 - crowded funding: funding at a statistical extreme WITH the trade's crowd
   (going long when longs already pay heavily) — squeeze fuel points against us.
+
+Data-quality gates (stale_data, abnormal_volatility) are the exception: they
+run BEFORE any scoring in run_cascade — numbers built on bad data must not
+even be computed.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
+
+import config
 
 # |z-score| of the current funding vs its history to call it extreme.
 FUNDING_Z_EXTREME = 2.0
 # Equilibrium band treated as "middle of the range".
 DEAD_ZONE_LOW, DEAD_ZONE_HIGH = 0.45, 0.55
+# Canonical timeframe->hours map (pipeline and backtest import it from here).
+TF_HOURS = {"15m": 0.25, "1h": 1.0, "4h": 4.0, "12h": 12.0, "1d": 24.0}
+
+
+def stale_data(last_close_time: Any, timeframe: str,
+               now: datetime | None = None,
+               max_bars: float | None = None) -> bool:
+    """True when the last CLOSED candle is too old for this timeframe.
+
+    A failover exchange can serve outdated klines without any HTTP error --
+    analysing them produces confidently wrong signals, so the cascade must
+    refuse instead ("data is stale" -> NO_TRADE). last_close_time accepts a
+    datetime or a pandas Timestamp (naive values are treated as UTC).
+    """
+    max_bars = max_bars if max_bars is not None else config.MAX_DATA_AGE_BARS
+    if last_close_time is None:
+        return True
+    now = now or datetime.now(timezone.utc)
+    ts = getattr(last_close_time, "to_pydatetime", lambda: last_close_time)()
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    age_hours = (now - ts).total_seconds() / 3600
+    return age_hours > TF_HOURS.get(timeframe, 1.0) * max_bars
+
+
+def abnormal_volatility(vol: dict[str, Any] | None,
+                        max_percentile: float | None = None) -> bool:
+    """True when ATR sits in the extreme tail of its own history.
+
+    In a volatility blow-off ATR-based stops/targets are unreliable and
+    slippage eats the edge -- skip the trade rather than size it wrong.
+    Missing data is NOT abnormal (graceful degradation is handled elsewhere).
+    """
+    max_percentile = (max_percentile if max_percentile is not None
+                      else config.ABNORMAL_VOL_PERCENTILE)
+    if not vol:
+        return False
+    p = vol.get("atr_percentile")
+    return p is not None and p >= max_percentile
 
 
 def dead_zone(structure_score: float, eq: dict[str, Any] | None) -> bool:

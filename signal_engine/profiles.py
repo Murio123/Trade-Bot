@@ -29,17 +29,22 @@ def _fnum(name: str, default: float) -> float:
 
 PROFILES: dict[str, dict[str, Any]] = {
     "swing": {
+        # Part B hierarchy: 1D = regime & main trend, 12H = market structure
+        # and key zones, 4H = trading scenario and entry (closed candles only).
+        # The old 1H entry contradicted the declared "structure on 12H" —
+        # a 1H-triggered swing degenerated into noise-driven scalps.
         "label": "СВИНГ",
         "emoji": "📊",
-        "entry": "1h",
+        "entry": "4h",
         "htf": "1d",
-        "mtf": ["1h", "4h", "12h", "1d"],  # 1H entry / 4H+12H zones / 1D trend
-        "zone_tfs": ["12h", "4h"],          # OB/FVG/targets from higher timeframes
-        "structural_stop": True,            # stop behind HTF structure, not 1H-ATR
+        "mtf": ["4h", "12h", "1d"],
+        "zone_tfs": ["12h", "4h"],         # key zones from the 12H structure
+        "structural_stop": True,           # stop behind 12H structure
+        "stop_tf": "12h",                  # ATR fallback from the 12H ATR
         "cooldown_hours": 8,
         "atr_mult": _fnum("SWING_ATR_MULT", 1.5),
         "targets": _targets("SWING_TARGETS", (1.5, 3.0)),
-        "interval_minutes": 60,    # scheduled hourly (matches 1H entry)
+        "interval_minutes": 240,   # scheduled every 4h (matches 4H entry)
     },
     "position": {
         "label": "ПОЗИЦИОННЫЙ",

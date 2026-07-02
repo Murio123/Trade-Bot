@@ -23,7 +23,7 @@ log = logging.getLogger(__name__)
 HELP_TEXT = (
     "🤖 BTC Signal Bot — все команды\n\n"
     "🎯 Сигналы:\n"
-    "/signal — свинг (вход 1H, тренд 1D)\n"
+    "/signal — свинг (вход 4H, структура 12H, тренд 1D)\n"
     "/intraday — интрадей (вход 15m, тренд 1H)\n"
     "/position — 🌊 позиционный (движения 2000-5000 пт, холд дни)\n\n"
     "🔍 Анализ:\n"
@@ -150,8 +150,10 @@ async def _run_signal(update: Update, context: ContextTypes.DEFAULT_TYPE,
         tf = profile["entry"]
         delivered_today = await db.signals_today(config.SYMBOL, timeframe=tf)
         last_signal = await db.last_signal(config.SYMBOL, timeframe=tf)
+        open_now = await db.open_trades()
         result = await run_cascade(ctx, delivered_today, last_signal,
-                                   interpret=True, profile_name=profile_name)
+                                   interpret=True, profile_name=profile_name,
+                                   open_trades=open_now)
     except Exception as exc:  # noqa: BLE001
         log.exception("signal (%s) failed", profile_name)
         await update.effective_message.reply_text(f"⚠️ Ошибка анализа: {exc}")
@@ -411,7 +413,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "last_analysis_tf": bot_data.get("last_analysis_tf"),
         "last_analysis_status": bot_data.get("last_analysis_status"),
         "last_analysis_blocked_at": bot_data.get("last_analysis_blocked_at"),
-        "signal_tf": "1H (свинг)",
+        "signal_tf": "4H (свинг)",
         "fast_tf": "15m (интрадей)" if config.ENABLE_FAST_ANALYSIS else "—",
         "signals_today": signals_today,
         "max_per_day": config.MAX_SIGNALS_PER_DAY,
@@ -559,7 +561,7 @@ COMMAND_DISPATCH = {
 
 # Shown in the Telegram "/" command menu.
 BOT_COMMANDS = [
-    ("signal", "📊 Свинг-сигнал (вход 1H)"),
+    ("signal", "📊 Свинг-сигнал (вход 4H)"),
     ("intraday", "⚡ Интрадей-сигнал (вход 15m)"),
     ("position", "🌊 Позиционный (движения 2000-5000 пт)"),
     ("reversal", "🔄 Дно/пик по 4 ТФ"),

@@ -35,9 +35,11 @@ from pipeline import (REVERSAL_TFS, _build_htf_zones, _near_key_level,
 from risk.position_sizing import calculate_position
 from signal_engine.confluence import (calculate_confluence_score,
                                       has_diverse_confirmation)
+from analyzer.volatility import analyze_volatility
 from signal_engine.htf_filter import filter_by_htf, get_htf_bias
 from signal_engine.profiles import get_profile
-from signal_engine.vetoes import dead_zone
+from signal_engine.regime import detect_regime, weighted_total
+from signal_engine.vetoes import TF_HOURS, abnormal_volatility, dead_zone
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +66,6 @@ async def _fetch_history(binance, interval: str, target: int) -> "pd.DataFrame":
     full = (pd.concat(frames).drop_duplicates("open_time")
             .sort_values("open_time").reset_index(drop=True))
     return full.iloc[-target:].reset_index(drop=True)
-_TF_HOURS = {"15m": 0.25, "1h": 1.0, "4h": 4.0, "12h": 12.0, "1d": 24.0}
 
 
 async def run_backtest(binance: BinanceClient, profile_name: str = "swing",
@@ -103,7 +104,10 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
     start = max(warmup, n - MAX_BARS)
 
     for i in range(start, n - 1):
-        entry_sub = entry_df.iloc[max(0, i - 250):i + 1]
+        # 300-bar lookback = live parity (klines limit=300 minus the
+        # dropped forming candle) — indicator warmup and the ATR-percentile
+        # gate must see the same window the live cascade sees.
+        entry_sub = entry_df.iloc[max(0, i - 299):i + 1]
         ind = compute_indicators(entry_sub)
         atr = ind.get("atr")
         if not atr:
@@ -193,9 +197,16 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
             "trend_aligned_top": htf_bias == "bearish" and bear_tfs >= 2,
         })
 
-        lt, ls, _ = calculate_confluence_score(flat, "long")
-        st, ss, _ = calculate_confluence_score(flat, "short")
-        direction, total, scores = ("long", lt, ls) if lt >= st else ("short", st, ss)
+        _, ls, _ = calculate_confluence_score(flat, "long")
+        _, ss, _ = calculate_confluence_score(flat, "short")
+        # Regime-weighted totals, live parity (regime from the 1D frame; the
+        # 1D volatility overlay is skipped — no per-bar 1D ATR history here).
+        regime = detect_regime(ind_htf if htf == "1d" else None)
+        lt = weighted_total(ls, regime)
+        st = weighted_total(ss, regime)
+        if lt == st:  # conflicted market — live blocks it too (direction_conflict)
+            continue
+        direction, total, scores = ("long", lt, ls) if lt > st else ("short", st, ss)
 
         if filter_by_htf(direction, htf_bias) is None:
             continue
@@ -205,6 +216,11 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
             continue
         # Dead-zone veto, same as live (crowded-funding needs history we lack).
         if dead_zone(scores.get("structure", 0), eq):
+            continue
+        # Abnormal-volatility gate, same as live (freshness does not apply to
+        # historical bars).
+        if abnormal_volatility(analyze_volatility(
+                entry_sub, tf_per_day=24.0 / TF_HOURS.get(entry_tf, 1.0))):
             continue
 
         pos = calculate_position(price, stop_atr, direction=direction,
@@ -239,7 +255,7 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
         outcome["r"] = round(outcome["r"] - cost_r, 2)
         setups.append({"idx": i, "score": total, "direction": direction, **outcome})
 
-    cooldown_bars = max(1, int(round(profile["cooldown_hours"] / _TF_HOURS.get(entry_tf, 1))))
+    cooldown_bars = max(1, int(round(profile["cooldown_hours"] / TF_HOURS.get(entry_tf, 1))))
     return _report(setups, profile, cooldown_bars, n - start)
 
 
@@ -344,7 +360,7 @@ def _report(setups: list[dict[str, Any]], profile: dict[str, Any],
 
 def _monthly_projection(row: dict[str, Any], profile: dict[str, Any], bars: int) -> list[str]:
     from config import RISK_PERCENT
-    tf_hours = _TF_HOURS.get(profile["entry"], 1)
+    tf_hours = TF_HOURS.get(profile["entry"], 1)
     period_days = max(bars * tf_hours / 24, 1)
     per_month = 30 / period_days
     trades_pm = row["trades"] * per_month

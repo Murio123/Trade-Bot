@@ -93,6 +93,19 @@ ATR_MULTIPLIER = _get_float("ATR_MULTIPLIER", 1.5)
 RISK_PERCENT = _get_float("RISK_PERCENT", 1.0)
 ACCOUNT_BALANCE = _get_float("ACCOUNT_BALANCE", 10000.0)
 
+# --- Data-quality gates (Part A quality pass) -------------------------------
+# Last closed candle older than this many bars of the entry TF -> NO_TRADE.
+MAX_DATA_AGE_BARS = _get_float("MAX_DATA_AGE_BARS", 3.0)
+# ATR percentile at/above which volatility is abnormal -> NO_TRADE.
+ABNORMAL_VOL_PERCENTILE = _get_float("ABNORMAL_VOL_PERCENTILE", 95.0)
+# Funding |z-score| that counts as "stretched" (contrarian macro points).
+# Must stay BELOW the crowded-funding veto extreme (FUNDING_Z_EXTREME=2.0 in
+# signal_engine/vetoes.py): score at the signal level, veto at the extreme.
+FUNDING_Z_SIGNAL = _get_float("FUNDING_Z_SIGNAL", 1.5)
+# Mandatory NO_TRADE thresholds (Part B).
+MIN_RISK_REWARD = _get_float("MIN_RISK_REWARD", 1.5)   # to TP2
+MIN_CONFIDENCE = _get_float("MIN_CONFIDENCE", 0.3)
+
 # Score thresholds (see ТЗ "Финальная классификация").
 SCORE_ALERT_MIN = _get_int("SCORE_ALERT_MIN", 8)     # 8-10 -> push to Telegram
 SCORE_JOURNAL_MIN = _get_int("SCORE_JOURNAL_MIN", 5)  # 5-7 -> store, available via /signal

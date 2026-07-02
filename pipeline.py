@@ -40,8 +40,14 @@ from signal_engine.cooldown import should_send_signal
 from signal_engine.daily_limiter import within_daily_limit
 from signal_engine.htf_filter import filter_by_htf, get_htf_bias
 from signal_engine.mtf_confidence import mtf_confidence_factor, trend_label
+from signal_engine.no_trade_gate import (bad_risk_reward, low_confidence,
+                                         missing_invalidation,
+                                         position_conflict, tf_conflict)
 from signal_engine.profiles import get_profile
-from signal_engine.vetoes import crowded_funding, dead_zone
+from signal_engine.regime import detect_regime, weighted_total
+from signal_engine.schema import build_result
+from signal_engine.vetoes import (TF_HOURS, abnormal_volatility,
+                                  crowded_funding, dead_zone, stale_data)
 
 log = logging.getLogger(__name__)
 
@@ -138,6 +144,13 @@ async def gather_market_context(binance: BinanceClient,
 
     sessions = compute_session_stats(df_1h)
 
+    # Volatility read on the entry timeframe (abnormal-volatility gate) and
+    # the freshness stamp of the last closed candle (stale-data gate).
+    tf_hours = TF_HOURS.get(signal_timeframe, 1.0)
+    volatility = analyze_volatility(df_signal, tf_per_day=24.0 / tf_hours)
+    volatility_1d = analyze_volatility(df_1d, tf_per_day=1.0)
+    last_close = df_signal["close_time"].iloc[-1] if len(df_signal) else None
+
     context = {
         "symbol": config.SYMBOL,
         "timeframe": signal_timeframe,
@@ -172,6 +185,9 @@ async def gather_market_context(binance: BinanceClient,
         "liquidation_map": liq_map,
         "sweep_signal": sweep,
         "sessions": sessions,
+        "volatility": volatility,
+        "volatility_1d": volatility_1d,
+        "last_close_time": last_close,
     }
     return context
 
@@ -527,6 +543,7 @@ def _flatten_for_confluence(ctx: dict[str, Any]) -> dict[str, Any]:
         "cvd_bullish": ctx["cvd"].get("cvd_bullish"),
         "cvd_bearish": ctx["cvd"].get("cvd_bearish"),
         "funding": (ctx["funding"] or {}).get("current"),
+        "funding_z": (ctx["funding"] or {}).get("zscore"),
         "exchange_netflow": (ctx["onchain"] or {}).get("exchange_netflow"),
     })
     return flat
@@ -535,10 +552,22 @@ def _flatten_for_confluence(ctx: dict[str, Any]) -> dict[str, Any]:
 async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]],
                       last_signal: dict[str, Any] | None,
                       interpret: bool = True,
-                      profile_name: str | None = None) -> dict[str, Any]:
+                      profile_name: str | None = None,
+                      open_trades: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Run levels 1-7 and return a result describing the outcome."""
     profile = get_profile(profile_name)
     inds = ctx.get("inds_by_tf", {})
+
+    # Hard data-quality gates BEFORE any scoring: stale klines or a
+    # volatility blow-off mean NO_TRADE regardless of how good the setup
+    # looks — the numbers it is built on cannot be trusted.
+    if stale_data(ctx.get("last_close_time"), ctx["timeframe"]):
+        return _blocked("stale_data", price=ctx.get("price"),
+                        last_close_time=ctx.get("last_close_time"))
+    if abnormal_volatility(ctx.get("volatility")):
+        return _blocked("abnormal_volatility", price=ctx.get("price"),
+                        atr_percentile=(ctx.get("volatility") or {}).get("atr_percentile"))
+
     flat = _flatten_for_confluence(ctx)
     atr_value = ctx["atr"] or 0.0
 
@@ -555,23 +584,38 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     flat["trend_aligned_top"] = bool(
         htf_bias == "bearish" and rev_mtf.get("combined_bearish"))
 
-    # Score both directions; the stronger one is the candidate.
-    long_total, long_scores, long_reasons = calculate_confluence_score(flat, "long")
-    short_total, short_scores, short_reasons = calculate_confluence_score(flat, "short")
-
-    if long_total >= short_total:
-        direction, total, scores, reasons = "long", long_total, long_scores, long_reasons
-    else:
-        direction, total, scores, reasons = "short", short_total, short_scores, short_reasons
+    # Score both directions with REGIME-DEPENDENT category weights (Part B):
+    # the same evidence weighs differently in a trend vs a range — the 1D
+    # regime is the top of the timeframe hierarchy.
+    regime = detect_regime(ctx.get("ind_1d"), ctx.get("volatility_1d"))
+    long_raw, long_scores, long_reasons = calculate_confluence_score(flat, "long")
+    short_raw, short_scores, short_reasons = calculate_confluence_score(flat, "short")
+    long_total = weighted_total(long_scores, regime)
+    short_total = weighted_total(short_scores, regime)
 
     # Common diagnostic fields attached to every blocked result.
     diag = {
         "htf_bias": htf_bias,
         "htf_tf": profile["htf"],
+        "market_regime": regime,
         "long_score": long_total,
         "short_score": short_total,
         "price": ctx["price"],
     }
+
+    # Equal evidence for both directions is a conflicted market, not a long
+    # (the old ">=" tie-break silently defaulted long). A 0/0 tie is not a
+    # conflict though — it is an ordinary quiet bar with no evidence at all.
+    if long_total == short_total:
+        stage = "direction_conflict" if long_total > 0 else "below_threshold"
+        return _blocked(stage, direction=None, score=long_total, **diag)
+    if long_total > short_total:
+        direction, total, scores, reasons = "long", long_total, long_scores, long_reasons
+        counter_reasons = short_reasons
+    else:
+        direction, total, scores, reasons = "short", short_total, short_scores, short_reasons
+        counter_reasons = long_reasons
+    counter_total = min(long_total, short_total)
 
     # Level 1 (blocking): drop counter-trend signals.
     allowed = filter_by_htf(direction, htf_bias)
@@ -615,7 +659,8 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
                   for tf in mtf_tfs}
     base_conf = total / 10.0
     modifier, mtf_info = mtf_confidence_factor(list(mtf_trends.values()), direction)
-    confidence = min(base_conf * modifier, 1.0)
+    conflict_mod = conflict_factor(total, counter_total)
+    confidence = min(base_conf * modifier * conflict_mod, 1.0)
 
     # Risk sizing tuned to the trade style. The stop ATR may come from a
     # higher timeframe than the entry (see _stop_atr).
@@ -649,6 +694,21 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     position["target_1"], position["target_2"] = tp1, tp2
 
     # Expected holding time to TP1 / TP2 from ATR-based drift on this timeframe.
+    # Mandatory NO_TRADE gates (Part B): a trade must have an invalidation,
+    # a minimum reward for its risk, enough confidence, no hard timeframe
+    # conflict, and no open position pulling the other way.
+    no_trade = [r for r in (
+        missing_invalidation(position.get("stop_loss"), position.get("stop_loss")),
+        bad_risk_reward(ctx["price"], position["stop_loss"], position["target_2"]),
+        low_confidence(confidence),
+        tf_conflict(mtf_info),
+        position_conflict(open_trades, direction, ctx["symbol"]),
+    ) if r]
+    if no_trade:
+        return _blocked("no_trade", direction=direction, score=total,
+                        category_scores=scores, reasons=reasons,
+                        no_trade_reasons=no_trade, **diag)
+
     hold = estimate_holding(ctx["price"], position["target_1"],
                             position["target_2"], atr_value, ctx["timeframe"])
 
@@ -670,13 +730,18 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         "risk_amount": position["risk_amount"],
         "atr": atr_value,
         "atr_multiplier_used": position["atr_multiplier_used"],
-        "score": total,
+        # signals.score is an INTEGER column; the regime-weighted float is
+        # kept separately for display/diagnostics.
+        "score": int(round(total)),
+        "score_weighted": total,
         "category_scores": scores,
         "reasons": reasons,
         "htf_bias": htf_bias,
         "htf_tf": profile["htf"],
         "confidence": round(confidence, 3),
         "confidence_modifier": modifier,
+        "counter_score": counter_total,
+        "conflict_factor": conflict_mod,
         "mtf": mtf_trends,
         "mtf_agreement": mtf_info,
         "style": profile_name or "swing",
@@ -687,6 +752,11 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         "funding_value": (ctx["funding"] or {}).get("current"),
         "timestamp": ctx["timestamp"],
     }
+
+    # Structured result (Part B): regime, both sides of the evidence, entry
+    # zone, invalidation, RR, confirmation/cancel conditions, freshness.
+    signal.update(build_result(signal, ctx, regime, counter_reasons,
+                               mtf_info).to_signal_fields())
 
     # Level 6: cooldown / dedup (blocking).
     if not should_send_signal(signal, last_signal, atr_value, profile["cooldown_hours"]):
@@ -709,26 +779,38 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         signal["status"] = "ignored"
         signal["deliverable"] = False
 
-    # AI interpretation (text + confidence comment).
+    # AI interpretation is COMMENTARY ONLY: the numeric confidence stays a
+    # deterministic function of the evidence (same input -> same output).
+    # Blending in an LLM score destroyed both determinism and calibration.
     if interpret:
         ai = await claude.interpret_signal(signal)
         signal["ai_confidence"] = ai["confidence"]
         signal["ai_text"] = ai["comment"]
-        # Blend AI confidence with mtf-modified confluence confidence.
-        signal["confidence"] = round((signal["confidence"] + ai["confidence"]) / 2, 3)
 
     return signal
 
 
-_TF_HOURS = {"15m": 0.25, "1h": 1.0, "4h": 4.0, "12h": 12.0, "1d": 24.0}
 # Net directional drift per candle as a fraction of ATR (range != displacement).
 _DRIFT_PER_BAR = 0.5
+
+
+def conflict_factor(winner_total: float, loser_total: float) -> float:
+    """Confidence penalty for opposing evidence.
+
+    1.0 for a clean setup (loser scored 0), sliding towards ~0.65 as the
+    losing direction approaches the winner. The old cascade compared only
+    max(long, short) — a 6/5 setup looked identical to a 6/0 one.
+    """
+    if winner_total <= 0:
+        return 1.0
+    conflict = loser_total / (winner_total + loser_total)
+    return round(1.0 - 0.7 * conflict, 3)
 
 
 def estimate_holding(entry: float, tp1: float, tp2: float, atr: float,
                      timeframe: str) -> tuple[float, float]:
     """Rough expected hours to reach TP1 / TP2 from ATR-based drift."""
-    tf_hours = _TF_HOURS.get(timeframe, 4.0)
+    tf_hours = TF_HOURS.get(timeframe, 4.0)
     if not atr or atr <= 0:
         return (0.0, 0.0)
     step = atr * _DRIFT_PER_BAR

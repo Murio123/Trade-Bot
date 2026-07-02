@@ -15,7 +15,7 @@ TOPICS: dict[str, tuple[str, str]] = {
         "📊 Сигналы (свинг/интрадей)",
         "📊 СИГНАЛЫ\n\n"
         "Два независимых типа:\n"
-        "• 📊 Свинг — вход 1H, тренд 1D / зоны 12H+4H, холд часы–дни.\n"
+        "• 📊 Свинг — вход 4H, структура 12H, тренд 1D, холд дни.\n"
         "• ⚡ Интрадей — вход 15m, тренд и стоп от 1H, холд минуты–часы.\n\n"
         "Что значат строки сигнала:\n"
         "• Вход — текущая цена входа.\n"
@@ -134,7 +134,7 @@ TOPICS: dict[str, tuple[str, str]] = {
     "commands": (
         "💬 Все команды",
         "💬 КОМАНДЫ\n\n"
-        "🎯 /signal (1H) · /intraday (15m) · /position (4H, 2000-5000 пт)\n"
+        "🎯 /signal (4H) · /intraday (15m) · /position (4H, 2000-5000 пт)\n"
         "🔍 /reversal (дно/пик) · /levels · /deep · /market\n"
         "📒 /journal · /setalert <цена> · /alerts · /backtest\n"
         "⚙️ /status · /testalert · /guide · /help\n\n"

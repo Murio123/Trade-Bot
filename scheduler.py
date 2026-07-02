@@ -41,8 +41,10 @@ async def analysis_job(application, profile_name: str = "swing") -> None:
         # stream forever and a weak journal signal blocks a later strong one).
         delivered_today = await db.signals_today(config.SYMBOL, timeframe=timeframe)
         last_signal = await db.last_delivered_signal(config.SYMBOL, timeframe=timeframe)
+        open_now = await db.open_trades()
         result = await run_cascade(ctx, delivered_today, last_signal,
-                                   interpret=True, profile_name=profile_name)
+                                   interpret=True, profile_name=profile_name,
+                                   open_trades=open_now)
     except Exception:  # noqa: BLE001
         log.exception("analysis_job [%s] failed", profile_name)
         return
