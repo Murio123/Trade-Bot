@@ -98,6 +98,48 @@ def format_signal(signal: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _level_context(ctx: dict[str, Any], price: float | None) -> list[str]:
+    """Where the price sits relative to key levels: the zone it's reacting at
+    (OB/FVG with its timeframe) plus the nearest support/resistance around."""
+    if not price:
+        return []
+    out: list[str] = ["📐 Уровни:"]
+
+    ob = ctx.get("order_blocks", {}) or {}
+    fvg = ctx.get("fvg", {}) or {}
+    at = None
+    z = ob.get("bullish_ob")
+    if z and ob.get("price_in_bullish_ob"):
+        tf = f" [{z['tf'].upper()}]" if z.get("tf") else ""
+        at = f"бычий OB{tf} {_fmt_price(z['low'])}–{_fmt_price(z['high'])}"
+    if at is None:
+        z = ob.get("bearish_ob")
+        if z and ob.get("price_in_bearish_ob"):
+            tf = f" [{z['tf'].upper()}]" if z.get("tf") else ""
+            at = f"медвежий OB{tf} {_fmt_price(z['low'])}–{_fmt_price(z['high'])}"
+    if at is None:
+        z = fvg.get("bullish_fvg")
+        if z and fvg.get("price_in_bullish_fvg"):
+            tf = f" [{z['tf'].upper()}]" if z.get("tf") else ""
+            at = f"бычий FVG{tf} {_fmt_price(z['low'])}–{_fmt_price(z['high'])}"
+    if at is None:
+        z = fvg.get("bearish_fvg")
+        if z and fvg.get("price_in_bearish_fvg"):
+            tf = f" [{z['tf'].upper()}]" if z.get("tf") else ""
+            at = f"медвежий FVG{tf} {_fmt_price(z['low'])}–{_fmt_price(z['high'])}"
+    if at:
+        out.append(f"  Реакция в зоне: {at}")
+
+    support, resistance = _nearest_sr(ctx, price)
+    if resistance:
+        out.append(f"  🔺 Сопротивление: {_fmt_price(resistance)} "
+                   f"(+{(resistance - price) / price * 100:.1f}%)")
+    if support:
+        out.append(f"  🔻 Поддержка: {_fmt_price(support)} "
+                   f"(−{(price - support) / price * 100:.1f}%)")
+    return out if len(out) > 1 else []
+
+
 def build_reversal_plan(ctx: dict[str, Any], direction: str) -> dict[str, Any] | None:
     """Concrete entry/stop/targets for a confirmed reversal."""
     price = ctx.get("price")
@@ -146,6 +188,10 @@ def format_reversal_alert(ctx: dict[str, Any], direction: str,
         "Почему:",
     ]
     lines += [f"  • {f}" for f in factors[:5]]
+
+    level_ctx = _level_context(ctx, ctx.get("price"))
+    if level_ctx:
+        lines += [""] + level_ctx
 
     plan = build_reversal_plan(ctx, direction)
     if plan:
@@ -282,7 +328,11 @@ def _reversal_conclusion(ctx: dict[str, Any], price: float | None) -> list[str]:
     trend = ("бычий" if price > ema200_1d else "медвежий") if ema200_1d else None
     support, resistance = _nearest_sr(ctx, price)
 
-    out = ["📌 Вывод:"]
+    out: list[str] = []
+    level_ctx = _level_context(ctx, price)
+    if level_ctx:
+        out += level_ctx + [""]
+    out.append("📌 Вывод:")
     if mtf.get("combined_bullish"):
         n = len(mtf.get("bull_tfs", []))
         if trend == "бычий":

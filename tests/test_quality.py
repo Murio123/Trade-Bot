@@ -181,3 +181,18 @@ def test_reversal_alert_header_by_alignment():
     counter = format_reversal_alert(ctx, "bull", ["x"], False, ["4h", "1d", "12h"],
                                     alignment="counter")
     assert "против тренда" in counter and "контртренд" in counter
+
+
+def test_reversal_alert_includes_levels():
+    from bot.formatting import format_reversal_alert
+    ctx = {"price": 57300.0, "atr": 300.0, "inds_by_tf": {"1h": {"atr": 300.0}},
+           "order_blocks": {"bullish_ob": {"low": 57000, "high": 57500, "tf": "12h"},
+                            "price_in_bullish_ob": True},
+           "fvg": {}, "htf_levels": {"lows": [57000], "highs": [59500]},
+           "volume_profile": {}, "liquidity": {}}
+    text = format_reversal_alert(ctx, "bull", ["x"], False, ["4h", "1d"],
+                                 alignment="aligned")
+    assert "Уровни" in text
+    assert "Реакция в зоне: бычий OB [12H] 57 000–57 500" in text
+    # nearest resistance is the OB's upper edge, not the far level
+    assert "Сопротивление: 57 500" in text
