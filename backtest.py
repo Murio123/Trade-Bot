@@ -39,6 +39,7 @@ from analyzer.volatility import analyze_volatility
 from signal_engine.htf_filter import filter_by_htf, get_htf_bias
 from signal_engine.profiles import get_profile
 from signal_engine.regime import detect_regime, weighted_total
+from signal_engine.no_trade_gate import effective_expected_move
 from signal_engine.vetoes import TF_HOURS, abnormal_volatility, dead_zone
 
 log = logging.getLogger(__name__)
@@ -245,6 +246,14 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
         tp1, tp2, _ = _structure_targets(ctx_min, direction, price, risk,
                                          pos["target_1"], pos["target_2"])
         pos["target_1"], pos["target_2"] = tp1, tp2
+
+        # Mode expected-move gate, live parity (quality filter, not a target).
+        move = effective_expected_move(
+            price, pos["target_2"], atr,
+            profile.get("forecast_horizon_hours", 24.0),
+            TF_HOURS.get(entry_tf, 1.0))
+        if move < profile.get("minimum_expected_move_points", 0):
+            continue
 
         outcome = _resolve(entry_df, i, direction, pos)
         if outcome is None:

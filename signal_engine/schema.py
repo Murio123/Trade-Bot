@@ -8,9 +8,20 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+# Legacy cascade status -> user-facing analysis status.
+STATUS_MAP = {"alert": "ENTER", "journal": "WAIT", "cooldown": "WAIT",
+              "ignored": "NO_TRADE", "blocked": "NO_TRADE"}
+
 
 @dataclass
 class AnalysisResult:
+    analysis_type: str
+    final_bias: str                        # LONG / SHORT / NEUTRAL
+    expected_move_points: float | None
+    expected_move_percent: float | None
+    expected_move_atr: float | None
+    entry_trigger: str
+    risk_reward: float | None
     market_regime: str
     primary_bias: str                      # LONG / SHORT / NEUTRAL
     timeframe_alignment: dict[str, Any]    # per-TF trends + agree ratio
@@ -51,6 +62,13 @@ def build_result(signal: dict[str, Any], ctx: dict[str, Any],
                 if signal.get("stop_basis") == "structure"
                 else "закрытие свечи за ATR-стопом")
     return AnalysisResult(
+        analysis_type=signal.get("analysis_type", ""),
+        final_bias=bias,
+        expected_move_points=signal.get("expected_move_points"),
+        expected_move_percent=signal.get("expected_move_percent"),
+        expected_move_atr=signal.get("expected_move_atr"),
+        entry_trigger="закрытие свечи entry-ТФ в направлении сделки внутри entry-зоны",
+        risk_reward=rr,
         market_regime=regime,
         primary_bias=bias,
         timeframe_alignment={"trends": signal.get("mtf", {}),

@@ -11,14 +11,37 @@ from typing import Any
 import config
 
 
-def bad_risk_reward(entry: float, stop: float, tp2: float) -> str | None:
+def effective_expected_move(entry: float, tp2: float, atr: float,
+                            horizon_hours: float, tf_hours: float) -> float:
+    """Expected move = the STRUCTURAL distance to TP2 (targets already come
+    from market structure / liquidity / OB / FVG / volume nodes), capped by
+    what volatility can plausibly deliver over the mode's forecast horizon
+    (ATR * sqrt(bars)). The threshold below is a scenario-quality FILTER —
+    it never feeds back into the targets themselves."""
+    structural = abs(tp2 - entry)
+    if atr and atr > 0 and tf_hours > 0:
+        ceiling = atr * (horizon_hours / tf_hours) ** 0.5
+        return round(min(structural, ceiling), 2)
+    return round(structural, 2)
+
+
+def insufficient_expected_move(move_points: float, min_points: float,
+                               analysis_type: str) -> str | None:
+    if move_points < min_points:
+        return (f"ожидаемый ход {move_points:.0f} пт ниже минимума "
+                f"{min_points:.0f} пт для режима {analysis_type}")
+    return None
+
+
+def bad_risk_reward(entry: float, stop: float, tp2: float,
+                    min_rr: float | None = None) -> str | None:
+    min_rr = min_rr if min_rr is not None else config.MIN_RISK_REWARD
     risk = abs(entry - stop)
     if risk <= 0:
         return "нет стоп-лосса — сделка невозможна"
     rr = abs(tp2 - entry) / risk
-    if rr < config.MIN_RISK_REWARD:
-        return (f"risk/reward {rr:.2f} ниже минимума "
-                f"{config.MIN_RISK_REWARD:.2f}")
+    if rr < min_rr:
+        return f"risk/reward {rr:.2f} ниже минимума {min_rr:.2f}"
     return None
 
 
@@ -30,10 +53,11 @@ def missing_invalidation(stop: float | None, invalidation: float | None) -> str 
     return None
 
 
-def low_confidence(confidence: float) -> str | None:
-    if confidence < config.MIN_CONFIDENCE:
-        return (f"уверенность {confidence:.2f} ниже минимума "
-                f"{config.MIN_CONFIDENCE:.2f}")
+def low_confidence(confidence: float,
+                   min_conf: float | None = None) -> str | None:
+    min_conf = min_conf if min_conf is not None else config.MIN_CONFIDENCE
+    if confidence < min_conf:
+        return f"уверенность {confidence:.2f} ниже минимума {min_conf:.2f}"
     return None
 
 

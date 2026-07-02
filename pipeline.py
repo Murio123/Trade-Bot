@@ -40,12 +40,14 @@ from signal_engine.cooldown import should_send_signal
 from signal_engine.daily_limiter import within_daily_limit
 from signal_engine.htf_filter import filter_by_htf, get_htf_bias
 from signal_engine.mtf_confidence import mtf_confidence_factor, trend_label
-from signal_engine.no_trade_gate import (bad_risk_reward, low_confidence,
-                                         missing_invalidation,
+from signal_engine.no_trade_gate import (bad_risk_reward,
+                                         effective_expected_move,
+                                         insufficient_expected_move,
+                                         low_confidence, missing_invalidation,
                                          position_conflict, tf_conflict)
 from signal_engine.profiles import get_profile
 from signal_engine.regime import detect_regime, weighted_total
-from signal_engine.schema import build_result
+from signal_engine.schema import STATUS_MAP, build_result
 from signal_engine.vetoes import (TF_HOURS, abnormal_volatility,
                                   crowded_funding, dead_zone, stale_data)
 
@@ -697,10 +699,19 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     # Mandatory NO_TRADE gates (Part B): a trade must have an invalidation,
     # a minimum reward for its risk, enough confidence, no hard timeframe
     # conflict, and no open position pulling the other way.
+    # Expected move for the mode's horizon: a quality filter, never a target.
+    expected_move = effective_expected_move(
+        ctx["price"], position["target_2"], atr_value,
+        profile.get("forecast_horizon_hours", 24.0),
+        TF_HOURS.get(ctx["timeframe"], 1.0))
     no_trade = [r for r in (
         missing_invalidation(position.get("stop_loss"), position.get("stop_loss")),
-        bad_risk_reward(ctx["price"], position["stop_loss"], position["target_2"]),
-        low_confidence(confidence),
+        bad_risk_reward(ctx["price"], position["stop_loss"], position["target_2"],
+                        profile.get("minimum_risk_reward")),
+        low_confidence(confidence, profile.get("minimum_confidence")),
+        insufficient_expected_move(expected_move,
+                                   profile.get("minimum_expected_move_points", 0),
+                                   profile.get("analysis_type", "")),
         tf_conflict(mtf_info),
         position_conflict(open_trades, direction, ctx["symbol"]),
     ) if r]
@@ -744,6 +755,14 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         "conflict_factor": conflict_mod,
         "mtf": mtf_trends,
         "mtf_agreement": mtf_info,
+        "analysis_type": profile.get("analysis_type", "SWING"),
+        "expected_move_points": expected_move,
+        "expected_move_percent": (round(expected_move / ctx["price"] * 100, 2)
+                                  if ctx["price"] else None),
+        "expected_move_atr": (round(expected_move / atr_value, 2)
+                              if atr_value else None),
+        "forecast_horizon": profile.get("forecast_horizon"),
+        "expected_holding_period": profile.get("expected_holding_period"),
         "style": profile_name or "swing",
         "style_label": profile["label"],
         "style_emoji": profile["emoji"],
@@ -761,6 +780,7 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     # Level 6: cooldown / dedup (blocking).
     if not should_send_signal(signal, last_signal, atr_value, profile["cooldown_hours"]):
         signal["status"] = "cooldown"
+        signal["analysis_status"] = STATUS_MAP["cooldown"]
         signal["deliverable"] = False
         return signal
 
@@ -778,6 +798,8 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     else:
         signal["status"] = "ignored"
         signal["deliverable"] = False
+
+    signal["analysis_status"] = STATUS_MAP.get(signal["status"], "NO_TRADE")
 
     # AI interpretation is COMMENTARY ONLY: the numeric confidence stays a
     # deterministic function of the evidence (same input -> same output).
