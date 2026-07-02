@@ -269,6 +269,21 @@ def _build_htf_zones(dfs: dict[str, Any], inds: dict[str, Any], zone_tfs: list[s
     return {"order_blocks": ob, "fvg": fvg, "levels": levels}
 
 
+def _stop_atr(profile: dict[str, Any], inds: dict[str, Any], entry_atr: float) -> float:
+    """ATR used for the stop distance.
+
+    Profiles may anchor the stop to a higher timeframe's ATR (intraday: 1H) —
+    an entry-timeframe 15m ATR produces stops so tight that round-trip fees
+    consume most of an R.
+    """
+    tf = profile.get("stop_tf")
+    if tf:
+        v = (inds.get(tf) or {}).get("atr")
+        if v:
+            return v
+    return entry_atr
+
+
 def _structural_stop(ctx: dict[str, Any], direction: str, entry: float,
                      atr: float, profile: dict[str, Any]) -> float | None:
     """Stop behind the nearest HTF structure (level or OB edge) + 0.5 ATR.
@@ -584,15 +599,17 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     modifier, mtf_info = mtf_confidence_factor(list(mtf_trends.values()), direction)
     confidence = min(base_conf * modifier, 1.0)
 
-    # Risk sizing tuned to the trade style.
-    position = calculate_position(ctx["price"], atr_value, direction=direction,
+    # Risk sizing tuned to the trade style. The stop ATR may come from a
+    # higher timeframe than the entry (see _stop_atr).
+    stop_atr = _stop_atr(profile, inds, atr_value)
+    position = calculate_position(ctx["price"], stop_atr, direction=direction,
                                   atr_multiplier=profile["atr_mult"],
                                   targets_r=profile["targets"])
 
     # Swing: stop behind the HTF structure, not a 1H-ATR multiple — otherwise
     # a "swing" trade degenerates into a scalp with an hours-long horizon.
     stop_basis = "atr"
-    s_stop = _structural_stop(ctx, direction, ctx["price"], atr_value, profile)
+    s_stop = _structural_stop(ctx, direction, ctx["price"], stop_atr, profile)
     if s_stop is not None:
         sign = 1 if direction == "long" else -1
         dist = abs(ctx["price"] - s_stop)
@@ -630,6 +647,7 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         "hold_tp2_hours": hold[1],
         "targets_structure": struct_targets,
         "stop_basis": stop_basis,
+        "stop_atr_tf": profile.get("stop_tf") or ctx["timeframe"],
         "position_size": position["position_size"],
         "risk_amount": position["risk_amount"],
         "atr": atr_value,

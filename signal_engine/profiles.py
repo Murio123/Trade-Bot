@@ -48,6 +48,8 @@ PROFILES: dict[str, dict[str, Any]] = {
         "htf": "1h",
         "mtf": ["15m", "1h", "4h"],  # 15m entry / 1H trend / 4H context
         "zone_tfs": ["4h", "1h"],     # OB/FVG/targets from higher timeframes
+        "stop_tf": "1h",              # stop from 1H ATR: a 1.2x15m-ATR stop is so
+                                      # tight that fees eat 0.5-1R per round trip
         "cooldown_hours": 2,
         "atr_mult": _fnum("INTRADAY_ATR_MULT", 1.2),
         "targets": _targets("INTRADAY_TARGETS", (1.0, 2.0)),

@@ -130,3 +130,14 @@ def test_reversal_plan_levels():
     assert plan["stop"] == 57400 - 150          # support minus 0.5 ATR
     assert plan["tp1"] == 59500                 # nearest resistance (>= 1R away)
     assert plan["rr"] > 1.5
+
+
+def test_stop_atr_uses_profile_stop_tf():
+    from pipeline import _stop_atr
+    inds = {"15m": {"atr": 90}, "1h": {"atr": 420}}
+    # intraday: stop anchored to 1H ATR, not the tiny 15m ATR
+    assert _stop_atr({"stop_tf": "1h"}, inds, 90) == 420
+    # swing (no stop_tf): entry ATR unchanged
+    assert _stop_atr({}, inds, 300) == 300
+    # missing stop-tf data -> fall back to entry ATR
+    assert _stop_atr({"stop_tf": "4h"}, inds, 90) == 90

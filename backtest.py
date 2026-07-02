@@ -109,7 +109,13 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
         htf_slice = dfs[htf][dfs[htf]["close_time"] <= t].iloc[-250:]
         if len(htf_slice) < 210:
             continue
-        htf_bias = get_htf_bias(compute_indicators(htf_slice))
+        ind_htf = compute_indicators(htf_slice)
+        htf_bias = get_htf_bias(ind_htf)
+
+        # Stop ATR from the profile's stop timeframe (live parity).
+        stop_atr = atr
+        if profile.get("stop_tf") == htf and ind_htf.get("atr"):
+            stop_atr = ind_htf["atr"]
 
         # HTF zones (OB/FVG/levels) as-of this bar.
         zdfs, zinds = {}, {}
@@ -169,7 +175,7 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
         if dead_zone(scores.get("structure", 0), eq):
             continue
 
-        pos = calculate_position(price, atr, direction=direction,
+        pos = calculate_position(price, stop_atr, direction=direction,
                                  atr_multiplier=profile["atr_mult"],
                                  targets_r=profile["targets"])
         outcome = _resolve(entry_df, i, direction, pos)

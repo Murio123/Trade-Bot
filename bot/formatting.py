@@ -49,7 +49,7 @@ def format_signal(signal: dict[str, Any]) -> str:
         "",
         "📐 Risk Management:",
         f"🛑 Стоп-лосс: {_fmt_price(signal.get('stop_loss'))} "
-        f"({'за структурой HTF' if signal.get('stop_basis') == 'structure' else str(signal.get('atr_multiplier_used', config.ATR_MULTIPLIER)) + '×ATR'}"
+        f"({'за структурой HTF' if signal.get('stop_basis') == 'structure' else str(signal.get('atr_multiplier_used', config.ATR_MULTIPLIER)) + '×ATR ' + str(signal.get('stop_atr_tf', '')).upper()}"
         f"{_stop_pct(signal)})",
         f"🎯 Цель 1: {_fmt_price(signal.get('target_1'))}"
         f"{' (HTF-структура)' if signal.get('targets_structure') else ''}",
