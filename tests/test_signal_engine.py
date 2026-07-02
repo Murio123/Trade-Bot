@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from signal_engine.confluence import (calculate_confluence_score,
                                       has_diverse_confirmation)
 from signal_engine.cooldown import should_send_signal
-from signal_engine.daily_limiter import beats_weakest, within_daily_limit
+from signal_engine.daily_limiter import within_daily_limit
 from signal_engine.htf_filter import filter_by_htf, get_htf_bias
 from signal_engine.mtf_confidence import mtf_confidence_factor
 from signal_engine.profiles import PROFILES, get_profile
@@ -67,11 +67,11 @@ def test_cooldown_blocks_recent_duplicate():
 
 # --- Daily limit (level 7) ----------------------------------------------------
 
-def test_daily_limit():
+def test_daily_limit_is_a_hard_cap():
     day = [{"score": 8}, {"score": 9}, {"score": 10}]
     assert not within_daily_limit(day, max_per_day=3)
-    assert beats_weakest(9, day, max_per_day=3)
-    assert not beats_weakest(7, day, max_per_day=3)
+    # No escalation escape hatch: a full day stays full regardless of score.
+    assert within_daily_limit(day[:2], max_per_day=3)
 
 
 # --- Position sizing ----------------------------------------------------------

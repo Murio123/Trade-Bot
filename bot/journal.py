@@ -18,12 +18,28 @@ from typing import Any
 
 import pandas as pd
 
+import config
 from database import db, utcnow
 
 log = logging.getLogger(__name__)
 
 EXPIRY_DAYS = 21
 _STAGE_RANK = {"open": 0, "tp1": 1, "closed": 2}
+
+
+async def can_open_new_trade(symbol: str) -> bool:
+    """Aggregate risk gate: the three profiles trade the same symbol, and
+    each open trade risks RISK_PERCENT — cap their number across profiles.
+
+    Rows with symbol NULL predate the column and are counted against the cap.
+    """
+    try:
+        open_now = await db.open_trades()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("can_open_new_trade failed (%s) — allowing", exc)
+        return True
+    same = [t for t in open_now if t.get("symbol") in (None, symbol)]
+    return len(same) < config.MAX_OPEN_TRADES
 
 
 async def record_signal_as_trade(signal_id: int, signal: dict[str, Any]) -> int | None:
@@ -115,6 +131,11 @@ def evaluate_trade(trade: dict[str, Any], df: pd.DataFrame,
                     closed = {"outcome": "win", "exit_price": tp1,
                               "pnl_r": _r(entry, stop, tp1, direction)}
                     break
+                # Intra-candle order is unknown: the breakeven stop takes
+                # effect from the NEXT candle. Otherwise the very candle that
+                # paid +1R at TP1 would close the trade at 0R whenever its low
+                # also touched the entry (typical for 1H/4H bars).
+                continue
         if hit_tp1 and tp2 is not None:
             be_hit = (low <= cur_stop) if long else (high >= cur_stop)
             tp2_hit = (high >= tp2) if long else (low <= tp2)

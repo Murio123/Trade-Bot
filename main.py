@@ -25,11 +25,15 @@ log = logging.getLogger("btc_signal_bot")
 async def _amain() -> None:
     missing = config.missing_required()
     if missing:
-        log.error("Missing required environment variables: %s", ", ".join(missing))
-        log.error("Set them in Railway / your environment and restart.")
-        # Telegram token is mandatory to even start polling.
-        if "TELEGRAM_BOT_TOKEN" in missing:
-            return
+        log.error("Missing required environment variables: %s — cannot start. "
+                  "Set them in Railway / your environment and restart.",
+                  ", ".join(missing))
+        return
+    recommended = config.missing_recommended()
+    if recommended:
+        log.warning("Missing recommended environment variables: %s — the bot "
+                    "runs degraded (no AI / no persistence respectively).",
+                    ", ".join(recommended))
 
     from telegram.ext import Application
 
@@ -51,8 +55,39 @@ async def _amain() -> None:
     log.info("Starting bot (DRY_RUN=%s, symbol=%s, exchange=%s)…",
              config.DRY_RUN, config.SYMBOL, config.EXCHANGE)
 
+    # Fail-fast AI check: a bad ANTHROPIC_MODEL / key must not degrade
+    # silently. The bot still runs without AI (deterministic fallback).
+    from ai import claude as ai_claude
+    ai_health = await ai_claude.healthcheck()
+    application.bot_data["ai_health"] = ai_health
+    if ai_health["ok"]:
+        log.info("AI healthcheck OK (model=%s)", config.ANTHROPIC_MODEL)
+    else:
+        log.error(
+            "AI DEGRADED (model=%s): %s — сигналы идут с детерминированной "
+            "confidence, /ask недоступен. Проверь ANTHROPIC_API_KEY / "
+            "ANTHROPIC_MODEL в Railway.",
+            config.ANTHROPIC_MODEL, ai_health["error"],
+        )
+
     await application.initialize()
     await application.start()
+
+    # Loud degradation: without Postgres the cooldown / daily-limit / journal
+    # state lives in memory and resets on every redeploy (duplicate alerts
+    # become possible). The owner must know, not discover it from the logs.
+    if db.pool is None:
+        from bot import alerts as _alerts
+        log.error("PostgreSQL unavailable — running WITHOUT persistence "
+                  "(cooldowns and limits reset on every restart)")
+        await _alerts.broadcast(
+            application.bot,
+            "⚠️ БД недоступна: бот работает без персистентности.\n"
+            "Cooldown, дневной лимит и журнал сбросятся при рестарте — "
+            "возможны повторные алерты. Проверь DATABASE_URL в Railway "
+            "(/status покажет, когда БД вернётся).",
+        )
+
     scheduler.start()
     await application.updater.start_polling(drop_pending_updates=True)
 

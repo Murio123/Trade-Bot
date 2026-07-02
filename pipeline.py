@@ -37,7 +37,7 @@ from signal_engine.confluence import (calculate_confluence_score,
                                        has_diverse_confirmation)
 from signal_engine.conflict_resolver import resolve_conflicts
 from signal_engine.cooldown import should_send_signal
-from signal_engine.daily_limiter import beats_weakest, within_daily_limit
+from signal_engine.daily_limiter import within_daily_limit
 from signal_engine.htf_filter import filter_by_htf, get_htf_bias
 from signal_engine.mtf_confidence import mtf_confidence_factor, trend_label
 from signal_engine.profiles import get_profile
@@ -109,7 +109,8 @@ async def gather_market_context(binance: BinanceClient,
     reversal = detect_reversal(df_signal, ind_signal, cvd_series(df_signal),
                                at_key_level=at_level)
     # Multi-timeframe reversal read across 1H / 4H / 12H / 1D.
-    reversal_mtf = _reversal_mtf(dfs, inds, at_level)
+    reversal_mtf = _reversal_mtf(dfs, inds, ind_signal["price"],
+                                 htf_levels, order_blocks, fvg)
 
     # Premium/Discount of the dealing range, on the trend (HTF) timeframe.
     range_tf = profile["htf"] if profile["htf"] in dfs else (
@@ -370,14 +371,22 @@ def _near_key_level(price: float, levels: dict, ob: dict, fvg: dict, tol: float)
 REVERSAL_TFS = ["1h", "4h", "12h", "1d"]
 
 
-def _reversal_mtf(dfs: dict[str, Any], inds: dict[str, Any],
-                  at_key_level: bool = False) -> dict[str, Any]:
-    """Run reversal detection on 1H/4H/12H/1D and combine into one verdict."""
+def _reversal_mtf(dfs: dict[str, Any], inds: dict[str, Any], price: float,
+                  levels: dict, ob: dict, fvg: dict) -> dict[str, Any]:
+    """Run reversal detection on 1H/4H/12H/1D and combine into one verdict.
+
+    The "at key level" tolerance scales with EACH timeframe's own ATR — a
+    15m-ATR tolerance applied to a daily reversal read would call almost
+    nothing "at a level" (or, with the 0.2% floor, the wrong things).
+    """
     per_tf: dict[str, Any] = {}
     for tf in REVERSAL_TFS:
         if tf in dfs:
+            atr_tf = (inds.get(tf) or {}).get("atr") or 0.0
+            tol = max(atr_tf * 0.3, price * 0.002)
+            at_lvl = _near_key_level(price, levels, ob, fvg, tol)
             per_tf[tf] = detect_reversal(dfs[tf], inds[tf], cvd_series(dfs[tf]),
-                                         at_key_level=at_key_level)
+                                         at_key_level=at_lvl)
     bull_tfs = [tf for tf in REVERSAL_TFS if per_tf.get(tf, {}).get("bullish_reversal")]
     bear_tfs = [tf for tf in REVERSAL_TFS if per_tf.get(tf, {}).get("bearish_reversal")]
 
@@ -685,8 +694,9 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         signal["deliverable"] = False
         return signal
 
-    # Level 7: daily limit (blocking for delivery).
-    deliverable = within_daily_limit(delivered_today) or beats_weakest(total, delivered_today)
+    # Level 7: daily limit (blocking for delivery) — a hard cap; over-limit
+    # signals are still recorded as journal entries below.
+    deliverable = within_daily_limit(delivered_today)
 
     # Final classification.
     if total >= config.SCORE_ALERT_MIN and deliverable:

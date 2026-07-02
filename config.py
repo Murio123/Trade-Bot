@@ -43,10 +43,13 @@ TELEGRAM_ALERT_CHAT_IDS = [
 ]
 # Who may talk to the bot at all. Every message costs money (/ask hits the
 # Anthropic API), so unknown users are rejected. Falls back to the alert
-# recipients; empty result = open mode (a warning is logged at startup).
+# recipients. When BOTH are empty the bot is closed by default: strangers get
+# their chat_id so the owner can whitelist themselves during first setup.
+# Set ALLOW_PUBLIC_ACCESS=true to deliberately run an open bot.
 TELEGRAM_ALLOWED_CHAT_IDS = [
     c.strip() for c in (_get("TELEGRAM_ALLOWED_CHAT_IDS", "") or "").split(",") if c.strip()
 ] or list(TELEGRAM_ALERT_CHAT_IDS)
+ALLOW_PUBLIC_ACCESS = _get_bool("ALLOW_PUBLIC_ACCESS", False)
 
 # --- Anthropic ------------------------------------------------------------
 ANTHROPIC_API_KEY = _get("ANTHROPIC_API_KEY")
@@ -80,6 +83,10 @@ EXCHANGE = (_get("EXCHANGE", "auto") or "auto").lower()
 
 # --- Signal engine tuning -------------------------------------------------
 MIN_DIVERSE_CATEGORIES = _get_int("MIN_DIVERSE_CATEGORIES", 3)
+# Aggregate risk cap: max simultaneously open (virtual) positions per symbol
+# across ALL profiles. Beyond it alerts are still sent (with a warning) but
+# no new journal trade is opened — the extra entry is over risk budget.
+MAX_OPEN_TRADES = _get_int("MAX_OPEN_TRADES", 3)
 COOLDOWN_HOURS = _get_int("COOLDOWN_HOURS", 4)
 MAX_SIGNALS_PER_DAY = _get_int("MAX_SIGNALS_PER_DAY", 3)
 ATR_MULTIPLIER = _get_float("ATR_MULTIPLIER", 1.5)
@@ -122,10 +129,16 @@ HTTP_TIMEOUT = _get_float("HTTP_TIMEOUT", 15.0)
 
 
 def missing_required() -> list[str]:
-    """Return the list of required env vars that are not set."""
-    required = {
-        "TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN,
+    """Env vars without which the bot cannot start at all."""
+    required = {"TELEGRAM_BOT_TOKEN": TELEGRAM_BOT_TOKEN}
+    return [k for k, v in required.items() if not v]
+
+
+def missing_recommended() -> list[str]:
+    """Env vars the bot degrades gracefully without (but shouldn't in prod):
+    no AI interpretation / no persistence respectively."""
+    recommended = {
         "ANTHROPIC_API_KEY": ANTHROPIC_API_KEY,
         "DATABASE_URL": DATABASE_URL,
     }
-    return [k for k, v in required.items() if not v]
+    return [k for k, v in recommended.items() if not v]

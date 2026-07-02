@@ -48,6 +48,27 @@ ASK_SYSTEM = (
 )
 
 
+async def healthcheck() -> dict[str, Any]:
+    """One cheap ping at startup (max_tokens=1).
+
+    An invalid ANTHROPIC_MODEL or API key would otherwise degrade every
+    signal to the deterministic fallback silently; this surfaces it once,
+    loudly, in the logs and /status. Returns {"ok": bool, "error": str|None}.
+    """
+    client = _get_client()
+    if client is None:
+        return {"ok": False, "error": "ANTHROPIC_API_KEY не задан"}
+    try:
+        await client.messages.create(
+            model=config.ANTHROPIC_MODEL,
+            max_tokens=1,
+            messages=[{"role": "user", "content": "ping"}],
+        )
+        return {"ok": True, "error": None}
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
+
 async def interpret_signal(signal: dict[str, Any]) -> dict[str, Any]:
     """Return {'confidence': float 0-1, 'comment': str}."""
     client = _get_client()

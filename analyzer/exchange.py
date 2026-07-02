@@ -7,6 +7,7 @@ backend and remembers the one that worked.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -20,6 +21,11 @@ log = logging.getLogger(__name__)
 
 # Errors that mean "this exchange won't serve us from here" -> try the next one.
 _GEO_STATUS = {451, 403}
+# When BOTH backends fail, retry the whole round with exponential backoff
+# instead of giving up (and instead of hammering rate-limited endpoints).
+_MAX_ROUNDS = 3
+_BACKOFF_BASE = 0.5
+_MAX_RETRY_AFTER = 30.0
 
 
 class MarketClient:
@@ -39,31 +45,51 @@ class MarketClient:
         await self.bybit.close()
 
     async def _call(self, method: str, *args: Any, **kwargs: Any) -> Any:
-        # Try the last-known-good backend first, then the rest.
+        # Try the last-known-good backend first, then the rest. A 429 on one
+        # exchange immediately falls over to the other (separate rate-limit
+        # pools); when a whole round fails, back off exponentially — honouring
+        # the largest Retry-After we saw — before trying again.
         ordered = sorted(self.backends, key=lambda b: b[0] != self.active_name)
         last_exc: Exception | None = None
-        for name, backend in ordered:
-            try:
-                result = await getattr(backend, method)(*args, **kwargs)
-                if name != self.active_name:
-                    log.info("Market data source switched to %s", name)
-                    self.active_name = name
-                return result
-            except httpx.HTTPStatusError as exc:
-                last_exc = exc
-                status = exc.response.status_code
-                if status in _GEO_STATUS:
-                    log.warning("%s blocked (HTTP %s) on %s -> trying next backend",
-                                name, status, method)
+        for round_no in range(_MAX_ROUNDS):
+            retry_after = 0.0
+            for name, backend in ordered:
+                try:
+                    result = await getattr(backend, method)(*args, **kwargs)
+                    if name != self.active_name:
+                        log.info("Market data source switched to %s", name)
+                        self.active_name = name
+                    return result
+                except httpx.HTTPStatusError as exc:
+                    last_exc = exc
+                    status = exc.response.status_code
+                    if status == 429:
+                        ra = exc.response.headers.get("retry-after")
+                        try:
+                            retry_after = max(retry_after, float(ra))
+                        except (TypeError, ValueError):
+                            pass
+                        log.warning("%s rate-limited (429) on %s -> trying next backend",
+                                    name, method)
+                        continue
+                    if status in _GEO_STATUS:
+                        log.warning("%s blocked (HTTP %s) on %s -> trying next backend",
+                                    name, status, method)
+                        continue
+                    log.warning("%s HTTP error on %s: %s -> trying next backend",
+                                name, method, exc)
                     continue
-                log.warning("%s HTTP error on %s: %s -> trying next backend",
-                            name, method, exc)
-                continue
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
-                log.warning("%s failed on %s: %s -> trying next backend",
-                            name, method, exc)
-                continue
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    log.warning("%s failed on %s: %s -> trying next backend",
+                                name, method, exc)
+                    continue
+            if round_no < _MAX_ROUNDS - 1:
+                delay = min(max(_BACKOFF_BASE * (2 ** round_no), retry_after),
+                            _MAX_RETRY_AFTER)
+                log.warning("all backends failed on %s (round %d/%d) — retrying in %.1fs",
+                            method, round_no + 1, _MAX_ROUNDS, delay)
+                await asyncio.sleep(delay)
         raise last_exc if last_exc else RuntimeError(f"No backend served {method}")
 
     # --- delegated methods (identical signatures across both clients) -----

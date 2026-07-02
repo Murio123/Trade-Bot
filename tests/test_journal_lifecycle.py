@@ -32,6 +32,40 @@ def test_tp1_then_tp2_win():
     assert [e["type"] for e in ev["events"]] == ["tp1", "closed"]
 
 
+def test_tp1_candle_touching_entry_does_not_close_breakeven():
+    # C2 regression: one candle hits TP1 (high 106) AND dips to entry (low 99).
+    # The breakeven stop only exists after TP1, and intra-candle order is
+    # unknown -> the trade must stay open at stage tp1, not close at 0R.
+    df = _df([106], [99], start=BASE["opened_at"])
+    ev = journal.evaluate_trade(dict(BASE), df, 103)
+    assert ev["closed"] is None
+    assert ev["new_stage"] == "tp1"
+    assert [e["type"] for e in ev["events"]] == ["tp1"]
+
+
+def test_breakeven_applies_from_next_candle_after_tp1():
+    # TP1 candle dips to entry (ignored), the NEXT candle's dip closes at 0R.
+    df = _df([106, 104], [99, 99.5], start=BASE["opened_at"])
+    ev = journal.evaluate_trade(dict(BASE), df, 101)
+    assert ev["closed"]["outcome"] == "breakeven"
+    assert ev["closed"]["pnl_r"] == 0.0
+
+
+def test_backtest_resolve_matches_journal_rule():
+    # backtest._resolve must follow the same next-candle breakeven rule.
+    import pandas as pd
+    from backtest import _resolve
+    df = pd.DataFrame({
+        "high": [100.5, 106, 116],  # bar 0 = entry bar; bar 1 hits TP1, dips to entry
+        "low": [99.5, 99, 112],
+    })
+    pos = {"entry_price": 100.0, "stop_loss": 95.0,
+           "target_1": 105.0, "target_2": 115.0}
+    out = _resolve(df, 0, "long", pos)
+    assert out["outcome"] == "win"
+    assert out["r"] == 3.0
+
+
 def test_pullback_to_breakeven_after_tp1():
     df = _df([106, 107, 101, 99.5], [104, 102, 99.9, 98],
              start=BASE["opened_at"])

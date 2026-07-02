@@ -1,7 +1,10 @@
 """Level 7: Daily limit (blocking).
 
-Even if more valid signals form in a day, only the top-N by final score are
-delivered.
+A hard cap: once MAX_SIGNALS_PER_DAY alerts have been delivered for the
+stream, further valid signals are stored as journal entries (visible via
+/signal) instead of being pushed. A delivered Telegram alert cannot be
+recalled, so "replacing the weakest" is not enforceable — the previous
+beats_weakest escape hatch let the cap creep upward on strong days.
 """
 from __future__ import annotations
 
@@ -14,14 +17,3 @@ def within_daily_limit(delivered_today: list[dict[str, Any]],
                        max_per_day: int | None = None) -> bool:
     max_per_day = max_per_day if max_per_day is not None else config.MAX_SIGNALS_PER_DAY
     return len(delivered_today) < max_per_day
-
-
-def beats_weakest(candidate_score: int, delivered_today: list[dict[str, Any]],
-                  max_per_day: int | None = None) -> bool:
-    """If the day is full, the candidate must outscore the weakest delivered
-    signal to (conceptually) take its slot."""
-    max_per_day = max_per_day if max_per_day is not None else config.MAX_SIGNALS_PER_DAY
-    if len(delivered_today) < max_per_day:
-        return True
-    weakest = min((s.get("score", 0) for s in delivered_today), default=0)
-    return candidate_score > weakest

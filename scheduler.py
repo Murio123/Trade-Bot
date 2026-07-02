@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -34,8 +35,12 @@ async def analysis_job(application, profile_name: str = "swing") -> None:
         if profile_name == "swing":
             application.bot_data["last_context"] = ctx
         # Per-style daily budget and cooldown (keyed by the entry timeframe).
+        # Cooldown counts from the last DELIVERED alert: journal-only records
+        # and repeated "cooldown" evaluations of a persisting setup must not
+        # keep re-arming the window (otherwise a stable setup silences the
+        # stream forever and a weak journal signal blocks a later strong one).
         delivered_today = await db.signals_today(config.SYMBOL, timeframe=timeframe)
-        last_signal = await db.last_signal(config.SYMBOL, timeframe=timeframe)
+        last_signal = await db.last_delivered_signal(config.SYMBOL, timeframe=timeframe)
         result = await run_cascade(ctx, delivered_today, last_signal,
                                    interpret=True, profile_name=profile_name)
     except Exception:  # noqa: BLE001
@@ -55,6 +60,12 @@ async def analysis_job(application, profile_name: str = "swing") -> None:
     if status == "blocked":
         log.info("[%s] Signal blocked at: %s", profile_name, result.get("blocked_at"))
         return
+    if status == "cooldown":
+        # The same setup was already recorded when it first fired; storing it
+        # again every cycle would only bloat the table.
+        log.info("[%s] Signal in cooldown (score %s) — not re-recorded",
+                 profile_name, result.get("score"))
+        return
 
     # Persist anything at journal threshold or above.
     if result.get("score", 0) >= config.SCORE_JOURNAL_MIN:
@@ -62,11 +73,21 @@ async def analysis_job(application, profile_name: str = "swing") -> None:
         signal_id = await db.insert_signal(record)
 
         if status == "alert":
+            # Aggregate risk cap across profiles: over the cap the alert is
+            # still sent (with a warning) but no journal trade is opened.
+            can_open = await journal.can_open_new_trade(config.SYMBOL)
             text = formatting.format_signal(result)
+            if not can_open:
+                text += "\n\n" + formatting.format_risk_cap_note()
             await alerts.send_signal_alert(application.bot, text)
             await _send_signal_chart(application, ctx, result)
             await db.mark_delivered(signal_id)
-            await journal.record_signal_as_trade(signal_id, result)
+            if can_open:
+                await journal.record_signal_as_trade(signal_id, result)
+            else:
+                log.warning("Risk cap: %s open trades >= MAX_OPEN_TRADES=%s — "
+                            "alert #%s delivered without a journal trade",
+                            config.SYMBOL, config.MAX_OPEN_TRADES, signal_id)
             log.info("Delivered alert signal #%s (score %s)", signal_id, result["score"])
         else:
             log.info("Stored journal signal #%s (score %s)", signal_id, result["score"])
@@ -98,6 +119,11 @@ async def resolve_trades_job(application) -> None:
     on 1H candles would often see both stop and target inside one bar and be
     scored as a loss by the conservative rule). Falls back to 1H when the
     trade's timeframe history no longer reaches back to its open time.
+
+    The still-forming last candle is deliberately INCLUDED here (unlike the
+    analysis path): stops and targets trigger on touch in live trading, so
+    the forming bar's high/low so far is the honest signal. Dropping it would
+    delay outcome detection by up to one bar of the trade's timeframe.
     """
     binance = application.bot_data["binance"]
     open_trades = await db.open_trades()
@@ -147,6 +173,44 @@ async def _send_signal_chart(application, ctx: dict, signal: dict) -> None:
         log.warning("signal chart failed: %s", exc)
 
 
+REVERSAL_STATE_KEY = "last_reversal_alert"
+
+# The swing/position/intraday jobs share one event loop and compute the same
+# 1H/4H/12H/1D reversal verdict. Without a lock, two jobs landing on the same
+# minute both pass the cooldown check before either records state -> duplicate
+# "bottom/top" alerts. The lock makes check -> record -> broadcast atomic.
+_REVERSAL_LOCK = asyncio.Lock()
+
+
+async def _load_reversal_state(application) -> dict[str, Any] | None:
+    """Last reversal alert: bot_data cache first, then the DB (post-restart).
+
+    The DB stores ``time`` as an ISO string; convert it back to an aware
+    datetime so the cooldown arithmetic keeps working.
+    """
+    cached = application.bot_data.get(REVERSAL_STATE_KEY)
+    if cached is not None:
+        return cached
+    try:
+        stored = await db.get_state(REVERSAL_STATE_KEY)
+    except Exception:  # noqa: BLE001
+        log.exception("failed to load reversal alert state")
+        return None
+    if not stored:
+        return None
+    ts = stored.get("time")
+    if isinstance(ts, str):
+        try:
+            ts = datetime.fromisoformat(ts)
+        except ValueError:
+            return None
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        stored["time"] = ts
+    application.bot_data[REVERSAL_STATE_KEY] = stored
+    return stored
+
+
 async def _maybe_reversal_alert(application, ctx: dict, profile_name: str,
                                 timeframe: str) -> None:
     """Proactive bottom/top alert.
@@ -185,11 +249,25 @@ async def _maybe_reversal_alert(application, ctx: dict, profile_name: str,
                  direction, len(tfs))
         return
 
-    now = datetime.now(timezone.utc)
-    last = application.bot_data.get("last_reversal_alert")
-    if not reversal_alert_allowed(last, direction, len(tfs), now,
-                                  config.REVERSAL_ALERT_COOLDOWN_HOURS):
-        return
+    async with _REVERSAL_LOCK:
+        now = datetime.now(timezone.utc)
+        last = await _load_reversal_state(application)
+        if not reversal_alert_allowed(last, direction, len(tfs), now,
+                                      config.REVERSAL_ALERT_COOLDOWN_HOURS):
+            return
+        # Record the state BEFORE broadcasting: a concurrent stream then sees
+        # the fresh cooldown, and a partial send failure means at worst one
+        # missed alert — never a duplicate.
+        state = {
+            "direction": direction, "price": ctx.get("price"),
+            "time": now, "tf_count": len(tfs),
+        }
+        application.bot_data[REVERSAL_STATE_KEY] = state
+        # Persist so the cooldown survives restarts/redeploys.
+        try:
+            await db.set_state(REVERSAL_STATE_KEY, state)
+        except Exception:  # noqa: BLE001
+            log.exception("failed to persist reversal alert state")
 
     per_tf = mtf.get("per_tf", {})
     key_f = "factors_bull" if direction == "bull" else "factors_bear"
@@ -212,10 +290,6 @@ async def _maybe_reversal_alert(application, ctx: dict, profile_name: str,
             await alerts.broadcast_photo(application.bot, path)
         except Exception as exc:  # noqa: BLE001
             log.warning("reversal chart failed: %s", exc)
-    application.bot_data["last_reversal_alert"] = {
-        "direction": direction, "price": ctx.get("price"),
-        "time": now, "tf_count": len(tfs),
-    }
     log.info("Reversal alert: %s on %d TFs (%s, %s)", direction, len(tfs),
              ",".join(tfs), alignment)
 

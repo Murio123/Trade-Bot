@@ -83,6 +83,12 @@ CREATE TABLE IF NOT EXISTS user_settings (
     settings        JSONB NOT NULL DEFAULT '{}'::jsonb,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE IF NOT EXISTS bot_state (
+    key             TEXT PRIMARY KEY,
+    value           JSONB NOT NULL,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 # Idempotent migrations for tables created before lifecycle columns existed.
@@ -93,6 +99,15 @@ ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS stage TEXT DEFAULT 'open';
 ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS current_stop DOUBLE PRECISION;
 ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS timeframe TEXT;
 ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS symbol TEXT;
+
+-- Indexes matching the hot query paths (cooldown, daily limit, open trades,
+-- active price alerts). IF NOT EXISTS keeps this idempotent.
+CREATE INDEX IF NOT EXISTS idx_signals_symbol_tf_created
+    ON signals (symbol, timeframe, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_signals_delivered
+    ON signals (symbol, delivered, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_trades_outcome ON trades_journal (outcome);
+CREATE INDEX IF NOT EXISTS idx_price_alerts_active ON price_alerts (symbol, triggered);
 """
 
 
@@ -183,15 +198,23 @@ class Database:
                 )
             return _row_to_signal(row) if row else None
 
-    async def last_delivered_signal(self, symbol: str) -> Optional[dict[str, Any]]:
+    async def last_delivered_signal(self, symbol: str,
+                                    timeframe: Optional[str] = None) -> Optional[dict[str, Any]]:
         if not self.pool:
-            return self._mem.last_delivered_signal(symbol)
+            return self._mem.last_delivered_signal(symbol, timeframe)
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT * FROM signals WHERE symbol=$1 AND delivered=TRUE "
-                "ORDER BY created_at DESC LIMIT 1",
-                symbol,
-            )
+            if timeframe:
+                row = await conn.fetchrow(
+                    "SELECT * FROM signals WHERE symbol=$1 AND timeframe=$2 "
+                    "AND delivered=TRUE ORDER BY created_at DESC LIMIT 1",
+                    symbol, timeframe,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "SELECT * FROM signals WHERE symbol=$1 AND delivered=TRUE "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    symbol,
+                )
             return _row_to_signal(row) if row else None
 
     async def signals_today(self, symbol: str,
@@ -324,6 +347,33 @@ class Database:
             )
             return res.endswith("1")
 
+    # --- bot state (small key->JSON blobs that must survive restarts) ------
+    async def get_state(self, key: str) -> Optional[dict[str, Any]]:
+        if not self.pool:
+            return self._mem.get_state(key)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT value FROM bot_state WHERE key=$1", key)
+        if row is None:
+            return None
+        val = row["value"]
+        if isinstance(val, str):
+            try:
+                val = json.loads(val)
+            except (TypeError, ValueError):
+                return None
+        return val
+
+    async def set_state(self, key: str, value: dict[str, Any]) -> None:
+        if not self.pool:
+            return self._mem.set_state(key, value)
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO bot_state (key, value, updated_at) "
+                "VALUES ($1, $2::jsonb, now()) "
+                "ON CONFLICT (key) DO UPDATE SET value=$2::jsonb, updated_at=now()",
+                key, json.dumps(value, default=str),
+            )
+
 
 def _row_to_signal(row) -> dict[str, Any]:
     d = dict(row)
@@ -364,6 +414,7 @@ class _MemoryStore:
         self.signals: list[dict[str, Any]] = []
         self.alerts: list[dict[str, Any]] = []
         self.trades: list[dict[str, Any]] = []
+        self.state: dict[str, dict[str, Any]] = {}
         self._sid = 0
         self._aid = 0
         self._tid = 0
@@ -385,8 +436,12 @@ class _MemoryStore:
         ]
         return items[-1] if items else None
 
-    def last_delivered_signal(self, symbol: str):
-        items = [s for s in self.signals if s.get("symbol") == symbol and s.get("delivered")]
+    def last_delivered_signal(self, symbol: str, timeframe: Optional[str] = None):
+        items = [
+            s for s in self.signals
+            if s.get("symbol") == symbol and s.get("delivered")
+            and (timeframe is None or s.get("timeframe") == timeframe)
+        ]
         return items[-1] if items else None
 
     def signals_today(self, symbol: str, timeframe: Optional[str] = None):
@@ -458,6 +513,13 @@ class _MemoryStore:
         self.alerts = [a for a in self.alerts
                        if not (a["id"] == alert_id and str(a["chat_id"]) == str(chat_id))]
         return len(self.alerts) < before
+
+    def get_state(self, key: str) -> Optional[dict[str, Any]]:
+        return self.state.get(key)
+
+    def set_state(self, key: str, value: dict[str, Any]) -> None:
+        # Mirror the JSON round-trip Postgres does (datetimes -> strings).
+        self.state[key] = json.loads(json.dumps(value, default=str))
 
 
 # Singleton used across the app.

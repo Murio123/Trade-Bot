@@ -8,8 +8,12 @@ and gates. Each qualified setup is resolved with the same lifecycle the live
 journal uses (stop / TP1->breakeven / TP2), net of trading costs, and results
 are aggregated over a score-threshold sweep with the profile cooldown.
 
-Note: funding / on-chain history is unavailable, so those macro points are not
-scored — the estimate is approximate but faithful to the price-based logic.
+Note: funding / on-chain / liquidation-map history is unavailable, so the
+macro points and the wait-for-sweep gate are not reproduced. The MTF
+confidence modifier only affects the reported confidence in live (never the
+score or the outcome), so it is irrelevant here. Everything price-based —
+including the structural stop/targets and the multi-TF trend-aligned
+reversal bonus — mirrors the live cascade.
 """
 from __future__ import annotations
 
@@ -25,7 +29,9 @@ from analyzer.equilibrium import compute_equilibrium
 from analyzer.indicators import compute_indicators
 from analyzer.liquidity import detect_liquidity
 from analyzer.reversal import detect_reversal
-from pipeline import _build_htf_zones, _near_key_level
+from analyzer.volume_profile import compute_volume_profile
+from pipeline import (REVERSAL_TFS, _build_htf_zones, _near_key_level,
+                      _structural_stop, _structure_targets)
 from risk.position_sizing import calculate_position
 from signal_engine.confluence import (calculate_confluence_score,
                                       has_diverse_confirmation)
@@ -133,6 +139,29 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
         liq = detect_liquidity(entry_sub, atr_value=atr)
         at_level = _near_key_level(price, levels, ob, fvg, max(atr * 0.3, price * 0.002))
         rev = detect_reversal(entry_sub, ind, cvd_series(entry_sub), at_key_level=at_level)
+
+        # Multi-TF reversal (live parity for the trend_aligned_* bonus),
+        # reusing slices/indicators already computed for this bar. Depending
+        # on the profile only a subset of 1H/4H/12H/1D is available — the >=2
+        # confirmation bar matches live on swing/position, approximates on
+        # intraday (which live reads from the always-fetched 1h/4h/12h/1d).
+        rev_frames: dict[str, Any] = {}
+        if entry_tf in REVERSAL_TFS:
+            rev_frames[entry_tf] = (entry_sub, ind)
+        if htf in REVERSAL_TFS:
+            rev_frames.setdefault(htf, (htf_slice, ind_htf))
+        for tf in zdfs:
+            if tf in REVERSAL_TFS:
+                rev_frames.setdefault(tf, (zdfs[tf], zinds[tf]))
+        bull_tfs = bear_tfs = 0
+        for tf, (df_tf, ind_tf) in rev_frames.items():
+            if tf == entry_tf:
+                r_tf = rev
+            else:
+                r_tf = detect_reversal(df_tf, ind_tf, cvd_series(df_tf),
+                                       at_key_level=at_level)
+            bull_tfs += bool(r_tf.get("bullish_reversal"))
+            bear_tfs += bool(r_tf.get("bearish_reversal"))
         ser = ind.get("_series", {})
         drsi = detect_divergence(entry_sub, ser.get("rsi"))
         dmacd = detect_divergence(entry_sub, ser.get("macd"))
@@ -159,6 +188,9 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
             "cvd_bullish": cvd["cvd_bullish"],
             "cvd_bearish": cvd["cvd_bearish"],
             "funding": None, "exchange_netflow": None,
+            # Prime setup (live parity): multi-TF bottom/top WITH the HTF trend.
+            "trend_aligned_bottom": htf_bias == "bullish" and bull_tfs >= 2,
+            "trend_aligned_top": htf_bias == "bearish" and bear_tfs >= 2,
         })
 
         lt, ls, _ = calculate_confluence_score(flat, "long")
@@ -178,6 +210,26 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
         pos = calculate_position(price, stop_atr, direction=direction,
                                  atr_multiplier=profile["atr_mult"],
                                  targets_r=profile["targets"])
+
+        # Structural stop + structural targets, exactly as the live cascade
+        # (pipeline.run_cascade) applies them after the ATR baseline.
+        ctx_min = {"htf_levels": levels, "order_blocks": ob,
+                   "volume_profile": compute_volume_profile(
+                       zdfs.get(zone_tfs[0], entry_sub))}
+        s_stop = _structural_stop(ctx_min, direction, price, stop_atr, profile)
+        if s_stop is not None:
+            sign = 1 if direction == "long" else -1
+            dist = abs(price - s_stop)
+            pos.update({
+                "stop_loss": round(s_stop, 2),
+                "target_1": round(price + sign * dist * profile["targets"][0], 2),
+                "target_2": round(price + sign * dist * profile["targets"][1], 2),
+            })
+        risk = abs(price - pos["stop_loss"])
+        tp1, tp2, _ = _structure_targets(ctx_min, direction, price, risk,
+                                         pos["target_1"], pos["target_2"])
+        pos["target_1"], pos["target_2"] = tp1, tp2
+
         outcome = _resolve(entry_df, i, direction, pos)
         if outcome is None:
             continue
@@ -216,6 +268,10 @@ def _resolve(df, entry_idx: int, direction: str, pos: dict[str, Any]) -> dict[st
                 return {"outcome": "loss", "r": -1.0}
             if tp1_hit:
                 hit_tp1 = True
+                # Same rule as bot/journal.evaluate_trade: the breakeven stop
+                # takes effect from the NEXT candle (intra-candle order is
+                # unknown; the TP1 candle must not close the trade at 0R).
+                continue
         if hit_tp1:
             be_hit = (low <= entry) if long else (high >= entry)
             tp2_hit = (high >= tp2) if long else (low <= tp2)

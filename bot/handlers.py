@@ -58,8 +58,8 @@ async def _gatekeeper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     from telegram.ext import ApplicationHandlerStop
 
     allowed = set(config.TELEGRAM_ALLOWED_CHAT_IDS)
-    if not allowed:
-        return
+    if not allowed and config.ALLOW_PUBLIC_ACCESS:
+        return  # deliberately open bot
     ids = set()
     if update.effective_chat:
         ids.add(str(update.effective_chat.id))
@@ -72,8 +72,19 @@ async def _gatekeeper(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         if update.callback_query:
             await update.callback_query.answer("⛔ Доступ ограничен", show_alert=False)
         elif update.effective_message:
-            await update.effective_message.reply_text(
-                "⛔ Это приватный бот, доступ ограничен.")
+            if not allowed:
+                # First-run onboarding: closed by default, but tell the owner
+                # their chat_id so they can whitelist themselves.
+                chat_id = (update.effective_chat.id
+                           if update.effective_chat else "?")
+                await update.effective_message.reply_text(
+                    "⛔ Доступ закрыт: whitelist не настроен.\n"
+                    f"Ваш chat_id: {chat_id}\n"
+                    "Добавьте его в TELEGRAM_ALLOWED_CHAT_IDS (или "
+                    "TELEGRAM_ALERT_CHAT_IDS) в Railway и перезапустите бота.")
+            else:
+                await update.effective_message.reply_text(
+                    "⛔ Это приватный бот, доступ ограничен.")
     except Exception:  # noqa: BLE001
         pass
     raise ApplicationHandlerStop
@@ -158,13 +169,20 @@ async def _run_signal(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # Persist what the user saw, so /signal has memory: cooldown works against
     # it and the setup can be shown later instead of "нет позиций".
+    risk_capped = False
     if result.get("status") in ("alert", "journal"):
         record = {**result, "delivered": result["status"] == "alert"}
         signal_id = await db.insert_signal(record)
         if result["status"] == "alert":
-            await journal.record_signal_as_trade(signal_id, result)
+            # Same aggregate risk cap as the scheduled stream.
+            if await journal.can_open_new_trade(config.SYMBOL):
+                await journal.record_signal_as_trade(signal_id, result)
+            else:
+                risk_capped = True
 
     text = formatting.format_signal(result)
+    if risk_capped:
+        text += "\n\n" + formatting.format_risk_cap_note()
     if result.get("status") == "cooldown":
         text += "\n\n⏳ Это действующий сетап (в пределах cooldown) — не новый вход."
     await update.effective_message.reply_text(text)
@@ -384,6 +402,9 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "exchange_active": getattr(binance, "active_name", None),
         "price": price,
         "db_connected": db.pool is not None,
+        "ai_ok": (bot_data.get("ai_health") or {}).get("ok"),
+        "ai_error": (bot_data.get("ai_health") or {}).get("error"),
+        "ai_model": config.ANTHROPIC_MODEL,
         "dry_run": config.DRY_RUN,
         "alert_chats": len(config.TELEGRAM_ALERT_CHAT_IDS),
         "last_analysis_at": bot_data.get("last_analysis_at"),
@@ -426,13 +447,20 @@ async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not question:
         await update.effective_message.reply_text("Использование: /ask <ваш вопрос>")
         return
+    # The cached swing context refreshes hourly; for a live question re-gather
+    # when it is older than 30 minutes (a stale price misleads the answer).
+    from datetime import datetime, timedelta, timezone
     ctx = context.application.bot_data.get("last_context")
-    if ctx is None:
+    ts = (ctx or {}).get("timestamp")
+    stale = ts is None or (datetime.now(timezone.utc) - ts) > timedelta(minutes=30)
+    if ctx is None or stale:
         try:
             ctx = await _fresh_context(context)
         except Exception as exc:  # noqa: BLE001
-            await update.effective_message.reply_text(f"⚠️ Ошибка: {exc}")
-            return
+            if ctx is None:
+                await update.effective_message.reply_text(f"⚠️ Ошибка: {exc}")
+                return
+            log.warning("ask: context refresh failed, using stale cache: %s", exc)
     market_context = _ask_context(ctx)
     answer = await claude.ask(question, market_context)
     await update.effective_message.reply_text(answer)

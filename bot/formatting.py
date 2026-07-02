@@ -32,6 +32,12 @@ def _fmt_duration(hours: Any) -> str:
     return f"{round(hours / 24, 1)} дн"
 
 
+def format_risk_cap_note() -> str:
+    """Warning appended to an alert delivered over the open-positions cap."""
+    return (f"⚠️ Лимит одновременных позиций ({config.MAX_OPEN_TRADES}) исчерпан — "
+            "вход сверх риск-бюджета. Сделка НЕ добавлена в журнал.")
+
+
 def format_signal(signal: dict[str, Any]) -> str:
     ts = signal.get("timestamp")
     if isinstance(ts, datetime):
@@ -843,6 +849,16 @@ def _ago(dt) -> str:
     return f"{mins // 60} ч {mins % 60} мин назад"
 
 
+def _ai_status_line(s: dict[str, Any]) -> str:
+    ok = s.get("ai_ok")
+    if ok is True:
+        return f"🧠 AI: ✅ {s.get('ai_model')}"
+    if ok is False:
+        return (f"🧠 AI: ⚠️ недоступен — детерминированный fallback "
+                f"({s.get('ai_error')})")
+    return "🧠 AI: — (проверка ещё не выполнялась)"
+
+
 def format_status(s: dict[str, Any]) -> str:
     dry = s.get("dry_run")
     db_ok = s.get("db_connected")
@@ -852,6 +868,7 @@ def format_status(s: dict[str, Any]) -> str:
         f"💱 Источник данных: {s.get('exchange_active') or s.get('exchange_pref')}",
         f"💰 Цена {config.SYMBOL_DISPLAY}: {_fmt_price(s.get('price'))}",
         f"🗄 База данных: {'PostgreSQL ✅' if db_ok else 'in-memory ⚠️ (без персистентности)'}",
+        _ai_status_line(s),
         f"📡 Режим: {'DRY-RUN 🧪 (уведомления НЕ шлются)' if dry else 'LIVE ✅ (уведомления включены)'}",
         f"🔔 Получатели алертов: {s.get('alert_chats', 0)}",
         "",
