@@ -48,3 +48,22 @@ def test_market_format_renders():
     assert "Fear & Greed: 28/100" in text
     # degrades with everything missing
     assert format_market(None, {}, {}, None, {}).startswith("💹 Рынок")
+
+
+def test_levels_ladder_clusters_and_stars():
+    from bot.formatting import format_levels
+    ctx = {"timeframe": "1h", "price": 58700, "atr": 300,
+           "order_blocks": {"bullish_ob": {"low": 57000, "high": 57500, "tf": "12h"}},
+           "fvg": {}, "volume_profile": {"poc": 58900, "val": 57300},
+           "liquidity": {}, "htf_levels": {"highs": [58910], "lows": [57000]},
+           "inds_by_tf": {}, "equilibrium": {"zone": "discount", "pos": 0.4},
+           "liquidation_map": {}, "ind_signal": {}, "zone_tfs": ["12h", "4h"]}
+    text = format_levels(ctx)
+    assert "Сопротивления" in text and "Поддержки" in text
+    # POC (58 900) and the HTF level (58 910) cluster into ONE strong level
+    resistances = text.split("Поддержки")[0]
+    assert resistances.count("58 9") == 1 and "⭐" in resistances
+    # the OB zone absorbed VAL and the 57 000 level -> one support cluster
+    assert "57 000–57 500" in text
+    # conclusion present
+    assert "Вывод" in text

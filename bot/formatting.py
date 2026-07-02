@@ -414,121 +414,149 @@ def _reversal_watch(ctx: dict[str, Any], price: float | None) -> list[str]:
     return out
 
 
-def format_levels(ctx: dict[str, Any]) -> str:
-    ob = ctx.get("order_blocks", {})
-    liq = ctx.get("liquidity", {})
-    vp = ctx.get("volume_profile", {})
-    price = ctx.get("price")
-    lines = [f"📐 Ключевые уровни {config.SYMBOL_DISPLAY} | {ctx.get('timeframe', '').upper()}",
-             f"Цена: {_fmt_price(price)}", ""]
+def _collect_level_items(ctx: dict[str, Any]) -> list[dict[str, Any]]:
+    """Every level source as (lo, hi, label) — zones keep their range."""
+    items: list[dict[str, Any]] = []
 
-    # Nearest support / resistance across all level sources.
-    support, resistance = _nearest_sr(ctx, price)
-    lines.append("🎯 Ближайшие уровни:")
-    if resistance is not None:
-        lines.append(f"  🔺 Сопротивление: {_fmt_price(resistance)} "
-                     f"(+{(resistance - price) / price * 100:.1f}%)")
-    if support is not None:
-        lines.append(f"  🔻 Поддержка: {_fmt_price(support)} "
-                     f"(−{(price - support) / price * 100:.1f}%)")
-    if support is None and resistance is None:
-        lines.append("  • уровни рядом не найдены")
-    lines.append("")
+    def add(lo, hi, label):
+        if lo is None:
+            return
+        hi = hi if hi is not None else lo
+        items.append({"lo": float(lo), "hi": float(hi), "label": label})
 
-    bull_ob = ob.get("bullish_ob")
-    bear_ob = ob.get("bearish_ob")
-    zone_tfs = ctx.get("zone_tfs") or []
-    suffix = f" (зоны с {'/'.join(t.upper() for t in zone_tfs)})" if zone_tfs else ""
-    lines.append(f"🧱 Order Blocks{suffix}:")
-    if bull_ob:
-        tf = f" [{bull_ob.get('tf', '').upper()}]" if bull_ob.get("tf") else ""
-        lines.append(f"  • Бычий OB{tf}: {_fmt_price(bull_ob['low'])}–{_fmt_price(bull_ob['high'])}")
-    if bear_ob:
-        tf = f" [{bear_ob.get('tf', '').upper()}]" if bear_ob.get("tf") else ""
-        lines.append(f"  • Медвежий OB{tf}: {_fmt_price(bear_ob['low'])}–{_fmt_price(bear_ob['high'])}")
-    if not bull_ob and not bear_ob:
-        lines.append("  • активных OB не найдено")
+    ob = ctx.get("order_blocks", {}) or {}
+    for key, name in (("bullish_ob", "бычий OB"), ("bearish_ob", "медвежий OB")):
+        z = ob.get(key)
+        if z:
+            tf = f" {z['tf'].upper()}" if z.get("tf") else ""
+            add(z["low"], z["high"], f"{name}{tf}")
 
-    lines.append("")
-    lines.append("💧 Ликвидность:")
-    eq_h = liq.get("equal_highs") or []
-    eq_l = liq.get("equal_lows") or []
-    if eq_h:
-        lines.append("  • Equal highs: " + ", ".join(_fmt_price(x) for x in eq_h))
-    if eq_l:
-        lines.append("  • Equal lows: " + ", ".join(_fmt_price(x) for x in eq_l))
-    if not eq_h and not eq_l:
-        lines.append("  • кластеры стопов не обнаружены")
+    fvg = ctx.get("fvg", {}) or {}
+    for key, name in (("bullish_fvg", "FVG (имбаланс)"), ("bearish_fvg", "FVG (имбаланс)")):
+        z = fvg.get(key)
+        if z:
+            add(z["low"], z["high"], name)
 
-    lines.append("")
-    lines.append("📊 Volume Profile:")
-    lines.append(f"  • POC: {_fmt_price(vp.get('poc'))}")
-    lines.append(f"  • VAH: {_fmt_price(vp.get('vah'))}")
-    lines.append(f"  • VAL: {_fmt_price(vp.get('val'))}")
+    vp = ctx.get("volume_profile", {}) or {}
+    add(vp.get("poc"), None, "POC — магнит объёма")
+    add(vp.get("vah"), None, "VAH — верх объёмной зоны")
+    add(vp.get("val"), None, "VAL — низ объёмной зоны")
 
-    # Liquidation magnets (OI-based estimate).
-    liq_map = ctx.get("liquidation_map", {})
-    if liq_map.get("source") == "oi_estimate" and price:
-        shorts = [c["price"] for c in liq_map.get("short_liquidations", []) if c["price"] > price]
-        longs = [c["price"] for c in liq_map.get("long_liquidations", []) if c["price"] < price]
-        nearest_short = min(shorts) if shorts else None
-        nearest_long = max(longs) if longs else None
-        if nearest_short or nearest_long:
-            lines.append("")
-            lines.append("💥 Зоны ликвидаций (магниты):")
-            if nearest_short:
-                lines.append(f"  • Шорты сверху: {_fmt_price(nearest_short)} "
-                             f"(+{(nearest_short - price) / price * 100:.1f}%)")
-            if nearest_long:
-                lines.append(f"  • Лонги снизу: {_fmt_price(nearest_long)} "
-                             f"(−{(price - nearest_long) / price * 100:.1f}%)")
+    liq = ctx.get("liquidity", {}) or {}
+    for x in (liq.get("equal_highs") or [])[:3]:
+        add(x, None, "равные хаи (скопление стопов)")
+    for x in (liq.get("equal_lows") or [])[:3]:
+        add(x, None, "равные лои (скопление стопов)")
 
-    fvg = ctx.get("fvg", {})
-    bull_fvg = fvg.get("bullish_fvg")
-    bear_fvg = fvg.get("bearish_fvg")
-    if bull_fvg or bear_fvg:
-        lines.append("")
-        lines.append("🧩 FVG (имбаланс):")
-        if bull_fvg:
-            lines.append(f"  • Бычий: {_fmt_price(bull_fvg['low'])}–{_fmt_price(bull_fvg['high'])}")
-        if bear_fvg:
-            lines.append(f"  • Медвежий: {_fmt_price(bear_fvg['low'])}–{_fmt_price(bear_fvg['high'])}")
+    levels = ctx.get("htf_levels", {}) or {}
+    for x in (levels.get("highs") or []):
+        add(x, None, "уровень HTF")
+    for x in (levels.get("lows") or []):
+        add(x, None, "уровень HTF")
 
-    eq = ctx.get("equilibrium", {})
-    if eq.get("eq"):
-        zone_ru = {"discount": "🟢 дисконт (зона лонгов)",
-                   "premium": "🔴 премиум (зона шортов)",
-                   "equilibrium": "⚪ равновесие"}.get(eq.get("zone"), eq.get("zone"))
-        lines.append("")
-        lines.append(f"⚖️ Диапазон: {_fmt_price(eq.get('low'))}–{_fmt_price(eq.get('high'))}")
-        lines.append(f"  Равновесие: {_fmt_price(eq.get('eq'))} | сейчас {zone_ru} "
-                     f"({int(eq.get('pos', 0.5) * 100)}%)")
-
-    # EMA dynamic levels (1D / 4H, 50 & 200).
-    inds = ctx.get("inds_by_tf", {})
-    ema_rows = []
+    inds = ctx.get("inds_by_tf", {}) or {}
     for tf in ("1d", "4h"):
-        for span in ("ema200", "ema50"):
-            v = inds.get(tf, {}).get(span)
-            if v and price:
-                arrow = "🔺" if v > price else "🔻"
-                sign = "+" if v > price else "−"
-                ema_rows.append(f"  • {tf.upper()} {span.upper()}: {_fmt_price(v)} "
-                                f"({sign}{abs(v - price) / price * 100:.1f}%) {arrow}")
-    if ema_rows:
-        lines.append("")
-        lines.append("📈 EMA (динамические уровни):")
-        lines += ema_rows
+        for span in ("ema50", "ema200"):
+            v = (inds.get(tf) or {}).get(span)
+            if v:
+                add(v, None, f"{span.upper()} {tf.upper()}")
 
-    ind = ctx.get("ind_signal", {})
-    bbw = ind.get("bbw")
-    if bbw is not None:
-        regime = "сжатие 🔸" if ind.get("bb_squeeze") else (
-            "расширение 🔶" if ind.get("bb_expansion") else "норма")
-        lines.append("")
-        lines.append(f"📏 BBW: {bbw:.4f} ({regime})")
+    eq = ctx.get("equilibrium", {}) or {}
+    add(eq.get("high"), None, "хай диапазона")
+    add(eq.get("low"), None, "лой диапазона")
 
-    # Synthesis.
+    lm = ctx.get("liquidation_map", {}) or {}
+    if lm.get("source") == "oi_estimate":
+        price = ctx.get("price") or 0
+        shorts = [c["price"] for c in lm.get("short_liquidations", []) if c["price"] > price]
+        longs = [c["price"] for c in lm.get("long_liquidations", []) if c["price"] < price]
+        if shorts:
+            add(min(shorts), None, "магнит ликвидаций (шорты)")
+        if longs:
+            add(max(longs), None, "магнит ликвидаций (лонги)")
+    return items
+
+
+def _cluster_levels(items: list[dict[str, Any]], price: float,
+                    atr: float | None) -> tuple[list[dict], list[dict]]:
+    """Merge nearby levels into clusters; >=2 sources = strong (⭐).
+
+    Returns (resistances above, supports below), each sorted by distance."""
+    tol = max((atr or price * 0.005) * 0.35, price * 0.0015)
+    above = sorted((i for i in items if (i["lo"] + i["hi"]) / 2 > price * 1.0005),
+                   key=lambda i: (i["lo"] + i["hi"]) / 2)
+    below = sorted((i for i in items if (i["lo"] + i["hi"]) / 2 < price * 0.9995),
+                   key=lambda i: -((i["lo"] + i["hi"]) / 2))
+
+    def merge(seq):
+        clusters: list[dict[str, Any]] = []
+        for it in seq:
+            mid = (it["lo"] + it["hi"]) / 2
+            # Merge when the level falls inside the cluster's range (+tol),
+            # not merely near its midpoint — zones absorb their edge levels.
+            if clusters and (clusters[-1]["lo"] - tol) <= mid <= (clusters[-1]["hi"] + tol):
+                c = clusters[-1]
+                c["lo"], c["hi"] = min(c["lo"], it["lo"]), max(c["hi"], it["hi"])
+                if it["label"] not in c["labels"]:
+                    c["labels"].append(it["label"])
+                c["mid"] = (c["lo"] + c["hi"]) / 2
+            else:
+                clusters.append({"lo": it["lo"], "hi": it["hi"], "mid": mid,
+                                 "labels": [it["label"]]})
+        return clusters
+
+    return merge(above), merge(below)
+
+
+def _fmt_cluster(c: dict[str, Any], price: float) -> str:
+    zone = abs(c["hi"] - c["lo"]) > price * 0.0005
+    where = (f"{_fmt_price(c['lo'])}–{_fmt_price(c['hi'])}" if zone
+             else _fmt_price(c["mid"]))
+    dist = (c["mid"] - price) / price * 100
+    star = " ⭐" if len(c["labels"]) >= 2 else ""
+    labels = " + ".join(c["labels"][:3])
+    return f"  {where} ({dist:+.1f}%) — {labels}{star}"
+
+
+def format_levels(ctx: dict[str, Any]) -> str:
+    """One ladder: resistances above, supports below, nearest first.
+
+    Levels from every source (OB/FVG/VP/liquidity/EMA/range/liquidations) are
+    clustered; a cluster backed by several sources is marked ⭐ as strong."""
+    price = ctx.get("price")
+    lines = [f"📐 Уровни {config.SYMBOL_DISPLAY} | цена {_fmt_price(price)}"]
+    if not price:
+        return "\n".join(lines)
+
+    zone_tfs = ctx.get("zone_tfs") or []
+    if zone_tfs:
+        lines.append(f"Зоны и уровни: {'/'.join(t.upper() for t in zone_tfs)} "
+                     "+ объём/EMA/диапазон")
+    lines.append("")
+
+    items = _collect_level_items(ctx)
+    res, sup = _cluster_levels(items, price, ctx.get("atr"))
+
+    lines.append("🔺 Сопротивления (ближайшие сверху):")
+    lines += [_fmt_cluster(c, price) for c in res[:4]] or ["  —"]
+    lines.append("")
+    lines.append("🔻 Поддержки (ближайшие снизу):")
+    lines += [_fmt_cluster(c, price) for c in sup[:4]] or ["  —"]
+
+    eq = ctx.get("equilibrium", {}) or {}
+    ind = ctx.get("ind_signal", {}) or {}
+    ctx_bits = []
+    if eq.get("zone"):
+        zone_ru = {"discount": "🟢 дисконт", "premium": "🔴 премиум",
+                   "equilibrium": "⚪ равновесие"}.get(eq["zone"], eq["zone"])
+        ctx_bits.append(f"{zone_ru} ({int(eq.get('pos', 0.5) * 100)}% диапазона)")
+    if ind.get("bb_squeeze"):
+        ctx_bits.append("BBW: сжатие — готовится импульс")
+    elif ind.get("bb_expansion"):
+        ctx_bits.append("BBW: расширение")
+    if ctx_bits:
+        lines += ["", "⚖️ " + " · ".join(ctx_bits)]
+
     support, resistance = _nearest_sr(ctx, price)
     lines.append("")
     lines += _levels_conclusion(ctx, price, support, resistance)
