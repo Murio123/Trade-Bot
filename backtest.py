@@ -243,8 +243,8 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
                 "target_2": round(price + sign * dist * profile["targets"][1], 2),
             })
         risk = abs(price - pos["stop_loss"])
-        tp1, tp2, _ = _structure_targets(ctx_min, direction, price, risk,
-                                         pos["target_1"], pos["target_2"])
+        tp1, tp2, _, _tp2_src = _structure_targets(ctx_min, direction, price, risk,
+                                                   pos["target_1"], pos["target_2"])
         pos["target_1"], pos["target_2"] = tp1, tp2
 
         # Mode expected-move gate, live parity (quality filter, not a target).

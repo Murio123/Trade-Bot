@@ -54,6 +54,9 @@ PROFILES: dict[str, dict[str, Any]] = {
         "forecast_horizon": "1-14 дней",
         "forecast_horizon_hours": 96,      # ATR ceiling window for the move gate
         "expected_holding_period": "1 день – 3 недели",
+        # Max seconds between the entry-candle close and the decision for an
+        # ENTER to stay executable; beyond it the run is downgraded to WAIT.
+        "max_decision_delay_seconds": _fnum("SWING_MAX_DELAY_SEC", 900),
     },
     "position": {
         # Hierarchy: 1D = global regime, 12H = direction & major zones,
@@ -77,6 +80,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "forecast_horizon": "1-6 недель",
         "forecast_horizon_hours": 336,
         "expected_holding_period": "от нескольких дней до недель",
+        "max_decision_delay_seconds": _fnum("POSITION_MAX_DELAY_SEC", 1800),
     },
     "intraday": {
         # Hierarchy: 4H/2H = context & direction, 1H/30M = setup,
@@ -99,6 +103,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "forecast_horizon": "до 24 часов",
         "forecast_horizon_hours": 24,
         "expected_holding_period": "15 минут – 24 часа",
+        "max_decision_delay_seconds": _fnum("INTRADAY_MAX_DELAY_SEC", 180),
     },
 }
 

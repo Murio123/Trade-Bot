@@ -54,6 +54,7 @@ async def record_signal_as_trade(signal_id: int, signal: dict[str, Any]) -> int 
             "tp2": signal.get("target_2"),
             "timeframe": signal.get("timeframe"),
             "symbol": signal.get("symbol"),
+            "analysis_type": signal.get("analysis_type"),
         })
     except Exception as exc:  # noqa: BLE001
         log.warning("record_signal_as_trade failed: %s", exc)

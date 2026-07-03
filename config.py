@@ -133,6 +133,16 @@ ENABLE_FAST_ANALYSIS = _get_bool("ENABLE_FAST_ANALYSIS", True)
 # multi-day 2000-5000pt moves.
 ENABLE_POSITION_ANALYSIS = _get_bool("ENABLE_POSITION_ANALYSIS", True)
 
+# --- Forecast observability ledger ------------------------------------------
+# Every analysis run (including WAIT / NO_TRADE / blocked) is recorded in the
+# forecasts table; outcome tracking measures what price did afterwards.
+ENABLE_FORECAST_LEDGER = _get_bool("ENABLE_FORECAST_LEDGER", True)
+OUTCOME_TRACK_INTERVAL_MINUTES = _get_int("OUTCOME_TRACK_INTERVAL_MINUTES", 30)
+# Versioning stamped on every forecast row so later analysis can separate
+# records produced by different prompt/model generations.
+PROMPT_VERSION = _get("PROMPT_VERSION", "2026-07-obs-1")
+MODEL_VERSION = ANTHROPIC_MODEL
+
 # --- Operating mode -------------------------------------------------------
 # Dry-run: run the whole pipeline but do NOT send Telegram alerts (ТЗ step 10).
 DRY_RUN = _get_bool("DRY_RUN", True)

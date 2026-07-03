@@ -6,9 +6,36 @@ reason stands.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import config
+
+# Every TP2 must carry a known origin; the expected-move gate refuses to
+# measure a target whose provenance is unknown.
+TP2_SOURCES = {"structural", "liquidity", "order_block", "fvg",
+               "volume_profile", "r_multiple_fallback"}
+
+
+def invalid_tp2(direction: str, entry: float, stop: float | None,
+                tp2: float | None, tp1: float | None,
+                tp2_source: str | None) -> str | None:
+    """Reject a TP2 that must not feed expected_move: wrong side, non-finite,
+    colliding with the stop, or of unknown origin. Returns the reason or None."""
+    if tp2 is None or not math.isfinite(tp2) or tp2 <= 0:
+        return "TP2 не задан или не является конечным положительным числом"
+    if tp2_source not in TP2_SOURCES:
+        return f"неизвестное происхождение TP2: {tp2_source!r}"
+    beyond_entry = (tp2 > entry) if direction == "long" else (tp2 < entry)
+    if not beyond_entry:
+        return "TP2 не на стороне направления сделки"
+    if tp1 is not None and math.isfinite(tp1):
+        farther = (tp2 > tp1) if direction == "long" else (tp2 < tp1)
+        if not farther:
+            return "TP2 не дальше TP1"
+    if stop is not None and abs(tp2 - stop) < 1e-9:
+        return "TP2 совпадает со стоп-лоссом"
+    return None
 
 
 def effective_expected_move(entry: float, tp2: float, atr: float,

@@ -1,9 +1,15 @@
 """APScheduler wiring: analysis streams, trade resolution, price alerts.
 
-- Swing analysis hourly (1H entry) and intraday every 15m (15m entry) — the
-  cadence comes from each profile's interval_minutes.
+- Analysis jobs are CRON-aligned to the close of each profile's entry candle
+  (4H streams fire minutes after a 4H close, intraday after each 15m close),
+  so the analysed close price is fresh by construction. Missed slots are NOT
+  replayed after a restart (misfire_grace_time) — a stale signal must never
+  be published late.
+- Every analysis run is recorded in the forecasts ledger (blocked and WAIT
+  included); one row per closed entry candle per mode (dedup).
 - resolve_trades_job replays open trades on their own timeframe every
-  TRADE_CHECK_INTERVAL_MINUTES.
+  TRADE_CHECK_INTERVAL_MINUTES; outcome_tracking_job measures what price did
+  after every recorded forecast.
 - Price-alert checks every ALERT_CHECK_INTERVAL_MINUTES.
 """
 from __future__ import annotations
@@ -14,33 +20,63 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
 
 import config
 from bot import alerts, formatting, journal
 from database import db
-from pipeline import gather_market_context, run_cascade
+from pipeline import _drop_unclosed, gather_market_context, run_cascade
 
 log = logging.getLogger(__name__)
 
 
+async def _last_closed_candle_time(binance, timeframe: str):
+    """Close time of the last CLOSED entry candle (cheap 2-bar fetch)."""
+    df = _drop_unclosed(await binance.klines(timeframe, limit=2))
+    if df is None or len(df) == 0:
+        return None
+    return df["close_time"].iloc[-1].to_pydatetime()
+
+
 async def analysis_job(application, profile_name: str = "swing") -> None:
+    from signal_engine.forecast_record import build_forecast_record
     from signal_engine.profiles import get_profile
     binance = application.bot_data["binance"]
     profile = get_profile(profile_name)
     timeframe = profile["entry"]
+    analysis_type = profile.get("analysis_type", "SWING")
+    job_fired_at = datetime.now(timezone.utc)
     log.info("Running scheduled analysis [%s, %s]…", profile_name, timeframe)
+
+    # Candle-level dedup BEFORE the heavy work: the same closed entry candle
+    # is never analysed twice for a mode (restart, manual kick, overlapping
+    # slots). The forecasts UNIQUE constraint is the backstop.
+    if config.ENABLE_FORECAST_LEDGER:
+        try:
+            candle_close = await _last_closed_candle_time(binance, timeframe)
+            if candle_close is not None and await db.forecast_exists(
+                    config.SYMBOL, analysis_type, candle_close):
+                log.info("[%s] candle %s already analysed — skipping",
+                         profile_name, candle_close)
+                return
+        except Exception:  # noqa: BLE001
+            log.exception("dedup pre-check failed [%s] — continuing", profile_name)
+
     try:
         ctx = await gather_market_context(binance, profile_name=profile_name)
+        ctx["job_fired_at"] = job_fired_at
         # Cache the swing context for /ask, /levels.
         if profile_name == "swing":
             application.bot_data["last_context"] = ctx
-        # Per-style daily budget and cooldown (keyed by the entry timeframe).
-        # Cooldown counts from the last DELIVERED alert: journal-only records
-        # and repeated "cooldown" evaluations of a persisting setup must not
-        # keep re-arming the window (otherwise a stable setup silences the
-        # stream forever and a weak journal signal blocks a later strong one).
-        delivered_today = await db.signals_today(config.SYMBOL, timeframe=timeframe)
-        last_signal = await db.last_delivered_signal(config.SYMBOL, timeframe=timeframe)
+        # Per-mode daily budget and cooldown: SWING and POSITIONAL share the
+        # 4H timeframe, so the analysis_type filter is what keeps their
+        # cooldowns/limits independent. Cooldown counts from the last
+        # DELIVERED alert: journal-only records and repeated "cooldown"
+        # evaluations of a persisting setup must not keep re-arming the window.
+        delivered_today = await db.signals_today(
+            config.SYMBOL, timeframe=timeframe, analysis_type=analysis_type)
+        last_signal = await db.last_delivered_signal(
+            config.SYMBOL, timeframe=timeframe, analysis_type=analysis_type)
         open_now = await db.open_trades()
         result = await run_cascade(ctx, delivered_today, last_signal,
                                    interpret=True, profile_name=profile_name,
@@ -54,6 +90,17 @@ async def analysis_job(application, profile_name: str = "swing") -> None:
     application.bot_data["last_analysis_tf"] = f"{profile_name}/{timeframe}"
     application.bot_data["last_analysis_status"] = result.get("status")
     application.bot_data["last_analysis_blocked_at"] = result.get("blocked_at")
+
+    # Forecast ledger: EVERY run is recorded — blocked, WAIT and NO_TRADE
+    # included. Failures here must never block alert delivery.
+    forecast_id = None
+    if config.ENABLE_FORECAST_LEDGER:
+        try:
+            fc = build_forecast_record(result, ctx, profile)
+            if fc:
+                forecast_id = await db.insert_forecast(fc)
+        except Exception:  # noqa: BLE001
+            log.exception("forecast ledger insert failed [%s]", profile_name)
 
     # Proactive reversal (bottom/top) alert from the already-gathered context.
     await _maybe_reversal_alert(application, ctx, profile_name, timeframe)
@@ -73,6 +120,11 @@ async def analysis_job(application, profile_name: str = "swing") -> None:
     if result.get("score", 0) >= config.SCORE_JOURNAL_MIN:
         record = {**result, "delivered": status == "alert"}
         signal_id = await db.insert_signal(record)
+        if forecast_id:
+            try:
+                await db.link_forecast_signal(forecast_id, signal_id)
+            except Exception:  # noqa: BLE001
+                log.exception("forecast->signal link failed")
 
         if status == "alert":
             # Aggregate risk cap across profiles: over the cap the alert is
@@ -162,6 +214,44 @@ async def resolve_trades_job(application) -> None:
         for event in evaluation["events"]:
             text = formatting.format_trade_event(trade, event)
             await alerts.broadcast(application.bot, text)
+
+
+async def outcome_tracking_job(application) -> None:
+    """Measure what price did after every recorded forecast.
+
+    Idempotent recomputation from 1H klines: horizon returns fill in as their
+    horizons elapse (censored = NULL until then), MFE/MAE and TP/stop touches
+    are monotone, unresolved rows are kept — never deleted.
+    """
+    if not config.ENABLE_FORECAST_LEDGER:
+        return
+    from analyzer.outcomes import measure_outcome
+    binance = application.bot_data["binance"]
+    try:
+        pending = await db.forecasts_pending_outcomes(config.SYMBOL)
+    except Exception:  # noqa: BLE001
+        log.exception("outcome_tracking_job: pending query failed")
+        return
+    if not pending:
+        return
+    try:
+        df = await binance.klines("1h", limit=1000)
+    except Exception:  # noqa: BLE001
+        log.exception("outcome_tracking_job: failed to fetch 1h klines")
+        return
+    now = datetime.now(timezone.utc)
+    updated = 0
+    for fc in pending:
+        try:
+            out = measure_outcome(fc, df, now,
+                                  config.TAKER_FEE_PCT, config.SLIPPAGE_PCT)
+            if out:
+                await db.upsert_outcome(out)
+                updated += 1
+        except Exception:  # noqa: BLE001
+            log.exception("outcome update failed for forecast #%s", fc.get("id"))
+    if updated:
+        log.info("outcome_tracking_job: updated %d forecast outcomes", updated)
 
 
 async def _send_signal_chart(application, ctx: dict, signal: dict) -> None:
@@ -296,27 +386,38 @@ async def _maybe_reversal_alert(application, ctx: dict, profile_name: str,
              ",".join(tfs), alignment)
 
 
+# Cron alignment per entry timeframe: fire ~1 minute after the candle closes
+# (the exchange needs a moment to finalise the bar). misfire_grace_time keeps
+# a slot missed during downtime from firing late with a stale close.
+_ANALYSIS_CRON: dict[str, tuple[dict[str, Any], int]] = {
+    "15m": ({"minute": "1,16,31,46"}, 60),
+    "1h": ({"minute": "1"}, 120),
+    "4h": ({"hour": "0,4,8,12,16,20", "minute": "1"}, 300),
+    "1d": ({"hour": "0", "minute": "1"}, 600),
+}
+
+
+def _analysis_trigger(profile: dict[str, Any]) -> tuple[CronTrigger, int]:
+    fields, grace = _ANALYSIS_CRON.get(profile["entry"], ({"minute": "1"}, 120))
+    return CronTrigger(timezone="UTC", **fields), grace
+
+
 def build_scheduler(application) -> AsyncIOScheduler:
     from signal_engine.profiles import PROFILES
     scheduler = AsyncIOScheduler(timezone="UTC")
-    # Swing analysis (1H entry, 1D/12H/4H context) on the profile's cadence.
-    scheduler.add_job(
-        analysis_job, "interval", minutes=PROFILES["swing"]["interval_minutes"],
-        args=[application, "swing"], id="analysis_swing", next_run_time=None,
-    )
-    # Position analysis (4H entry, 1D structure) for multi-day 2000-5000pt moves.
-    if config.ENABLE_POSITION_ANALYSIS:
+    # Analysis streams, each aligned to its entry-candle close. NOTE: the old
+    # interval jobs were added with next_run_time=None, which APScheduler
+    # treats as PAUSED — the recurring analyses never actually fired.
+    streams = [("swing", True),
+               ("position", config.ENABLE_POSITION_ANALYSIS),
+               ("intraday", config.ENABLE_FAST_ANALYSIS)]
+    for name, enabled in streams:
+        if not enabled:
+            continue
+        trigger, grace = _analysis_trigger(PROFILES[name])
         scheduler.add_job(
-            analysis_job, "interval",
-            minutes=PROFILES["position"]["interval_minutes"],
-            args=[application, "position"], id="analysis_position", next_run_time=None,
-        )
-    # Intraday analysis (15m entry, 4H/1H/15m) every M minutes.
-    if config.ENABLE_FAST_ANALYSIS:
-        scheduler.add_job(
-            analysis_job, "interval",
-            minutes=PROFILES["intraday"]["interval_minutes"],
-            args=[application, "intraday"], id="analysis_intraday", next_run_time=None,
+            analysis_job, trigger, args=[application, name],
+            id=f"analysis_{name}", coalesce=True, misfire_grace_time=grace,
         )
     scheduler.add_job(
         price_alert_job, "interval", minutes=config.ALERT_CHECK_INTERVAL_MINUTES,
@@ -325,5 +426,10 @@ def build_scheduler(application) -> AsyncIOScheduler:
     scheduler.add_job(
         resolve_trades_job, "interval", minutes=config.TRADE_CHECK_INTERVAL_MINUTES,
         args=[application], id="resolve_trades",
+    )
+    scheduler.add_job(
+        outcome_tracking_job, "interval",
+        minutes=config.OUTCOME_TRACK_INTERVAL_MINUTES,
+        args=[application], id="outcome_tracking",
     )
     return scheduler

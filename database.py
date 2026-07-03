@@ -89,6 +89,70 @@ CREATE TABLE IF NOT EXISTS bot_state (
     value           JSONB NOT NULL,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Append-only forecast ledger: one row per analysis run (including blocked /
+-- NO_TRADE), unlike ``signals`` which only stores journal+ entries. The
+-- UNIQUE constraint is the candle-level dedup: one forecast per closed
+-- entry candle per mode.
+CREATE TABLE IF NOT EXISTS forecasts (
+    id                          BIGSERIAL PRIMARY KEY,
+    created_at                  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    symbol                      TEXT NOT NULL,
+    analysis_type               TEXT NOT NULL,
+    timeframe                   TEXT NOT NULL,
+    signal_candle_close_time    TIMESTAMPTZ NOT NULL,
+    decision_time               TIMESTAMPTZ NOT NULL,
+    data_freshness_seconds      DOUBLE PRECISION,
+    decision_latency_seconds    DOUBLE PRECISION,
+    candidate_direction         TEXT,
+    final_bias                  TEXT,
+    analysis_status             TEXT NOT NULL,
+    blocked_gate                TEXT,
+    long_score                  DOUBLE PRECISION,
+    short_score                 DOUBLE PRECISION,
+    raw_confidence              DOUBLE PRECISION,
+    calibrated_confidence       DOUBLE PRECISION,
+    expected_move_points        DOUBLE PRECISION,
+    expected_move_percent       DOUBLE PRECISION,
+    expected_move_atr           DOUBLE PRECISION,
+    entry_zone                  JSONB,
+    signal_close_price          DOUBLE PRECISION,
+    executable_price_at_decision DOUBLE PRECISION,
+    stop_loss                   DOUBLE PRECISION,
+    take_profit_levels          JSONB,
+    tp2_source                  TEXT,
+    risk_reward                 DOUBLE PRECISION,
+    no_trade_reasons            JSONB,
+    prompt_version              TEXT,
+    model_version               TEXT,
+    signal_id                   BIGINT REFERENCES signals(id) ON DELETE SET NULL,
+    UNIQUE (symbol, analysis_type, signal_candle_close_time)
+);
+
+-- Outcome measurements per forecast. Horizon returns stay NULL until the
+-- horizon has elapsed (right-censoring is explicit, unresolved rows are
+-- never deleted).
+CREATE TABLE IF NOT EXISTS forecast_outcomes (
+    forecast_id     BIGINT PRIMARY KEY REFERENCES forecasts(id) ON DELETE CASCADE,
+    anchor_time     TIMESTAMPTZ NOT NULL,
+    reference_price DOUBLE PRECISION NOT NULL,
+    return_1h       DOUBLE PRECISION,
+    return_4h       DOUBLE PRECISION,
+    return_12h      DOUBLE PRECISION,
+    return_24h      DOUBLE PRECISION,
+    return_72h      DOUBLE PRECISION,
+    mfe_points      DOUBLE PRECISION,
+    mae_points      DOUBLE PRECISION,
+    reached_500     BOOLEAN NOT NULL DEFAULT FALSE,
+    reached_1500    BOOLEAN NOT NULL DEFAULT FALSE,
+    reached_3000    BOOLEAN NOT NULL DEFAULT FALSE,
+    tp1_hit         BOOLEAN NOT NULL DEFAULT FALSE,
+    tp2_hit         BOOLEAN NOT NULL DEFAULT FALSE,
+    stop_hit        BOOLEAN NOT NULL DEFAULT FALSE,
+    net_after_costs DOUBLE PRECISION,
+    resolved        BOOLEAN NOT NULL DEFAULT FALSE,
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 # Idempotent migrations for tables created before lifecycle columns existed.
@@ -100,6 +164,12 @@ ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS current_stop DOUBLE PRECISIO
 ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS timeframe TEXT;
 ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS symbol TEXT;
 
+-- Mode separation: SWING and POSITIONAL share timeframe=4h, so cooldown /
+-- daily-limit / stats queries need the analysis_type discriminator. Old rows
+-- keep NULL (historical, from before the modes were separated).
+ALTER TABLE signals ADD COLUMN IF NOT EXISTS analysis_type TEXT;
+ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS analysis_type TEXT;
+
 -- Indexes matching the hot query paths (cooldown, daily limit, open trades,
 -- active price alerts). IF NOT EXISTS keeps this idempotent.
 CREATE INDEX IF NOT EXISTS idx_signals_symbol_tf_created
@@ -108,6 +178,12 @@ CREATE INDEX IF NOT EXISTS idx_signals_delivered
     ON signals (symbol, delivered, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_trades_outcome ON trades_journal (outcome);
 CREATE INDEX IF NOT EXISTS idx_price_alerts_active ON price_alerts (symbol, triggered);
+CREATE INDEX IF NOT EXISTS idx_signals_type
+    ON signals (symbol, timeframe, analysis_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_forecasts_type_created
+    ON forecasts (symbol, analysis_type, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_outcomes_unresolved
+    ON forecast_outcomes (resolved) WHERE resolved = FALSE;
 """
 
 
@@ -167,8 +243,8 @@ class Database:
                 INSERT INTO signals
                     (symbol, timeframe, direction, entry_price, stop_loss,
                      target_1, target_2, position_size, score, confidence,
-                     category_scores, reasons, ai_text, delivered)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                     category_scores, reasons, ai_text, delivered, analysis_type)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
                 RETURNING id
                 """,
                 sig.get("symbol"), sig.get("timeframe"), sig.get("direction"),
@@ -176,65 +252,46 @@ class Database:
                 sig.get("target_2"), sig.get("position_size"), sig.get("score"),
                 sig.get("confidence"), json.dumps(sig.get("category_scores", {})),
                 json.dumps(sig.get("reasons", [])), sig.get("ai_text"),
-                sig.get("delivered", False),
+                sig.get("delivered", False), sig.get("analysis_type"),
             )
             return int(row["id"])
 
-    async def last_signal(self, symbol: str,
-                          timeframe: Optional[str] = None) -> Optional[dict[str, Any]]:
+    async def last_signal(self, symbol: str, timeframe: Optional[str] = None,
+                          analysis_type: Optional[str] = None) -> Optional[dict[str, Any]]:
         if not self.pool:
-            return self._mem.last_signal(symbol, timeframe)
+            return self._mem.last_signal(symbol, timeframe, analysis_type)
+        where, args = _signal_filter(symbol, timeframe, analysis_type)
         async with self.pool.acquire() as conn:
-            if timeframe:
-                row = await conn.fetchrow(
-                    "SELECT * FROM signals WHERE symbol=$1 AND timeframe=$2 "
-                    "ORDER BY created_at DESC LIMIT 1",
-                    symbol, timeframe,
-                )
-            else:
-                row = await conn.fetchrow(
-                    "SELECT * FROM signals WHERE symbol=$1 ORDER BY created_at DESC LIMIT 1",
-                    symbol,
-                )
+            row = await conn.fetchrow(
+                f"SELECT * FROM signals WHERE {where} "
+                "ORDER BY created_at DESC LIMIT 1", *args,
+            )
             return _row_to_signal(row) if row else None
 
-    async def last_delivered_signal(self, symbol: str,
-                                    timeframe: Optional[str] = None) -> Optional[dict[str, Any]]:
+    async def last_delivered_signal(self, symbol: str, timeframe: Optional[str] = None,
+                                    analysis_type: Optional[str] = None) -> Optional[dict[str, Any]]:
         if not self.pool:
-            return self._mem.last_delivered_signal(symbol, timeframe)
+            return self._mem.last_delivered_signal(symbol, timeframe, analysis_type)
+        where, args = _signal_filter(symbol, timeframe, analysis_type)
         async with self.pool.acquire() as conn:
-            if timeframe:
-                row = await conn.fetchrow(
-                    "SELECT * FROM signals WHERE symbol=$1 AND timeframe=$2 "
-                    "AND delivered=TRUE ORDER BY created_at DESC LIMIT 1",
-                    symbol, timeframe,
-                )
-            else:
-                row = await conn.fetchrow(
-                    "SELECT * FROM signals WHERE symbol=$1 AND delivered=TRUE "
-                    "ORDER BY created_at DESC LIMIT 1",
-                    symbol,
-                )
+            row = await conn.fetchrow(
+                f"SELECT * FROM signals WHERE {where} AND delivered=TRUE "
+                "ORDER BY created_at DESC LIMIT 1", *args,
+            )
             return _row_to_signal(row) if row else None
 
-    async def signals_today(self, symbol: str,
-                            timeframe: Optional[str] = None) -> list[dict[str, Any]]:
+    async def signals_today(self, symbol: str, timeframe: Optional[str] = None,
+                            analysis_type: Optional[str] = None) -> list[dict[str, Any]]:
         if not self.pool:
-            return self._mem.signals_today(symbol, timeframe)
+            return self._mem.signals_today(symbol, timeframe, analysis_type)
         since = utcnow() - timedelta(hours=24)
+        where, args = _signal_filter(symbol, timeframe, analysis_type)
         async with self.pool.acquire() as conn:
-            if timeframe:
-                rows = await conn.fetch(
-                    "SELECT * FROM signals WHERE symbol=$1 AND timeframe=$2 "
-                    "AND delivered=TRUE AND created_at >= $3 ORDER BY created_at DESC",
-                    symbol, timeframe, since,
-                )
-            else:
-                rows = await conn.fetch(
-                    "SELECT * FROM signals WHERE symbol=$1 AND delivered=TRUE "
-                    "AND created_at >= $2 ORDER BY created_at DESC",
-                    symbol, since,
-                )
+            rows = await conn.fetch(
+                f"SELECT * FROM signals WHERE {where} AND delivered=TRUE "
+                f"AND created_at >= ${len(args) + 1} ORDER BY created_at DESC",
+                *args, since,
+            )
             return [_row_to_signal(r) for r in rows]
 
     async def mark_delivered(self, signal_id: int) -> None:
@@ -252,14 +309,16 @@ class Database:
                 """
                 INSERT INTO trades_journal
                     (signal_id, direction, entry_price, stop_loss, target,
-                     tp1, tp2, stage, current_stop, outcome, timeframe, symbol)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,'open',$8,'open',$9,$10)
+                     tp1, tp2, stage, current_stop, outcome, timeframe, symbol,
+                     analysis_type)
+                VALUES ($1,$2,$3,$4,$5,$6,$7,'open',$8,'open',$9,$10,$11)
                 RETURNING id
                 """,
                 trade.get("signal_id"), trade.get("direction"), trade.get("entry_price"),
                 trade.get("stop_loss"), trade.get("target"),
                 trade.get("tp1"), trade.get("tp2"), trade.get("stop_loss"),
                 trade.get("timeframe"), trade.get("symbol"),
+                trade.get("analysis_type"),
             )
             return int(row["id"])
 
@@ -293,17 +352,129 @@ class Database:
                 exit_price, outcome, pnl_r, trade_id,
             )
 
-    async def journal_stats(self, symbol: str) -> dict[str, Any]:
+    async def journal_stats(self, symbol: str,
+                            analysis_type: Optional[str] = None) -> dict[str, Any]:
         if not self.pool:
-            return self._mem.journal_stats(symbol)
+            return self._mem.journal_stats(symbol, analysis_type)
         async with self.pool.acquire() as conn:
             # symbol IS NULL keeps trades recorded before the column existed.
-            rows = await conn.fetch(
-                "SELECT outcome, pnl_r FROM trades_journal WHERE outcome IS NOT NULL "
-                "AND outcome <> 'open' AND (symbol = $1 OR symbol IS NULL)",
-                symbol,
-            )
+            if analysis_type:
+                rows = await conn.fetch(
+                    "SELECT outcome, pnl_r FROM trades_journal WHERE outcome IS NOT NULL "
+                    "AND outcome <> 'open' AND (symbol = $1 OR symbol IS NULL) "
+                    "AND analysis_type = $2",
+                    symbol, analysis_type,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT outcome, pnl_r FROM trades_journal WHERE outcome IS NOT NULL "
+                    "AND outcome <> 'open' AND (symbol = $1 OR symbol IS NULL)",
+                    symbol,
+                )
         return _aggregate_journal(rows)
+
+    # --- forecast ledger ----------------------------------------------------
+    async def insert_forecast(self, fc: dict[str, Any]) -> Optional[int]:
+        """Insert a forecast row; returns None when the candle was already
+        recorded for this mode (the UNIQUE constraint is the dedup)."""
+        if not self.pool:
+            return self._mem.insert_forecast(fc)
+        cols = [c for c in _FORECAST_COLS if c in fc]
+        params = [_forecast_param(c, fc[c]) for c in cols]
+        placeholders = ", ".join(f"${i + 1}" for i in range(len(cols)))
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                f"INSERT INTO forecasts ({', '.join(cols)}) VALUES ({placeholders}) "
+                "ON CONFLICT (symbol, analysis_type, signal_candle_close_time) "
+                "DO NOTHING RETURNING id",
+                *params,
+            )
+            return int(row["id"]) if row else None
+
+    async def forecast_exists(self, symbol: str, analysis_type: str,
+                              candle_close_time: datetime) -> bool:
+        if not self.pool:
+            return self._mem.forecast_exists(symbol, analysis_type, candle_close_time)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT 1 FROM forecasts WHERE symbol=$1 AND analysis_type=$2 "
+                "AND signal_candle_close_time=$3",
+                symbol, analysis_type, candle_close_time,
+            )
+            return row is not None
+
+    async def link_forecast_signal(self, forecast_id: int, signal_id: int) -> None:
+        if not self.pool:
+            return self._mem.link_forecast_signal(forecast_id, signal_id)
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE forecasts SET signal_id=$1 WHERE id=$2",
+                signal_id, forecast_id,
+            )
+
+    async def forecasts_pending_outcomes(self, symbol: str,
+                                         limit: int = 200) -> list[dict[str, Any]]:
+        """Forecasts with a direction whose outcome row is absent or unresolved."""
+        if not self.pool:
+            return self._mem.forecasts_pending_outcomes(symbol, limit)
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT f.*, o.resolved
+                FROM forecasts f
+                LEFT JOIN forecast_outcomes o ON o.forecast_id = f.id
+                WHERE f.symbol = $1 AND f.candidate_direction IS NOT NULL
+                  AND f.analysis_status <> 'NO_TRADE'
+                  AND (o.forecast_id IS NULL OR o.resolved = FALSE)
+                ORDER BY f.decision_time
+                LIMIT $2
+                """,
+                symbol, limit,
+            )
+            return [_row_to_signal(r) for r in rows]
+
+    async def upsert_outcome(self, outcome: dict[str, Any]) -> None:
+        if not self.pool:
+            return self._mem.upsert_outcome(outcome)
+        cols = [c for c in _OUTCOME_COLS if c in outcome]
+        placeholders = ", ".join(f"${i + 1}" for i in range(len(cols)))
+        updates = ", ".join(f"{c}=EXCLUDED.{c}" for c in cols if c != "forecast_id")
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                f"INSERT INTO forecast_outcomes ({', '.join(cols)}) "
+                f"VALUES ({placeholders}) "
+                f"ON CONFLICT (forecast_id) DO UPDATE SET {updates}, updated_at=now()",
+                *[outcome[c] for c in cols],
+            )
+
+    async def forecast_outcome(self, forecast_id: int) -> Optional[dict[str, Any]]:
+        if not self.pool:
+            return self._mem.forecast_outcome(forecast_id)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM forecast_outcomes WHERE forecast_id=$1", forecast_id)
+            return dict(row) if row else None
+
+    async def forecast_stats(self, symbol: str,
+                             analysis_type: Optional[str] = None) -> dict[str, Any]:
+        """Per-mode hit-rate over resolved outcomes (unresolved stay counted)."""
+        if not self.pool:
+            return self._mem.forecast_stats(symbol, analysis_type)
+        async with self.pool.acquire() as conn:
+            if analysis_type:
+                rows = await conn.fetch(
+                    "SELECT o.* FROM forecast_outcomes o "
+                    "JOIN forecasts f ON f.id = o.forecast_id "
+                    "WHERE f.symbol=$1 AND f.analysis_type=$2",
+                    symbol, analysis_type,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT o.* FROM forecast_outcomes o "
+                    "JOIN forecasts f ON f.id = o.forecast_id WHERE f.symbol=$1",
+                    symbol,
+                )
+        return _aggregate_outcomes([dict(r) for r in rows])
 
     # --- price alerts -----------------------------------------------------
     async def add_price_alert(self, chat_id: str, symbol: str, level: float,
@@ -375,9 +546,52 @@ class Database:
             )
 
 
+def _signal_filter(symbol: str, timeframe: Optional[str],
+                   analysis_type: Optional[str]) -> tuple[str, list[Any]]:
+    """WHERE clause + args for the signals queries. analysis_type is strict:
+    NULL rows predate mode separation and must not couple the new streams."""
+    where = ["symbol=$1"]
+    args: list[Any] = [symbol]
+    if timeframe:
+        args.append(timeframe)
+        where.append(f"timeframe=${len(args)}")
+    if analysis_type:
+        args.append(analysis_type)
+        where.append(f"analysis_type=${len(args)}")
+    return " AND ".join(where), args
+
+
+# Column whitelists keep the dynamic INSERTs safe (keys are never user input,
+# but an explicit list also documents the record shape in one place).
+_FORECAST_COLS = [
+    "symbol", "analysis_type", "timeframe", "signal_candle_close_time",
+    "decision_time", "data_freshness_seconds", "decision_latency_seconds",
+    "candidate_direction", "final_bias", "analysis_status", "blocked_gate",
+    "long_score", "short_score", "raw_confidence", "calibrated_confidence",
+    "expected_move_points", "expected_move_percent", "expected_move_atr",
+    "entry_zone", "signal_close_price", "executable_price_at_decision",
+    "stop_loss", "take_profit_levels", "tp2_source", "risk_reward",
+    "no_trade_reasons", "prompt_version", "model_version", "signal_id",
+]
+_FORECAST_JSON_COLS = {"entry_zone", "take_profit_levels", "no_trade_reasons"}
+_OUTCOME_COLS = [
+    "forecast_id", "anchor_time", "reference_price",
+    "return_1h", "return_4h", "return_12h", "return_24h", "return_72h",
+    "mfe_points", "mae_points", "reached_500", "reached_1500", "reached_3000",
+    "tp1_hit", "tp2_hit", "stop_hit", "net_after_costs", "resolved",
+]
+
+
+def _forecast_param(col: str, value: Any) -> Any:
+    if col in _FORECAST_JSON_COLS and value is not None:
+        return json.dumps(value, default=str)
+    return value
+
+
 def _row_to_signal(row) -> dict[str, Any]:
     d = dict(row)
-    for key in ("category_scores", "reasons"):
+    for key in ("category_scores", "reasons", "entry_zone",
+                "take_profit_levels", "no_trade_reasons"):
         val = d.get(key)
         if isinstance(val, str):
             try:
@@ -385,6 +599,24 @@ def _row_to_signal(row) -> dict[str, Any]:
             except (TypeError, ValueError):
                 pass
     return d
+
+
+def _aggregate_outcomes(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    total = len(rows)
+    resolved = [r for r in rows if r.get("resolved")]
+    tp1 = sum(1 for r in rows if r.get("tp1_hit"))
+    tp2 = sum(1 for r in rows if r.get("tp2_hit"))
+    stops = sum(1 for r in rows if r.get("stop_hit"))
+    return {
+        "total": total,
+        "resolved": len(resolved),
+        "unresolved": total - len(resolved),
+        "tp1_hits": tp1,
+        "tp2_hits": tp2,
+        "stop_hits": stops,
+        "tp1_rate": round(tp1 / total * 100, 1) if total else 0.0,
+        "tp2_rate": round(tp2 / total * 100, 1) if total else 0.0,
+    }
 
 
 def _aggregate_journal(rows) -> dict[str, Any]:
@@ -414,10 +646,13 @@ class _MemoryStore:
         self.signals: list[dict[str, Any]] = []
         self.alerts: list[dict[str, Any]] = []
         self.trades: list[dict[str, Any]] = []
+        self.forecasts: list[dict[str, Any]] = []
+        self.outcomes: dict[int, dict[str, Any]] = {}
         self.state: dict[str, dict[str, Any]] = {}
         self._sid = 0
         self._aid = 0
         self._tid = 0
+        self._fid = 0
 
     def insert_signal(self, sig: dict[str, Any]) -> int:
         self._sid += 1
@@ -428,28 +663,34 @@ class _MemoryStore:
         self.signals.append(rec)
         return self._sid
 
-    def last_signal(self, symbol: str, timeframe: Optional[str] = None):
+    def last_signal(self, symbol: str, timeframe: Optional[str] = None,
+                    analysis_type: Optional[str] = None):
         items = [
             s for s in self.signals
             if s.get("symbol") == symbol
             and (timeframe is None or s.get("timeframe") == timeframe)
+            and (analysis_type is None or s.get("analysis_type") == analysis_type)
         ]
         return items[-1] if items else None
 
-    def last_delivered_signal(self, symbol: str, timeframe: Optional[str] = None):
+    def last_delivered_signal(self, symbol: str, timeframe: Optional[str] = None,
+                              analysis_type: Optional[str] = None):
         items = [
             s for s in self.signals
             if s.get("symbol") == symbol and s.get("delivered")
             and (timeframe is None or s.get("timeframe") == timeframe)
+            and (analysis_type is None or s.get("analysis_type") == analysis_type)
         ]
         return items[-1] if items else None
 
-    def signals_today(self, symbol: str, timeframe: Optional[str] = None):
+    def signals_today(self, symbol: str, timeframe: Optional[str] = None,
+                      analysis_type: Optional[str] = None):
         since = utcnow() - timedelta(hours=24)
         return [
             s for s in self.signals
             if s.get("symbol") == symbol and s.get("delivered")
             and (timeframe is None or s.get("timeframe") == timeframe)
+            and (analysis_type is None or s.get("analysis_type") == analysis_type)
             and s.get("created_at", utcnow()) >= since
         ]
 
@@ -486,11 +727,77 @@ class _MemoryStore:
                 t["pnl_r"] = pnl_r
                 t["closed_at"] = utcnow()
 
-    def journal_stats(self, symbol: str):
+    def journal_stats(self, symbol: str, analysis_type: Optional[str] = None):
         closed = [t for t in self.trades
                   if t.get("outcome") and t["outcome"] != "open"
-                  and t.get("symbol") in (None, symbol)]
+                  and t.get("symbol") in (None, symbol)
+                  and (analysis_type is None
+                       or t.get("analysis_type") == analysis_type)]
         return _aggregate_journal(closed)
+
+    # --- forecast ledger (mirrors the Postgres semantics) -------------------
+    def insert_forecast(self, fc: dict[str, Any]) -> Optional[int]:
+        key = (fc.get("symbol"), fc.get("analysis_type"),
+               fc.get("signal_candle_close_time"))
+        for f in self.forecasts:
+            if (f.get("symbol"), f.get("analysis_type"),
+                    f.get("signal_candle_close_time")) == key:
+                return None  # ON CONFLICT DO NOTHING
+        self._fid += 1
+        rec = {c: fc.get(c) for c in _FORECAST_COLS}
+        rec["id"] = self._fid
+        rec.setdefault("created_at", utcnow())
+        self.forecasts.append(rec)
+        return self._fid
+
+    def forecast_exists(self, symbol: str, analysis_type: str,
+                        candle_close_time) -> bool:
+        return any(
+            f.get("symbol") == symbol and f.get("analysis_type") == analysis_type
+            and f.get("signal_candle_close_time") == candle_close_time
+            for f in self.forecasts
+        )
+
+    def link_forecast_signal(self, forecast_id: int, signal_id: int) -> None:
+        for f in self.forecasts:
+            if f["id"] == forecast_id:
+                f["signal_id"] = signal_id
+
+    def forecasts_pending_outcomes(self, symbol: str, limit: int = 200):
+        out = []
+        for f in self.forecasts:
+            if f.get("symbol") != symbol or not f.get("candidate_direction"):
+                continue
+            if f.get("analysis_status") == "NO_TRADE":
+                continue
+            o = self.outcomes.get(f["id"])
+            if o is None or not o.get("resolved"):
+                out.append(dict(f))
+        out.sort(key=lambda f: f.get("decision_time") or utcnow())
+        return out[:limit]
+
+    def upsert_outcome(self, outcome: dict[str, Any]) -> None:
+        fid = outcome["forecast_id"]
+        rec = self.outcomes.get(fid, {})
+        rec.update({c: outcome[c] for c in _OUTCOME_COLS if c in outcome})
+        rec["updated_at"] = utcnow()
+        self.outcomes[fid] = rec
+
+    def forecast_outcome(self, forecast_id: int) -> Optional[dict[str, Any]]:
+        rec = self.outcomes.get(forecast_id)
+        return dict(rec) if rec else None
+
+    def forecast_stats(self, symbol: str, analysis_type: Optional[str] = None):
+        by_id = {f["id"]: f for f in self.forecasts}
+        rows = []
+        for fid, o in self.outcomes.items():
+            f = by_id.get(fid)
+            if not f or f.get("symbol") != symbol:
+                continue
+            if analysis_type and f.get("analysis_type") != analysis_type:
+                continue
+            rows.append(o)
+        return _aggregate_outcomes(rows)
 
     def add_price_alert(self, chat_id, symbol, level, direction, note):
         self._aid += 1

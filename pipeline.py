@@ -43,7 +43,8 @@ from signal_engine.mtf_confidence import mtf_confidence_factor, trend_label
 from signal_engine.no_trade_gate import (bad_risk_reward,
                                          effective_expected_move,
                                          insufficient_expected_move,
-                                         low_confidence, missing_invalidation,
+                                         invalid_tp2, low_confidence,
+                                         missing_invalidation,
                                          position_conflict, tf_conflict)
 from signal_engine.profiles import get_profile
 from signal_engine.regime import detect_regime, weighted_total
@@ -191,6 +192,20 @@ async def gather_market_context(binance: BinanceClient,
         "volatility_1d": volatility_1d,
         "last_close_time": last_close,
     }
+
+    # Decision snapshot: the reproducible forecast price is the CLOSE of the
+    # signal candle (ctx["price"]); the executable price is the live ticker at
+    # decision time. They are recorded separately and never mixed.
+    executable = None
+    try:
+        executable = await binance.current_price()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("current_price unavailable, executable price degraded "
+                    "to signal close: %s", exc)
+    context["decision_time"] = datetime.now(timezone.utc)
+    context["executable_price"] = (float(executable) if executable
+                                   else ind_signal["price"])
+    context["executable_price_degraded"] = executable is None
     return context
 
 
@@ -343,35 +358,42 @@ def _structural_stop(ctx: dict[str, Any], direction: str, entry: float,
 
 
 def _structure_targets(ctx: dict[str, Any], direction: str, entry: float, risk: float,
-                       fb1: float, fb2: float) -> tuple[float, float, bool]:
-    """Targets at the nearest HTF liquidity / volume nodes, else ATR fallback."""
+                       fb1: float, fb2: float) -> tuple[float, float, bool, str]:
+    """Targets at the nearest HTF liquidity / volume nodes, else ATR fallback.
+
+    Returns (tp1, tp2, tp1_is_structural, tp2_source). tp2_source names the
+    real provenance of TP2: a single structural level still yields a
+    SYNTHETIC 3R TP2, which must be labelled r_multiple_fallback — not passed
+    off as structure.
+    """
     levels = ctx.get("htf_levels", {})
     vp = ctx.get("volume_profile", {})
-    pts: list[float] = []
+    pts: list[tuple[float, str]] = []
     if direction == "long":
-        pts += [x for x in levels.get("highs", []) if x > entry]
+        pts += [(x, "structural") for x in levels.get("highs", []) if x > entry]
         for k in ("vah", "poc"):
             v = vp.get(k)
             if v and v > entry:
-                pts.append(v)
-        pts = sorted({round(p, 2) for p in pts})
+                pts.append((v, "volume_profile"))
+        pts = sorted({(round(p, 2), src) for p, src in pts})
     else:
-        pts += [x for x in levels.get("lows", []) if x < entry]
+        pts += [(x, "structural") for x in levels.get("lows", []) if x < entry]
         for k in ("val", "poc"):
             v = vp.get(k)
             if v and v < entry:
-                pts.append(v)
-        pts = sorted({round(p, 2) for p in pts}, reverse=True)
+                pts.append((v, "volume_profile"))
+        pts = sorted({(round(p, 2), src) for p, src in pts}, reverse=True)
 
-    pts = [p for p in pts if abs(p - entry) >= risk]  # at least 1R away
+    pts = [(p, src) for p, src in pts if abs(p - entry) >= risk]  # at least 1R away
     if not pts:
-        return fb1, fb2, False
-    tp1 = pts[0]
+        return fb1, fb2, False, "r_multiple_fallback"
+    tp1 = pts[0][0]
     if len(pts) > 1:
-        tp2 = pts[1]
+        tp2, tp2_source = pts[1]
     else:
         tp2 = round(entry + risk * 3 * (1 if direction == "long" else -1), 2)
-    return tp1, tp2, True
+        tp2_source = "r_multiple_fallback"
+    return tp1, tp2, True, tp2_source
 
 
 def _near_key_level(price: float, levels: dict, ob: dict, fvg: dict, tol: float) -> bool:
@@ -560,15 +582,25 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     profile = get_profile(profile_name)
     inds = ctx.get("inds_by_tf", {})
 
+    # Decision snapshot attached to EVERY result (blocked ones included):
+    # signal_close_price = reproducible forecast anchor (close of the signal
+    # candle), executable_price_at_decision = the live ticker when the
+    # decision was made. Never interchangeable.
+    snapshot = _decision_snapshot(ctx)
+    freshness = snapshot["data_freshness_seconds"]
+
+    def blocked(stage: str, **extra: Any) -> dict[str, Any]:
+        return _blocked(stage, **{**snapshot, **extra})
+
     # Hard data-quality gates BEFORE any scoring: stale klines or a
     # volatility blow-off mean NO_TRADE regardless of how good the setup
     # looks — the numbers it is built on cannot be trusted.
     if stale_data(ctx.get("last_close_time"), ctx["timeframe"]):
-        return _blocked("stale_data", price=ctx.get("price"),
-                        last_close_time=ctx.get("last_close_time"))
+        return blocked("stale_data", price=ctx.get("price"),
+                       last_close_time=ctx.get("last_close_time"))
     if abnormal_volatility(ctx.get("volatility")):
-        return _blocked("abnormal_volatility", price=ctx.get("price"),
-                        atr_percentile=(ctx.get("volatility") or {}).get("atr_percentile"))
+        return blocked("abnormal_volatility", price=ctx.get("price"),
+                       atr_percentile=(ctx.get("volatility") or {}).get("atr_percentile"))
 
     flat = _flatten_for_confluence(ctx)
     atr_value = ctx["atr"] or 0.0
@@ -610,7 +642,7 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     # conflict though — it is an ordinary quiet bar with no evidence at all.
     if long_total == short_total:
         stage = "direction_conflict" if long_total > 0 else "below_threshold"
-        return _blocked(stage, direction=None, score=long_total, **diag)
+        return blocked(stage, direction=None, score=long_total, **diag)
     if long_total > short_total:
         direction, total, scores, reasons = "long", long_total, long_scores, long_reasons
         counter_reasons = short_reasons
@@ -622,24 +654,24 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     # Level 1 (blocking): drop counter-trend signals.
     allowed = filter_by_htf(direction, htf_bias)
     if allowed is None:
-        return _blocked("htf_filter", direction=direction, score=total, **diag)
+        return blocked("htf_filter", direction=direction, score=total, **diag)
 
     # Level 3 (blocking): categorical diversity.
     if not has_diverse_confirmation(scores, config.MIN_DIVERSE_CATEGORIES):
-        return _blocked("diversity", direction=direction, score=total,
+        return blocked("diversity", direction=direction, score=total,
                         category_scores=scores, reasons=reasons, **diag)
 
     # Below journal threshold -> ignored entirely.
     if total < config.SCORE_JOURNAL_MIN:
-        return _blocked("below_threshold", direction=direction, score=total,
+        return blocked("below_threshold", direction=direction, score=total,
                         category_scores=scores, reasons=reasons, **diag)
 
     # Quality vetoes ("when NOT to trade").
     if dead_zone(scores.get("structure", 0), ctx.get("equilibrium")):
-        return _blocked("dead_zone", direction=direction, score=total,
+        return blocked("dead_zone", direction=direction, score=total,
                         category_scores=scores, reasons=reasons, **diag)
     if crowded_funding(direction, ctx.get("funding")):
-        return _blocked("crowded_funding", direction=direction, score=total,
+        return blocked("crowded_funding", direction=direction, score=total,
                         category_scores=scores, reasons=reasons, **diag)
 
     # Level 4: conflict resolution.
@@ -651,7 +683,7 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         "primary_direction": direction,
     })
     if resolved == "wait_for_sweep":
-        return _blocked("wait_for_sweep", direction=direction, score=total,
+        return blocked("wait_for_sweep", direction=direction, score=total,
                         category_scores=scores, reasons=reasons, **diag)
 
     # Level 5: direction-aware multi-timeframe agreement over the profile's
@@ -691,34 +723,48 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
     # Targets at HTF structure (nearest liquidity / volume nodes) when available,
     # otherwise the ATR-based R-multiples.
     risk = abs(ctx["price"] - position["stop_loss"])
-    tp1, tp2, struct_targets = _structure_targets(
+    tp1, tp2, struct_targets, tp2_source = _structure_targets(
         ctx, direction, ctx["price"], risk, position["target_1"], position["target_2"])
     position["target_1"], position["target_2"] = tp1, tp2
+
+    # TP2 must be validated BEFORE it feeds expected_move: a target on the
+    # wrong side / colliding with the stop / of unknown origin would otherwise
+    # be silently masked by abs() into a plausible-looking move.
+    tp2_reason = invalid_tp2(direction, ctx["price"], position["stop_loss"],
+                             position["target_2"], position["target_1"], tp2_source)
 
     # Expected holding time to TP1 / TP2 from ATR-based drift on this timeframe.
     # Mandatory NO_TRADE gates (Part B): a trade must have an invalidation,
     # a minimum reward for its risk, enough confidence, no hard timeframe
     # conflict, and no open position pulling the other way.
     # Expected move for the mode's horizon: a quality filter, never a target.
-    expected_move = effective_expected_move(
-        ctx["price"], position["target_2"], atr_value,
-        profile.get("forecast_horizon_hours", 24.0),
-        TF_HOURS.get(ctx["timeframe"], 1.0))
+    expected_move = None
+    if tp2_reason is None:
+        expected_move = effective_expected_move(
+            ctx["price"], position["target_2"], atr_value,
+            profile.get("forecast_horizon_hours", 24.0),
+            TF_HOURS.get(ctx["timeframe"], 1.0))
     no_trade = [r for r in (
+        tp2_reason,
         missing_invalidation(position.get("stop_loss"), position.get("stop_loss")),
         bad_risk_reward(ctx["price"], position["stop_loss"], position["target_2"],
                         profile.get("minimum_risk_reward")),
         low_confidence(confidence, profile.get("minimum_confidence")),
         insufficient_expected_move(expected_move,
                                    profile.get("minimum_expected_move_points", 0),
-                                   profile.get("analysis_type", "")),
+                                   profile.get("analysis_type", ""))
+        if expected_move is not None else None,
         tf_conflict(mtf_info),
         position_conflict(open_trades, direction, ctx["symbol"]),
     ) if r]
     if no_trade:
-        return _blocked("no_trade", direction=direction, score=total,
+        return blocked("no_trade", direction=direction, score=total,
                         category_scores=scores, reasons=reasons,
-                        no_trade_reasons=no_trade, **diag)
+                        no_trade_reasons=no_trade, tp2_source=tp2_source,
+                        stop_loss=position.get("stop_loss"),
+                        take_profit_levels=[position.get("target_1"),
+                                            position.get("target_2")],
+                        **diag)
 
     hold = estimate_holding(ctx["price"], position["target_1"],
                             position["target_2"], atr_value, ctx["timeframe"])
@@ -770,6 +816,15 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         "sessions": ctx["sessions"].get("sessions"),
         "funding_value": (ctx["funding"] or {}).get("current"),
         "timestamp": ctx["timestamp"],
+        # Observability: both directions' evidence, TP provenance and the
+        # decision snapshot (reproducible close vs executable ticker).
+        "candidate_direction": direction,
+        "long_score": long_total,
+        "short_score": short_total,
+        "raw_confidence": round(confidence, 3),
+        "calibrated_confidence": None,
+        "tp2_source": tp2_source,
+        **snapshot,
     }
 
     # Structured result (Part B): regime, both sides of the evidence, entry
@@ -800,6 +855,26 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         signal["deliverable"] = False
 
     signal["analysis_status"] = STATUS_MAP.get(signal["status"], "NO_TRADE")
+
+    # Freshness gate: an ENTER whose decision came too long after the entry
+    # candle closed is not executable at the analysed price — downgrade it to
+    # WAIT (the forecast itself is still recorded for observability). The
+    # analytical snapshot stays anchored to signal_close_price.
+    max_delay = profile.get("max_decision_delay_seconds")
+    if (signal["status"] == "alert" and max_delay
+            and freshness is not None and freshness > max_delay):
+        signal["status"] = "journal"
+        signal["deliverable"] = False
+        signal["analysis_status"] = STATUS_MAP["journal"]
+        signal["stale_decision"] = True
+        reasons_list = signal.setdefault("no_trade_reasons", [])
+        reasons_list.append(
+            f"решение через {freshness:.0f} с после закрытия свечи — "
+            f"больше лимита {max_delay:.0f} с для режима "
+            f"{profile.get('analysis_type', '')}")
+        log.warning("[%s] ENTER downgraded to WAIT: decision %.0fs after "
+                    "candle close (limit %.0fs)",
+                    profile.get("analysis_type"), freshness, max_delay)
 
     # AI interpretation is COMMENTARY ONLY: the numeric confidence stays a
     # deterministic function of the evidence (same input -> same output).
@@ -839,6 +914,40 @@ def estimate_holding(entry: float, tp1: float, tp2: float, atr: float,
     bars_tp1 = abs(tp1 - entry) / step
     bars_tp2 = abs(tp2 - entry) / step
     return (round(bars_tp1 * tf_hours, 1), round(bars_tp2 * tf_hours, 1))
+
+
+def _decision_snapshot(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Reproducibility fields attached to every cascade result.
+
+    signal_close_price is the close of the last CLOSED entry candle (what the
+    forecast is computed from); executable_price_at_decision is the live
+    ticker at decision time (what a trade could actually get). Freshness and
+    latency make any gap measurable instead of silent.
+    """
+    decision_time = ctx.get("decision_time") or datetime.now(timezone.utc)
+    last_close = ctx.get("last_close_time")
+    freshness = None
+    if last_close is not None:
+        try:
+            freshness = max((decision_time - last_close).total_seconds(), 0.0)
+        except TypeError:
+            freshness = None
+    latency = None
+    fired = ctx.get("job_fired_at")
+    if fired is not None:
+        try:
+            latency = max((decision_time - fired).total_seconds(), 0.0)
+        except TypeError:
+            latency = None
+    return {
+        "signal_candle_close_time": last_close,
+        "decision_time": decision_time,
+        "signal_close_price": ctx.get("price"),
+        "executable_price_at_decision": ctx.get("executable_price", ctx.get("price")),
+        "executable_price_degraded": bool(ctx.get("executable_price_degraded")),
+        "data_freshness_seconds": freshness,
+        "decision_latency_seconds": latency,
+    }
 
 
 def _blocked(stage: str, **extra: Any) -> dict[str, Any]:
