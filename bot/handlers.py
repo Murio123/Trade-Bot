@@ -109,8 +109,41 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         WELCOME_TEXT, reply_markup=keyboards.main_reply_keyboard()
     )
     await update.effective_message.reply_text(
-        "Быстрое меню:", reply_markup=keyboards.main_inline_keyboard()
+        keyboards.MAIN_MENU_TITLE, reply_markup=keyboards.main_inline_keyboard()
     )
+
+
+def _submenu_handler(section: str):
+    """Reply-keyboard section press: send the submenu as a new message
+    (reply buttons cannot edit anything — there is no source message to edit)."""
+    async def _handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        await update.effective_message.reply_text(
+            keyboards.submenu_title(section),
+            reply_markup=keyboards.submenu_keyboard(section))
+    return _handler
+
+
+menu_analyze_cmd = _submenu_handler("analyze")
+menu_market_cmd = _submenu_handler("market")
+menu_history_cmd = _submenu_handler("history")
+
+
+async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Inline navigation (callback_data 'menu:<section>'): edit in place."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+    section = (query.data or "").split(":", 1)[-1]
+    markup = keyboards.submenu_keyboard(section)
+    if markup is None:  # "menu:main" and anything unknown -> main menu
+        text, markup = keyboards.MAIN_MENU_TITLE, keyboards.main_inline_keyboard()
+    else:
+        text = keyboards.submenu_title(section)
+    try:
+        await query.edit_message_text(text, reply_markup=markup)
+    except Exception as exc:  # noqa: BLE001 — e.g. "Message is not modified"
+        log.debug("menu edit skipped: %s", exc)
 
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -275,6 +308,69 @@ async def journal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await update.effective_message.reply_text(
         formatting.format_journal(stats, open_count=len(open_trades))
     )
+
+
+# Mode order + labels for the history screens.
+_MODES = (("intraday", "⚡ Интрадей"), ("swing", "📊 Свинг"), ("position", "🌊 Позиционный"))
+
+
+def _forecast_line(sig: dict[str, Any]) -> str:
+    d = "🟢 ЛОНГ" if sig.get("direction") == "long" else "🔴 ШОРТ"
+    created = sig.get("created_at")
+    when = ""
+    if created is not None:
+        try:
+            when = f" · {created:%d.%m %H:%M} UTC"
+        except (TypeError, ValueError):
+            pass
+    def p(v: Any) -> str:
+        return f"{v:,.0f}".replace(",", " ") if v else "—"
+    return (f"{d}{when}\n"
+            f"Вход {p(sig.get('entry_price'))} | 🛑 {p(sig.get('stop_loss'))} | "
+            f"🎯 {p(sig.get('target_1'))} / {p(sig.get('target_2'))}")
+
+
+async def last_forecast_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """The most recent stored signal for the symbol, regardless of mode."""
+    sig = await db.last_signal(config.SYMBOL)
+    if not sig:
+        await update.effective_message.reply_text(
+            "📌 Прогнозов пока нет — запусти анализ через «📊 Новый анализ».")
+        return
+    mode = dict(_MODES).get(sig.get("analysis_type") or "", sig.get("timeframe") or "")
+    await update.effective_message.reply_text(
+        f"📌 Последний прогноз ({mode}):\n\n" + _forecast_line(sig))
+
+
+async def recent_forecasts_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Latest stored signal per mode (intraday / swing / position)."""
+    parts = ["📌 Последние прогнозы по режимам:"]
+    for mode, label in _MODES:
+        sig = await db.last_signal(config.SYMBOL, analysis_type=mode)
+        parts.append(f"\n{label}:")
+        parts.append(_forecast_line(sig) if sig else "— пока нет")
+    await update.effective_message.reply_text("\n".join(parts))
+
+
+async def forecast_results_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Hit-rates from the forecast outcome tracker, per mode and overall."""
+    parts = ["✅ Результаты прогнозов (по данным outcome-трекера):"]
+    any_data = False
+    for mode, label in list(_MODES) + [(None, "Σ Все режимы")]:
+        stats = await db.forecast_stats(config.SYMBOL, analysis_type=mode)
+        if not stats.get("total"):
+            parts.append(f"\n{label}: данных пока нет")
+            continue
+        any_data = True
+        parts.append(
+            f"\n{label}: {stats['total']} прогнозов "
+            f"(в работе: {stats['unresolved']})\n"
+            f"TP1 {stats['tp1_rate']}% | TP2 {stats['tp2_rate']}% | "
+            f"стопов: {stats['stop_hits']}")
+    if not any_data:
+        parts.append("\nТаблица наполняется автоматически по мере "
+                     "отслеживания прогнозов — загляни позже.")
+    await update.effective_message.reply_text("\n".join(parts))
 
 
 async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -541,6 +637,12 @@ def _ask_context(ctx: dict[str, Any]) -> dict[str, Any]:
 # Maps an internal command name to its handler (used by reply-keyboard
 # buttons and inline-menu callbacks alike).
 COMMAND_DISPATCH = {
+    "menu_analyze": menu_analyze_cmd,
+    "menu_market": menu_market_cmd,
+    "menu_history": menu_history_cmd,
+    "last_forecast": last_forecast_cmd,
+    "recent_forecasts": recent_forecasts_cmd,
+    "forecast_results": forecast_results_cmd,
     "signal": signal_cmd,
     "intraday": intraday_cmd,
     "position": position_cmd,
@@ -623,6 +725,7 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("guide", guide_cmd))
     application.add_handler(CommandHandler("ask", ask_cmd))
     application.add_handler(CallbackQueryHandler(button_callback, pattern=r"^cmd:"))
+    application.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu:"))
     application.add_handler(CallbackQueryHandler(guide_callback, pattern=r"^help:"))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_message)
