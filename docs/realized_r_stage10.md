@@ -1,5 +1,14 @@
 # Stage 10 — Realized R / Per-Forecast R Definition
 
+> **Stage 11 update (реализовано, Option A без backfill):** формула вынесена в
+> leaf-модуль `analyzer/realized_r.py` (единый источник; `tools/realized_r.py` и
+> producer `analyzer/outcomes.py` используют её, без дублирования). Добавлена
+> additive-nullable колонка `forecast_outcomes.realized_r DOUBLE PRECISION`
+> (`ADD COLUMN IF NOT EXISTS`, в `_OUTCOME_COLS`); `measure_outcome` пишет raw R
+> (без округления). Backfill НЕ делается — старые resolved-строки остаются NULL,
+> покрытие растёт вперёд. `forecast_metrics.py` / `MISSING_DATA` / golden не
+> тронуты (follow-up). См. чек-лист §8.
+
 **Тип этапа:** фиксация формулы + offline read-only инструмент (Option B).
 
 **Что Stage 10 делает:** фиксирует честное определение per-forecast `realized_r`
@@ -112,20 +121,25 @@ SELECT. Никакого нового lookahead: берётся то же 72h-о
 
 ---
 
-## 8. Stage 11 checklist (если решим персистить `forecast_outcomes.realized_r`)
+## 8. Stage 11 checklist (persist `forecast_outcomes.realized_r`) — ВЫПОЛНЕНО
 
-1. Подтвердить стабильность формулы (особенно TP1 mid-case) на живой выборке.
-2. `ALTER TABLE forecast_outcomes ADD COLUMN IF NOT EXISTS realized_r DOUBLE
-   PRECISION;` (nullable, без default, без backfill) в `database.MIGRATIONS`.
-3. Добавить `realized_r` в `_OUTCOME_COLS`.
-4. Наполнять значение в outcome-tracking (`upsert_outcome`), переиспользуя
-   pure `tools/realized_r.realized_r` как единственный источник формулы (без
-   дублирования логики).
-5. Толерантность к NULL у читателей (старые строки → NULL → «недоступно»).
-6. Тесты: идемпотентность миграции, insert с/без `realized_r`, паритет
-   персистированного значения с оффлайн-пересчётом, NULL-толерантность.
-7. Опционально: заменить пункт «honest per-forecast R» в `MISSING_DATA`
-   (`forecast_metrics.py`) — с обновлением golden.
+1. ✅ Формула зафиксирована; вынесена в leaf-модуль `analyzer/realized_r.py`
+   (stdlib-only, без импортов database/tools/outcomes — единый источник).
+2. ✅ `ALTER TABLE forecast_outcomes ADD COLUMN IF NOT EXISTS realized_r DOUBLE
+   PRECISION;` (nullable, без default, без backfill) в `database.MIGRATIONS`
+   + колонка в `SCHEMA`.
+3. ✅ `realized_r` добавлен в `_OUTCOME_COLS`.
+4. ✅ `analyzer/outcomes.measure_outcome` пишет `out["realized_r"]` через
+   `analyzer.realized_r.realized_r` (raw float, без округления). Producer —
+   только `outcome_tracking_job`, вне decision-path.
+5. ✅ Толерантность к NULL: `upsert_outcome` строит колонки динамически;
+   старые outcome-dict без ключа вставляются без ошибки.
+6. ✅ Тесты: schema/migration/`_OUTCOME_COLS`, upsert персистит (memory),
+   legacy-dict без `realized_r`, measure_outcome для ENTER/не-ENTER/unresolved,
+   идемпотентность, guard'ы (tools не импортируется runtime; нет write-SQL).
+7. ⏸ Отложено (follow-up): интеграция persisted `realized_r` в
+   `forecast_metrics.py` и замена пункта «honest per-forecast R» в
+   `MISSING_DATA` (тянет golden/ожидания) — не требуется для Stage 11.
 
 Инварианты (держатся и в Stage 11): production behavior не меняется без
 отдельного подтверждения; никаких destructive-миграций; никакого backfill;

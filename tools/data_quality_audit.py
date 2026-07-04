@@ -90,8 +90,9 @@ PLANNED_FIELDS: tuple[PlannedField, ...] = (
      "recommended": True, "default_status": MISSING,
      "note": "версия набора контекста; парная к strategy_version для честного A/B по стадиям"},
     {"field": "realized_r", "table": "forecast_outcomes", "tier": CRITICAL,
-     "recommended": True, "default_status": NOT_AVAILABLE_YET,
-     "note": "честный per-forecast R; требует зафиксировать определение R (сейчас R только в trades_journal)"},
+     "recommended": True, "default_status": DERIVED_OFFLINE,
+     "note": "Stage 11: persisted (forecast_outcomes.realized_r, nullable) и выводим offline "
+             "через analyzer.realized_r; старые resolved-строки NULL (без backfill)"},
     # --- nice-to-have -----------------------------------------------------
     {"field": "context_quality_score", "table": "forecasts", "tier": NICE_TO_HAVE,
      "recommended": True, "default_status": RUNTIME_NOT_PERSISTED,

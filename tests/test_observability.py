@@ -14,6 +14,10 @@ import pandas as pd
 import pytest
 
 import config
+import scheduler  # noqa: F401 — импорт на этапе collection: scheduler.py строит
+# module-level asyncio.Lock(), которому нужен event loop; asyncio.run() в тестах
+# обнуляет текущий loop (py3.9), поэтому первый импорт scheduler откладывать до
+# рантайма нельзя (иначе get_event_loop() падает при выборочном прогоне).
 from analyzer.outcomes import measure_outcome
 from database import Database
 from signal_engine.forecast_record import build_forecast_record
@@ -279,6 +283,57 @@ def test_outcome_anchor_off_candle_boundary_still_measures_1h():
     assert out["return_1h"] is not None
     assert out["return_4h"] is not None
     assert out["mfe_points"] > 0
+
+
+def test_measure_outcome_sets_realized_r_for_enter_resolved():
+    """Stage 11: ENTER + resolved -> measure_outcome кладёт raw realized_r."""
+    anchor = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
+    fc = {"id": 1, "decision_time": anchor, "analysis_status": "ENTER",
+          "candidate_direction": "long",
+          "executable_price_at_decision": 100_000.0, "signal_close_price": 100_000.0,
+          "stop_loss": 95_000.0, "take_profit_levels": [101_000.0, 106_000.0]}
+    df = _klines(anchor, 80, 100_000.0, step=100.0)  # доходит до TP2
+    out = measure_outcome(fc, df, anchor + timedelta(hours=80), 0.05, 0.03)
+    assert out["tp2_hit"] and out["resolved"]
+    # sign*(tp2-ref)/risk = (106000-100000)/5000 = 1.2, raw (без округления).
+    assert out["realized_r"] == pytest.approx((106_000.0 - 100_000.0) / 5_000.0)
+
+
+def test_measure_outcome_realized_r_none_without_enter_status():
+    """Прогноз без analysis_status ('ENTER') -> realized_r=None (не считаем R
+    для не-ENTER сетапов), но остальной outcome измеряется как раньше."""
+    anchor = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
+    fc = {"id": 2, "decision_time": anchor, "candidate_direction": "long",
+          "executable_price_at_decision": 100_000.0, "signal_close_price": 100_000.0,
+          "stop_loss": 95_000.0, "take_profit_levels": [101_000.0, 106_000.0]}
+    df = _klines(anchor, 80, 100_000.0, step=100.0)
+    out = measure_outcome(fc, df, anchor + timedelta(hours=80), 0.05, 0.03)
+    assert out["resolved"] and out["realized_r"] is None
+
+
+def test_measure_outcome_realized_r_none_when_unresolved():
+    anchor = datetime.now(UTC) - timedelta(hours=2)
+    fc = {"id": 3, "decision_time": anchor, "analysis_status": "ENTER",
+          "candidate_direction": "long", "executable_price_at_decision": 100_000.0,
+          "stop_loss": 90_000.0, "take_profit_levels": [150_000.0, 160_000.0]}
+    df = _klines(anchor, 2, 100_000.0, step=10.0)
+    out = measure_outcome(fc, df, datetime.now(UTC), 0.05, 0.03)
+    assert out["resolved"] is False and out["realized_r"] is None
+
+
+def test_measure_outcome_realized_r_idempotent_and_persists():
+    anchor = datetime(2026, 7, 1, 0, 0, tzinfo=UTC)
+    fc = {"id": 4, "decision_time": anchor, "analysis_status": "ENTER",
+          "candidate_direction": "short", "executable_price_at_decision": 100_000.0,
+          "stop_loss": 103_000.0, "take_profit_levels": [99_000.0, 97_000.0]}
+    df = _klines(anchor, 80, 100_000.0, step=-100.0)
+    now = anchor + timedelta(hours=80)
+    a = measure_outcome(fc, df, now, 0.05, 0.03)
+    b = measure_outcome(fc, df, now, 0.05, 0.03)
+    assert a == b and a["realized_r"] == pytest.approx((97_000.0 - 100_000.0) * -1 / 3_000.0)
+    db = Database(dsn=None)
+    asyncio.run(db.upsert_outcome({**a, "forecast_id": 4}))
+    assert asyncio.run(db.forecast_outcome(4))["realized_r"] == a["realized_r"]
 
 
 def test_run_cascade_blocked_result_carries_snapshot():

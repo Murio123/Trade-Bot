@@ -6,8 +6,14 @@
 > `result` / `ctx["volatility"]["regime"]` / `config.{STRATEGY,CONTEXT}_VERSION`;
 > старые строки остаются NULL; `tools/forecast_metrics.py` получил разрезы
 > `by_market_regime` / `by_volatility_regime` (NULL → `"unknown"`). Отложены:
-> `realized_r`, `context_quality_score`, `data_quality_flags`, sidecar
-> `forecast_context` (см. критерии ниже).
+> `context_quality_score`, `data_quality_flags`, sidecar `forecast_context`
+> (см. критерии ниже).
+>
+> **Stage 11 update (реализовано, Option A без backfill):** добавлена
+> additive-nullable колонка `forecast_outcomes.realized_r DOUBLE PRECISION`;
+> формула — leaf-модуль `analyzer/realized_r.py` (единый источник для producer
+> `analyzer/outcomes.py` и offline `tools/realized_r.py`). Backfill не делается,
+> старые resolved-строки остаются NULL. См. `docs/realized_r_stage10.md` §8.
 
 **Тип этапа:** аудит + фиксация плана (Option B). Read-only.
 

@@ -12,6 +12,8 @@ from typing import Any
 
 import pandas as pd
 
+from analyzer.realized_r import realized_r
+
 # Measured horizons (hours). 72h closes the tracking window: after it the
 # outcome row is final even if neither TP nor stop was ever touched.
 HORIZONS_H = (1, 4, 12, 24, 72)
@@ -97,6 +99,11 @@ def measure_outcome(forecast: dict[str, Any], df: pd.DataFrame,
     out["net_after_costs"] = (
         round(r72 - (2 * taker_fee_pct + slippage_pct), 4)
         if r72 is not None else None)
+    # Per-forecast realized R (raw float, без округления): единый источник —
+    # analyzer.realized_r. Аналитическая колонка, не влияет на решения; None для
+    # не-ENTER / unresolved / неполных уровней. Старые resolved-строки остаются
+    # NULL (backfill не делается — покрытие растёт вперёд).
+    out["realized_r"] = realized_r(forecast, out)
     return out
 
 

@@ -155,6 +155,7 @@ CREATE TABLE IF NOT EXISTS forecast_outcomes (
     tp2_hit         BOOLEAN NOT NULL DEFAULT FALSE,
     stop_hit        BOOLEAN NOT NULL DEFAULT FALSE,
     net_after_costs DOUBLE PRECISION,
+    realized_r      DOUBLE PRECISION,
     resolved        BOOLEAN NOT NULL DEFAULT FALSE,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -182,6 +183,11 @@ ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS market_regime TEXT;
 ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS volatility_regime TEXT;
 ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS strategy_version TEXT;
 ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS context_version TEXT;
+
+-- Stage 11: additive nullable per-forecast realized R on forecast_outcomes.
+-- No backfill — historical resolved rows stay NULL; coverage grows forward as
+-- new forecasts resolve. Pure analytics ledger; never read by any decision.
+ALTER TABLE forecast_outcomes ADD COLUMN IF NOT EXISTS realized_r DOUBLE PRECISION;
 
 -- Indexes matching the hot query paths (cooldown, daily limit, open trades,
 -- active price alerts). IF NOT EXISTS keeps this idempotent.
@@ -593,7 +599,7 @@ _OUTCOME_COLS = [
     "forecast_id", "anchor_time", "reference_price",
     "return_1h", "return_4h", "return_12h", "return_24h", "return_72h",
     "mfe_points", "mae_points", "reached_500", "reached_1500", "reached_3000",
-    "tp1_hit", "tp2_hit", "stop_hit", "net_after_costs", "resolved",
+    "tp1_hit", "tp2_hit", "stop_hit", "net_after_costs", "realized_r", "resolved",
 ]
 
 

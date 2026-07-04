@@ -1,4 +1,8 @@
-"""Stage 10: offline per-forecast realized R calculator (Option B).
+"""Offline per-forecast realized R calculator (Stage 10 CLI, Option B).
+
+Тонкий CLI/summary-слой поверх единой pure-формулы `analyzer.realized_r`
+(Stage 11 вынес её в leaf-модуль, чтобы её же использовал producer
+`analyzer/outcomes.py`; здесь формула НЕ дублируется).
 
 Read-only measurement. НЕ меняет схему БД, `database.py`, outcome-tracking,
 scheduler, pipeline, scoring, risk или Telegram; НЕ пишет в БД; НЕ импортируется
@@ -43,8 +47,9 @@ from collections import Counter
 from typing import Any
 
 import tools.forecast_metrics as fm
+from analyzer.realized_r import ENTER, classify, realized_r  # единый источник формулы
 
-ENTER = "ENTER"
+__all__ = ["classify", "realized_r", "realized_r_summary", "format_report", "main"]
 
 # TP1 mid-case: цена достигла TP1, но не TP2 и не исходного стопа. Флаги
 # outcome не фиксируют касание безубытка (entry) после TP1, поэтому точная
@@ -62,87 +67,6 @@ REF_NOTE = (
     "анализа; отличается от journal entry_price доставленной сделки. Популяция "
     "realized_r шире и не тождественна journal-подмножеству."
 )
-
-
-# ---------------------------------------------------------------------------
-# Pure core
-# ---------------------------------------------------------------------------
-
-def _levels(forecast: dict[str, Any]) -> tuple[float | None, float | None]:
-    tps = forecast.get("take_profit_levels") or []
-    tp1 = float(tps[0]) if len(tps) > 0 and tps[0] else None
-    tp2 = float(tps[1]) if len(tps) > 1 and tps[1] else None
-    return tp1, tp2
-
-
-def _ref(forecast: dict[str, Any], outcome: dict[str, Any] | None) -> float | None:
-    """Якорь-«вход»: reference_price из outcome, иначе та же дефиниция, что в
-    analyzer/outcomes.measure_outcome (executable_price → signal_close)."""
-    if outcome is not None and outcome.get("reference_price") is not None:
-        return float(outcome["reference_price"])
-    ref = (forecast.get("executable_price_at_decision")
-           or forecast.get("signal_close_price"))
-    return float(ref) if ref else None
-
-
-def _mtm(return_72h: Any, ref: float, risk: float) -> float | None:
-    """Mark-to-market R из sign-adjusted %-возврата за 72h."""
-    if return_72h is None:
-        return None
-    return (float(return_72h) / 100.0) * ref / risk
-
-
-def classify(forecast: dict[str, Any],
-             outcome: dict[str, Any] | None) -> tuple[float | None, str]:
-    """Вернуть (realized_r | None, kind). kind описывает выбранную ветку либо
-    причину недоступности (для summary/CLI-разбивки)."""
-    if forecast.get("analysis_status") != ENTER:
-        return None, "none_not_enter"          # WAIT / NO_TRADE / blocked
-    direction = forecast.get("candidate_direction")
-    if direction not in ("long", "short"):
-        return None, "none_no_direction"
-    if outcome is None:
-        return None, "none_no_outcome"
-    if not outcome.get("resolved"):
-        return None, "none_unresolved"          # censored — окно не закрыто
-
-    ref = _ref(forecast, outcome)
-    if ref is None:
-        return None, "none_missing_reference"
-    stop = forecast.get("stop_loss")
-    if stop is None:
-        return None, "none_missing_stop"
-    risk = abs(ref - float(stop))
-    if risk == 0:
-        return None, "none_zero_risk"
-
-    sign = 1.0 if direction == "long" else -1.0
-    tp1, tp2 = _levels(forecast)
-    tp1_hit = bool(outcome.get("tp1_hit"))
-    tp2_hit = bool(outcome.get("tp2_hit"))
-    stop_hit = bool(outcome.get("stop_hit"))
-    r72 = outcome.get("return_72h")
-
-    if stop_hit and not tp1_hit:
-        return -1.0, "loss"
-    if tp2_hit and tp2 is not None:
-        return sign * (tp2 - ref) / risk, "tp2_win"
-    if tp1_hit and stop_hit:
-        return 0.0, "breakeven"
-    if tp1_hit and not tp2_hit and not stop_hit:
-        if tp2 is None and tp1 is not None:
-            return sign * (tp1 - ref) / risk, "tp1_single_win"
-        mtm = _mtm(r72, ref, risk)
-        return (mtm, "mark_to_market") if mtm is not None else (None, "none_no_return72h")
-    # Ни TP, ни стоп (или tp2_hit без сохранённого tp2) — resolved -> MTM.
-    mtm = _mtm(r72, ref, risk)
-    return (mtm, "mark_to_market") if mtm is not None else (None, "none_no_return72h")
-
-
-def realized_r(forecast: dict[str, Any],
-               outcome: dict[str, Any] | None) -> float | None:
-    """Честный per-forecast R или None (см. модульный docstring)."""
-    return classify(forecast, outcome)[0]
 
 
 # ---------------------------------------------------------------------------

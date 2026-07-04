@@ -8,6 +8,7 @@ production-кодом, golden не тронуты, CLI работает на fix
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import json
 import re
@@ -228,15 +229,41 @@ def test_module_does_not_import_database():
     assert "from database" not in src
 
 
-def test_runner_not_imported_by_production():
+def test_offline_tools_not_imported_by_production():
+    """Stage 11: pure-формула переехала в analyzer/realized_r.py и легитимно
+    используется production (analyzer/outcomes.py). Инвариант теперь: offline
+    tools-слой (tools.realized_r / tools.forecast_metrics) НЕ импортируется
+    runtime-кодом — аналитика не попадает в decision-path."""
     skip = {"tests", "tools", ".venv", ".git", "__pycache__", "scratchpad"}
     offenders = []
     for py in REPO.rglob("*.py"):
         if skip & set(py.parts):
             continue
-        if "realized_r" in py.read_text(encoding="utf-8", errors="ignore"):
+        src = py.read_text(encoding="utf-8", errors="ignore")
+        if re.search(r"\b(import\s+tools|from\s+tools)\b", src):
             offenders.append(str(py.relative_to(REPO)))
-    assert not offenders, f"production ссылается на runner: {offenders}"
+    assert not offenders, f"production импортирует offline tools: {offenders}"
+
+
+def test_pure_formula_lives_in_analyzer_leaf_module():
+    """Формула — единый источник в analyzer/realized_r.py; tools/realized_r.py
+    её только реэкспортирует, не дублируя."""
+    import analyzer.realized_r as core
+    assert rr.realized_r is core.realized_r          # тот же объект, без копии
+    assert rr.classify is core.classify
+    # leaf-модуль: реально импортирует только stdlib/typing — никаких database /
+    # tools / analyzer.outcomes (проверяем сами import-узлы, не текст docstring).
+    tree = ast.parse((REPO / "analyzer" / "realized_r.py").read_text(encoding="utf-8"))
+    imported: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            imported.update(a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            imported.add(node.module or "")
+    for mod in imported:
+        top = mod.split(".")[0]
+        assert top not in {"database", "tools"}, f"leaf-модуль импортирует {mod}"
+        assert mod != "analyzer.outcomes", "leaf-модуль импортирует analyzer.outcomes"
 
 
 def _golden_digest() -> str:

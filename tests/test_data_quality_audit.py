@@ -86,7 +86,8 @@ def test_missing_planned_field_detection(report):
     # market_regime считается в runtime, но не персистится в фикстуре.
     assert by["market_regime"]["status"] == dqa.RUNTIME_NOT_PERSISTED
     assert by["strategy_version"]["status"] == dqa.MISSING
-    assert by["realized_r"]["status"] == dqa.NOT_AVAILABLE_YET
+    # Stage 11: realized_r теперь persisted + выводим offline (в фикстуре NULL).
+    assert by["realized_r"]["status"] == dqa.DERIVED_OFFLINE
 
 
 def test_present_planned_field_detection():
