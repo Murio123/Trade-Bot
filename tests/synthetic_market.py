@@ -29,7 +29,7 @@ from signal_engine.profiles import get_profile
 from signal_engine.vetoes import TF_HOURS
 
 TF_MINUTES = {"15m": 15, "1h": 60, "2h": 120, "4h": 240, "6h": 360,
-              "12h": 720, "1d": 1440}
+              "12h": 720, "1d": 1440, "1w": 10080}
 
 
 def _grid_now(tf: str) -> datetime:
@@ -141,3 +141,36 @@ def build_ctx(profile_name: str = "swing", seed: int = 1, drift: float = 0.0,
         "executable_price": round(ind_signal["price"] * 1.0002, 2),
         "executable_price_degraded": False,
     }
+
+
+def _synthetic_oi_hist(seed: int, drift: float, bars: int = 30) -> list[dict]:
+    """Детерминированный ряд открытого интереса (сонаправлен дрейфу цены)."""
+    rng = np.random.default_rng([seed, 999])
+    steps = rng.normal(drift * 0.5, 0.01, bars)
+    values = 1_000_000.0 * np.exp(np.cumsum(steps))
+    return [{"sumOpenInterest": round(float(v), 2)} for v in values]
+
+
+def build_unified_ctx(seed: int = 1, drift: float = 0.0,
+                      vol: float = 0.02) -> dict[str, Any]:
+    """Offline-зеркало gather_unified_swing_context (без сети).
+
+    Собирает production-подобный legacy ctx (build_ctx) и дособирает те же
+    enrichment-данные, что live-builder, через общие чистые функции
+    unified_context (детерминизм golden-снапшота).
+    """
+    from unified_context import build_swing_enrichment, enrich_swing_context
+
+    ctx = build_ctx("swing", seed=seed, drift=drift, vol=vol)
+    dfs = {tf: make_klines(tf, seed=seed, drift=drift, vol=vol)
+           for tf in ("1w", "1d", "12h", "4h", "1h")}
+    oi_hist = _synthetic_oi_hist(seed, drift)
+    correlation = {
+        "verdict": "risk_on" if drift >= 0 else "risk_off",
+        "assets": {"ETH": {"correlation": 0.8,
+                           "trend": "up" if drift >= 0 else "down"}},
+        "supportive": 1, "counted": 1,
+    }
+    enrichment = build_swing_enrichment(dfs, ctx.get("atr"), oi_hist,
+                                        correlation)
+    return enrich_swing_context(ctx, enrichment)

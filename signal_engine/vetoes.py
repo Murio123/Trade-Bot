@@ -25,7 +25,7 @@ FUNDING_Z_EXTREME = 2.0
 DEAD_ZONE_LOW, DEAD_ZONE_HIGH = 0.45, 0.55
 # Canonical timeframe->hours map (pipeline and backtest import it from here).
 TF_HOURS = {"15m": 0.25, "30m": 0.5, "1h": 1.0, "2h": 2.0,
-            "4h": 4.0, "6h": 6.0, "12h": 12.0, "1d": 24.0}
+            "4h": 4.0, "6h": 6.0, "12h": 12.0, "1d": 24.0, "1w": 168.0}
 
 
 def stale_data(last_close_time: Any, timeframe: str,

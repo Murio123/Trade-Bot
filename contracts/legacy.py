@@ -152,11 +152,16 @@ def _technical_from_legacy(ctx: dict[str, Any], profile: dict[str, Any],
     inds_by_tf = ctx.get("inds_by_tf") or {}
     if not inds_by_tf:
         raise ContractError("legacy ctx: inds_by_tf отсутствует")
+    # structure_by_tf — опциональное enrichment (unified swing builder, этап 2).
+    # Без него поведение идентично: structure=None, "technical.structure" в missing.
+    structure_by_tf = ctx.get("structure_by_tf") or {}
     snapshots = {tf: TFSnapshot(tf=tf, role=_tf_role(tf, profile),
                                 indicators=_strip_series(ind),
-                                structure=None, trend=trend_label(ind))
+                                structure=structure_by_tf.get(tf),
+                                trend=trend_label(ind))
                  for tf, ind in sorted(inds_by_tf.items())}
-    missing.add("technical.structure")  # BOS/CHoCH есть только в deep-ctx (этап 2)
+    if not structure_by_tf:
+        missing.add("technical.structure")  # BOS/CHoCH — deep/enriched ctx (этап 2)
     if "1w" not in snapshots:
         missing.add("technical.1w")     # недельный режим — этап 8
     htf_ind = inds_by_tf.get(profile.get("htf"), ctx.get("ind_1d") or {})
@@ -195,10 +200,14 @@ def _volatility_from_legacy(ctx: dict[str, Any], meta: MetaContext,
     price = meta.signal_close_price
     if not vol:
         missing.add("volatility")
+    # volatility_stage2 — опциональное enrichment (unified swing builder, этап 2).
+    # Без него каждое поле = None и остаётся в missing (поведение неизменно).
+    st = ctx.get("volatility_stage2") or {}
     for f in ("realized_volatility", "range_width_atr",
               "candle_expansion_ratio", "compression_score",
               "abnormal_candle", "liquidation_event"):
-        missing.add(f"volatility.{f}")  # источники появятся на этапе 2
+        if st.get(f) is None:
+            missing.add(f"volatility.{f}")  # источник ещё не подключён
     return VolatilityContext(
         meta=BlockMeta(source=_LEGACY_SOURCE, as_of=meta.gathered_at,
                        degraded=not vol),
@@ -206,13 +215,13 @@ def _volatility_from_legacy(ctx: dict[str, Any], meta: MetaContext,
         atr_percent=round(atr / price * 100, 4) if (atr and price) else None,
         atr_percentile=vol.get("atr_percentile"),
         hv_percentile=vol.get("hv_percentile"),
-        realized_volatility=None,
-        range_width_atr=None,
-        candle_expansion_ratio=None,
-        compression_score=None,
+        realized_volatility=st.get("realized_volatility"),
+        range_width_atr=st.get("range_width_atr"),
+        candle_expansion_ratio=st.get("candle_expansion_ratio"),
+        compression_score=st.get("compression_score"),
         abnormal_volatility=abnormal_volatility(vol) if vol else None,
-        abnormal_candle=None,
-        liquidation_event=None,
+        abnormal_candle=st.get("abnormal_candle"),
+        liquidation_event=st.get("liquidation_event"),
         regime=_vol_regime(vol),
         expected_move=vol.get("expected_move") or None)
 
@@ -514,8 +523,13 @@ def _derivatives_from_legacy(ctx: dict[str, Any], meta: MetaContext,
         missing.add("derivatives.funding")
     if "oi_rising" not in ctx:
         missing.add("derivatives.oi_rising")
-    missing.update({"derivatives.basis", "derivatives.oi_change",
-                    "derivatives.price_oi_relation"})  # этап 2
+    missing.add("derivatives.basis")  # basis — этап 2 (не в swing enrichment)
+    # oi_change_pct / price_oi_relation — опциональное enrichment (этап 2);
+    # без них поля None и остаются в missing (поведение неизменно).
+    if ctx.get("oi_change_pct") is None:
+        missing.add("derivatives.oi_change")
+    if ctx.get("price_oi_relation") is None:
+        missing.add("derivatives.price_oi_relation")
     z = funding.get("zscore")
     return DerivativesContext(
         meta=BlockMeta(source=_LEGACY_SOURCE, as_of=meta.gathered_at,
@@ -528,7 +542,9 @@ def _derivatives_from_legacy(ctx: dict[str, Any], meta: MetaContext,
         futures_cvd=ctx.get("cvd"),
         liquidation_map=ctx.get("liquidation_map"),
         sweep_signal=ctx.get("sweep_signal"),
-        overheated=(abs(z) >= FUNDING_Z_EXTREME) if z is not None else None)
+        overheated=(abs(z) >= FUNDING_Z_EXTREME) if z is not None else None,
+        oi_change_pct=ctx.get("oi_change_pct"),
+        price_oi_relation=ctx.get("price_oi_relation"))
 
 
 def _spot_flow_from_legacy(ctx: dict[str, Any], meta: MetaContext,
