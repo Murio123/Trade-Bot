@@ -1,0 +1,1317 @@
+{
+ "final_decision": {
+  "calibrated_confidence": null,
+  "contradiction_score": 0.417,
+  "decision": "WAIT",
+  "direction": "short",
+  "direction_probability": 0.583,
+  "execution_quality": 0.914,
+  "forecast_id": null,
+  "gates": [
+   {
+    "detail": null,
+    "name": "stale_data",
+    "passed": true
+   },
+   {
+    "detail": null,
+    "name": "abnormal_volatility",
+    "passed": true
+   },
+   {
+    "detail": null,
+    "name": "direction_conflict",
+    "passed": true
+   },
+   {
+    "detail": null,
+    "name": "htf_filter",
+    "passed": true
+   },
+   {
+    "detail": null,
+    "name": "diversity",
+    "passed": true
+   },
+   {
+    "detail": null,
+    "name": "below_threshold",
+    "passed": true
+   },
+   {
+    "detail": null,
+    "name": "dead_zone",
+    "passed": true
+   },
+   {
+    "detail": null,
+    "name": "crowded_funding",
+    "passed": true
+   },
+   {
+    "detail": null,
+    "name": "wait_for_sweep",
+    "passed": true
+   },
+   {
+    "detail": null,
+    "name": "no_trade",
+    "passed": true
+   },
+   {
+    "detail": null,
+    "name": "cooldown",
+    "passed": true
+   },
+   {
+    "detail": "score 5.6 ниже порога алерта 8",
+    "name": "alert_threshold",
+    "passed": false
+   }
+  ],
+  "invalidation_note": "закрытие свечи за ATR-стопом",
+  "main_risk": null,
+  "meta": {
+   "analysis_type": "SWING",
+   "decision_time": "<TS>",
+   "engine": "legacy_v1",
+   "engine_version": "0.1.0",
+   "entry_timeframe": "4h",
+   "executable_price": 69481.75,
+   "executable_price_degraded": false,
+   "gathered_at": "<TS>",
+   "prompt_version": "2026-07-obs-1",
+   "signal_candle_close_time": "<TS>",
+   "signal_close_price": 69467.85428,
+   "symbol": "BTCUSDT"
+  },
+  "mode": "SWING",
+  "reasons": [
+   "Медвежья дивергенция RSI/MACD",
+   "EMA медвежий порядок",
+   "CVD на стороне продавцов"
+  ],
+  "scenario": {
+   "direction": "short",
+   "entry_zone": [
+    69299.47,
+    69636.24
+   ],
+   "expected_move_atr": 4.9,
+   "expected_move_points": 3299.58,
+   "risk_reward": 14.81,
+   "setup_type": "continuation",
+   "stop": {
+    "atr_distance": 1.826,
+    "pct_distance": 1.7706,
+    "price": 70697.88,
+    "provenance": "atr",
+    "tf": null
+   },
+   "tp1": {
+    "atr_distance": 24.065,
+    "pct_distance": 23.3326,
+    "price": 53259.2,
+    "provenance": "structural",
+    "tf": null
+   },
+   "tp2": {
+    "atr_distance": 27.038,
+    "pct_distance": 26.215,
+    "price": 51256.89,
+    "provenance": "structural",
+    "tf": null
+   }
+  },
+  "setup_quality": 0.56,
+  "vetoes_triggered": [
+   "alert_threshold"
+  ],
+  "warnings": []
+ },
+ "legacy_result": {
+  "analysis_status": "WAIT",
+  "analysis_type": "SWING",
+  "atr": 673.524894,
+  "atr_multiplier_used": 1.5,
+  "calibrated_confidence": null,
+  "cancel_conditions": [
+   "закрытие свечи за ATR-стопом",
+   "сценарий отменяется при смене рыночного режима"
+  ],
+  "candidate_direction": "short",
+  "category_scores": {
+   "macro": 0,
+   "momentum": 2,
+   "structure": 0,
+   "trend": 2,
+   "volume": 1
+  },
+  "confidence": 0.416,
+  "confidence_modifier": 1.05,
+  "confidence_score": 42,
+  "confirmation_conditions": [
+   "вход в зоне 69299.47–69636.24",
+   "свеча entry-ТФ закрывается в направлении сделки"
+  ],
+  "confirming_factors": [
+   "Медвежья дивергенция RSI/MACD",
+   "EMA медвежий порядок",
+   "CVD на стороне продавцов"
+  ],
+  "conflict_factor": 0.708,
+  "contradicting_factors": [
+   "MACD бычий кроссовер",
+   "Вход в дисконте (ниже равновесия)"
+  ],
+  "counter_score": 4.0,
+  "data_freshness_seconds": 120.0,
+  "decision_latency_seconds": null,
+  "decision_time": "<TS>",
+  "deliverable": false,
+  "direction": "short",
+  "entry_price": 69467.85428,
+  "entry_trigger": "закрытие свечи entry-ТФ в направлении сделки внутри entry-зоны",
+  "entry_zone": {
+   "high": 69636.24,
+   "low": 69299.47
+  },
+  "executable_price_at_decision": 69481.75,
+  "executable_price_degraded": false,
+  "expected_holding_period": "1 день – 3 недели",
+  "expected_move_atr": 4.9,
+  "expected_move_percent": 4.75,
+  "expected_move_points": 3299.58,
+  "expected_risk_reward": 14.81,
+  "final_bias": "SHORT",
+  "forecast_horizon": "1-14 дней",
+  "freshness_timestamp": "<TS>",
+  "funding_value": null,
+  "hold_tp1_hours": 192.5,
+  "hold_tp2_hours": 216.3,
+  "htf_bias": "bearish",
+  "htf_tf": "1d",
+  "invalidation_level": 70697.88,
+  "long_score": 4.0,
+  "market_regime": "trend_down",
+  "mtf": {
+   "12h": "bearish",
+   "1d": "bearish",
+   "1h": "bullish",
+   "4h": "bearish"
+  },
+  "mtf_agreement": {
+   "agree": 3,
+   "ratio": 0.75,
+   "total": 4
+  },
+  "no_trade_reasons": [],
+  "position_size": 0.0813,
+  "price": 69467.85428,
+  "primary_bias": "SHORT",
+  "raw_confidence": 0.416,
+  "reasons": [
+   "Медвежья дивергенция RSI/MACD",
+   "EMA медвежий порядок",
+   "CVD на стороне продавцов"
+  ],
+  "risk_amount": 100.0,
+  "risk_reward": 14.81,
+  "score": 6,
+  "score_weighted": 5.6,
+  "session_best": "<TIME-DEPENDENT>",
+  "sessions": "<TIME-DEPENDENT>",
+  "setup_type": "Медвежья дивергенция RSI/MACD",
+  "short_score": 5.6,
+  "signal_candle_close_time": "<TS>",
+  "signal_close_price": 69467.85428,
+  "status": "journal",
+  "stop_atr_tf": "12h",
+  "stop_basis": "atr",
+  "stop_loss": 70697.88,
+  "style": "swing",
+  "style_emoji": "📊",
+  "style_label": "СВИНГ",
+  "symbol": "BTCUSDT",
+  "take_profit_levels": [
+   53259.2,
+   51256.89
+  ],
+  "target_1": 53259.2,
+  "target_2": 51256.89,
+  "targets_structure": true,
+  "timeframe": "4h",
+  "timeframe_alignment": {
+   "agree": 3,
+   "ratio": 0.75,
+   "total": 4,
+   "trends": {
+    "12h": "bearish",
+    "1d": "bearish",
+    "1h": "bullish",
+    "4h": "bearish"
+   }
+  },
+  "timestamp": "<TS>",
+  "tp2_source": "structural"
+ },
+ "scenario": {
+  "drift": -0.006,
+  "name": "downtrend_signal",
+  "seed": 1,
+  "vol": 0.015
+ },
+ "unified_context": {
+  "data_quality": {
+   "data_freshness_seconds": 120.0,
+   "decision_latency_seconds": null,
+   "executable_price_degraded": false,
+   "freshness_by_tf": {
+    "4h": 120.0
+   },
+   "meta": {
+    "as_of": "<TS>",
+    "degraded": false,
+    "freshness_seconds": 120.0,
+    "source": "legacy_ctx"
+   },
+   "missing_blocks": [
+    "derivatives.basis",
+    "derivatives.funding",
+    "derivatives.oi_change",
+    "derivatives.oi_rising",
+    "derivatives.price_oi_relation",
+    "intermarket",
+    "macro",
+    "macro.dxy",
+    "macro.events",
+    "news",
+    "reversal.invalidation",
+    "reversal.probability",
+    "reversal.structure_shift",
+    "spot_flow.exchange_netflow",
+    "spot_flow.spot_cvd",
+    "spot_flow.spot_led",
+    "spot_flow.taker_imbalance",
+    "technical.1w",
+    "technical.structure",
+    "volatility.abnormal_candle",
+    "volatility.candle_expansion_ratio",
+    "volatility.compression_score",
+    "volatility.liquidation_event",
+    "volatility.range_width_atr",
+    "volatility.realized_volatility"
+   ],
+   "stale": false
+  },
+  "derivatives": {
+   "basis": null,
+   "funding": null,
+   "funding_zscore": null,
+   "futures_cvd": {
+    "cvd": -590.680596,
+    "cvd_bearish": true,
+    "cvd_bullish": false,
+    "last_delta": 115.298758,
+    "method": "estimate"
+   },
+   "liquidation_map": null,
+   "long_short_ratio": null,
+   "meta": {
+    "as_of": "<TS>",
+    "degraded": true,
+    "freshness_seconds": null,
+    "source": "legacy_ctx"
+   },
+   "oi_change_pct": null,
+   "oi_rising": null,
+   "open_interest": null,
+   "overheated": null,
+   "price_oi_relation": null,
+   "sweep_signal": null
+  },
+  "intermarket": {
+   "correlations": null,
+   "meta": {
+    "as_of": "<TS>",
+    "degraded": true,
+    "freshness_seconds": null,
+    "source": "legacy_ctx"
+   },
+   "nasdaq_trend": null,
+   "verdict": null,
+   "vix": null
+  },
+  "levels": {
+   "clusters": [
+    {
+     "hi": 16274.47,
+     "kind": "support",
+     "lo": 16274.47,
+     "sources": [
+      "ema50"
+     ],
+     "strength": 0.25,
+     "tfs": [
+      "1d"
+     ]
+    },
+    {
+     "hi": 30970.86,
+     "kind": "support",
+     "lo": 30970.86,
+     "sources": [
+      "ema200"
+     ],
+     "strength": 0.25,
+     "tfs": [
+      "1d"
+     ]
+    },
+    {
+     "hi": 46762.41,
+     "kind": "support",
+     "lo": 46762.41,
+     "sources": [
+      "htf_level_low"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 47033.44,
+     "kind": "support",
+     "lo": 47022.28,
+     "sources": [
+      "htf_level_low",
+      "val"
+     ],
+     "strength": 0.5,
+     "tfs": []
+    },
+    {
+     "hi": 47780.89,
+     "kind": "support",
+     "lo": 47697.77,
+     "sources": [
+      "fvg_bearish"
+     ],
+     "strength": 0.25,
+     "tfs": [
+      "12h"
+     ]
+    },
+    {
+     "hi": 48722.45,
+     "kind": "support",
+     "lo": 48249.04,
+     "sources": [
+      "fvg_bearish"
+     ],
+     "strength": 0.25,
+     "tfs": [
+      "12h"
+     ]
+    },
+    {
+     "hi": 49468.78,
+     "kind": "support",
+     "lo": 48946.75,
+     "sources": [
+      "fvg_bearish"
+     ],
+     "strength": 0.25,
+     "tfs": [
+      "12h"
+     ]
+    },
+    {
+     "hi": 49864.93,
+     "kind": "support",
+     "lo": 49719.26,
+     "sources": [
+      "fvg_bearish",
+      "htf_level_low"
+     ],
+     "strength": 0.5,
+     "tfs": [
+      "12h"
+     ]
+    },
+    {
+     "hi": 50411.71,
+     "kind": "support",
+     "lo": 50411.71,
+     "sources": [
+      "htf_level_low"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 50946.85,
+     "kind": "support",
+     "lo": 50946.85,
+     "sources": [
+      "htf_level_low"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 51256.89,
+     "kind": "support",
+     "lo": 51256.89,
+     "sources": [
+      "htf_level_low"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 51846.84,
+     "kind": "support",
+     "lo": 51846.84,
+     "sources": [
+      "htf_level_high"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 53949.33,
+     "kind": "support",
+     "lo": 52368.27,
+     "sources": [
+      "fvg_bearish",
+      "htf_level_high",
+      "ob_bearish",
+      "ob_bullish",
+      "poc"
+     ],
+     "strength": 1.0,
+     "tfs": [
+      "12h"
+     ]
+    },
+    {
+     "hi": 54285.2,
+     "kind": "support",
+     "lo": 54285.2,
+     "sources": [
+      "htf_level_high"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 55776.8,
+     "kind": "support",
+     "lo": 55091.85,
+     "sources": [
+      "ob_bearish"
+     ],
+     "strength": 0.25,
+     "tfs": [
+      "12h"
+     ]
+    },
+    {
+     "hi": 58906.2,
+     "kind": "support",
+     "lo": 58605.23,
+     "sources": [
+      "ob_bearish"
+     ],
+     "strength": 0.25,
+     "tfs": [
+      "12h"
+     ]
+    },
+    {
+     "hi": 61300.03,
+     "kind": "support",
+     "lo": 59918.03,
+     "sources": [
+      "ob_bearish"
+     ],
+     "strength": 0.25,
+     "tfs": [
+      "12h"
+     ]
+    },
+    {
+     "hi": 63134.33,
+     "kind": "support",
+     "lo": 63134.33,
+     "sources": [
+      "vah"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 68423.02,
+     "kind": "support",
+     "lo": 68423.02,
+     "sources": [
+      "equal_lows"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 68907.6,
+     "kind": "support",
+     "lo": 68907.6,
+     "sources": [
+      "equal_lows"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 69589.72,
+     "kind": "resistance",
+     "lo": 69589.72,
+     "sources": [
+      "equal_lows"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 70525.45,
+     "kind": "resistance",
+     "lo": 70525.45,
+     "sources": [
+      "equal_lows"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 71361.03,
+     "kind": "resistance",
+     "lo": 71361.03,
+     "sources": [
+      "ema50"
+     ],
+     "strength": 0.25,
+     "tfs": [
+      "4h"
+     ]
+    },
+    {
+     "hi": 71542.05,
+     "kind": "resistance",
+     "lo": 71542.05,
+     "sources": [
+      "equal_lows"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 73239.58,
+     "kind": "resistance",
+     "lo": 73239.58,
+     "sources": [
+      "equal_highs"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 73799.43,
+     "kind": "resistance",
+     "lo": 73799.43,
+     "sources": [
+      "equal_highs"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 74346.77,
+     "kind": "resistance",
+     "lo": 74346.77,
+     "sources": [
+      "equal_highs"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 74631.37,
+     "kind": "resistance",
+     "lo": 74631.37,
+     "sources": [
+      "equal_highs"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 74937.36,
+     "kind": "resistance",
+     "lo": 74937.36,
+     "sources": [
+      "equal_highs"
+     ],
+     "strength": 0.25,
+     "tfs": []
+    },
+    {
+     "hi": 75884.2,
+     "kind": "resistance",
+     "lo": 75884.2,
+     "sources": [
+      "ema200"
+     ],
+     "strength": 0.25,
+     "tfs": [
+      "4h"
+     ]
+    }
+   ],
+   "distance_to_invalidation_atr": 24.225,
+   "distance_to_next_target_atr": 9.404,
+   "entry_zone_candidates": [],
+   "invalidation_candidates": [
+    {
+     "atr_distance": 24.225,
+     "pct_distance": 23.4869,
+     "price": 53152.006262,
+     "provenance": "ob_edge",
+     "tf": "12h"
+    },
+    {
+     "atr_distance": 27.038,
+     "pct_distance": 26.215,
+     "price": 51256.89,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 27.499,
+     "pct_distance": 26.6613,
+     "price": 50946.85,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 28.293,
+     "pct_distance": 27.4316,
+     "price": 50411.71,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 29.321,
+     "pct_distance": 28.4284,
+     "price": 49719.26,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 33.309,
+     "pct_distance": 32.2947,
+     "price": 47033.44,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 33.711,
+     "pct_distance": 32.6848,
+     "price": 46762.41,
+     "provenance": "structural",
+     "tf": null
+    }
+   ],
+   "liquidity_above": [
+    {
+     "atr_distance": 8.121,
+     "pct_distance": 7.8734,
+     "price": 74937.359455,
+     "provenance": "liquidity",
+     "tf": null
+    },
+    {
+     "atr_distance": 7.666,
+     "pct_distance": 7.433,
+     "price": 74631.374273,
+     "provenance": "liquidity",
+     "tf": null
+    },
+    {
+     "atr_distance": 7.244,
+     "pct_distance": 7.0233,
+     "price": 74346.768561,
+     "provenance": "liquidity",
+     "tf": null
+    },
+    {
+     "atr_distance": 6.431,
+     "pct_distance": 6.2354,
+     "price": 73799.425136,
+     "provenance": "liquidity",
+     "tf": null
+    },
+    {
+     "atr_distance": 5.6,
+     "pct_distance": 5.4295,
+     "price": 73239.582342,
+     "provenance": "liquidity",
+     "tf": null
+    }
+   ],
+   "liquidity_below": [
+    {
+     "atr_distance": 1.551,
+     "pct_distance": 1.504,
+     "price": 68423.024406,
+     "provenance": "liquidity",
+     "tf": null
+    },
+    {
+     "atr_distance": 0.832,
+     "pct_distance": 0.8065,
+     "price": 68907.603651,
+     "provenance": "liquidity",
+     "tf": null
+    }
+   ],
+   "meta": {
+    "as_of": "<TS>",
+    "degraded": false,
+    "freshness_seconds": null,
+    "source": "legacy_ctx"
+   },
+   "nearest_resistance": {
+    "hi": 69589.72,
+    "kind": "resistance",
+    "lo": 69589.72,
+    "sources": [
+     "equal_lows"
+    ],
+    "strength": 0.25,
+    "tfs": []
+   },
+   "nearest_support": {
+    "hi": 68907.6,
+    "kind": "support",
+    "lo": 68907.6,
+    "sources": [
+     "equal_lows"
+    ],
+    "strength": 0.25,
+    "tfs": []
+   },
+   "range_position": {
+    "eq": 16125.15,
+    "high": 18991.34,
+    "low": 13258.96,
+    "pos": 0.02,
+    "zone": "discount"
+   },
+   "stop_candidates": [
+    {
+     "atr_distance": 24.225,
+     "pct_distance": 23.4869,
+     "price": 53152.006262,
+     "provenance": "ob_edge",
+     "tf": "12h"
+    },
+    {
+     "atr_distance": 27.038,
+     "pct_distance": 26.215,
+     "price": 51256.89,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 27.499,
+     "pct_distance": 26.6613,
+     "price": 50946.85,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 28.293,
+     "pct_distance": 27.4316,
+     "price": 50411.71,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 29.321,
+     "pct_distance": 28.4284,
+     "price": 49719.26,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 33.309,
+     "pct_distance": 32.2947,
+     "price": 47033.44,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 33.711,
+     "pct_distance": 32.6848,
+     "price": 46762.41,
+     "provenance": "structural",
+     "tf": null
+    }
+   ],
+   "tp_candidates": [
+    {
+     "atr_distance": 9.404,
+     "pct_distance": 9.1172,
+     "price": 63134.33,
+     "provenance": "volume_profile",
+     "tf": null
+    },
+    {
+     "atr_distance": 24.065,
+     "pct_distance": 23.3326,
+     "price": 53259.2,
+     "provenance": "volume_profile",
+     "tf": null
+    },
+    {
+     "atr_distance": 27.038,
+     "pct_distance": 26.215,
+     "price": 51256.89,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 27.499,
+     "pct_distance": 26.6613,
+     "price": 50946.85,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 28.293,
+     "pct_distance": 27.4316,
+     "price": 50411.71,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 29.321,
+     "pct_distance": 28.4284,
+     "price": 49719.26,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 33.309,
+     "pct_distance": 32.2947,
+     "price": 47033.44,
+     "provenance": "structural",
+     "tf": null
+    },
+    {
+     "atr_distance": 33.326,
+     "pct_distance": 32.3107,
+     "price": 47022.28,
+     "provenance": "volume_profile",
+     "tf": null
+    },
+    {
+     "atr_distance": 33.711,
+     "pct_distance": 32.6848,
+     "price": 46762.41,
+     "provenance": "structural",
+     "tf": null
+    }
+   ]
+  },
+  "macro": {
+   "dxy": null,
+   "event_risk_window": null,
+   "historical_regime": null,
+   "meta": {
+    "as_of": "<TS>",
+    "degraded": true,
+    "freshness_seconds": null,
+    "source": "legacy_ctx"
+   },
+   "released_events": [],
+   "upcoming_events": [],
+   "us10y": null,
+   "us10y_trend": null
+  },
+  "meta": {
+   "analysis_type": "SWING",
+   "decision_time": "<TS>",
+   "engine": "legacy_v1",
+   "engine_version": "0.1.0",
+   "entry_timeframe": "4h",
+   "executable_price": 69481.75,
+   "executable_price_degraded": false,
+   "gathered_at": "<TS>",
+   "prompt_version": "2026-07-obs-1",
+   "signal_candle_close_time": "<TS>",
+   "signal_close_price": 69467.85428,
+   "symbol": "BTCUSDT"
+  },
+  "news": {
+   "aggregate_sentiment": null,
+   "breaking_news_risk": null,
+   "event_risk": null,
+   "fear_greed": null,
+   "items": [],
+   "meta": {
+    "as_of": "<TS>",
+    "degraded": true,
+    "freshness_seconds": null,
+    "source": "legacy_ctx"
+   }
+  },
+  "reversal": {
+   "bear_tf_count": 0,
+   "bull_tf_count": 0,
+   "candle_confirmed": null,
+   "combined_side": null,
+   "effect": "neutral",
+   "invalidation": null,
+   "meta": {
+    "as_of": "<TS>",
+    "degraded": false,
+    "freshness_seconds": null,
+    "source": "legacy_ctx"
+   },
+   "per_tf": {
+    "12h": {
+     "bear_factors": [],
+     "bear_score": 0,
+     "bearish": false,
+     "bull_factors": [
+      "StochRSI разворот из перепроданности",
+      "CVD-дивергенция — поглощение покупателем"
+     ],
+     "bull_score": 2,
+     "bullish": false,
+     "confirmed_side": null,
+     "strong": false,
+     "tf": "12h"
+    },
+    "1d": {
+     "bear_factors": [],
+     "bear_score": 0,
+     "bearish": false,
+     "bull_factors": [
+      "StochRSI разворот из перепроданности"
+     ],
+     "bull_score": 1,
+     "bullish": false,
+     "confirmed_side": null,
+     "strong": false,
+     "tf": "1d"
+    },
+    "1h": {
+     "bear_factors": [
+      "StochRSI разворот из перекупленности",
+      "Свип максимума — стоп-хант и возврат"
+     ],
+     "bear_score": 2,
+     "bearish": false,
+     "bull_factors": [],
+     "bull_score": 0,
+     "bullish": false,
+     "confirmed_side": null,
+     "strong": false,
+     "tf": "1h"
+    },
+    "4h": {
+     "bear_factors": [
+      "RSI-дивергенция — максимум без импульса"
+     ],
+     "bear_score": 1,
+     "bearish": false,
+     "bull_factors": [],
+     "bull_score": 0,
+     "bullish": false,
+     "confirmed_side": null,
+     "strong": false,
+     "tf": "4h"
+    }
+   },
+   "reversal_probability": null,
+   "structure_shift_confirmed": null,
+   "tf_count": 0,
+   "trend_alignment": null
+  },
+  "spot_flow": {
+   "exchange_netflow": null,
+   "meta": {
+    "as_of": "<TS>",
+    "degraded": true,
+    "freshness_seconds": null,
+    "source": "legacy_ctx"
+   },
+   "spot_cvd": null,
+   "spot_led": null,
+   "spot_volume": null,
+   "taker_imbalance": null
+  },
+  "technical": {
+   "divergence": {
+    "bearish_divergence": true,
+    "bullish_divergence": false,
+    "macd": {
+     "bearish_divergence": false,
+     "bullish_divergence": false,
+     "detail": null
+    },
+    "rsi": {
+     "bearish_divergence": true,
+     "bullish_divergence": false,
+     "detail": "price higher-high vs oscillator lower-high"
+    }
+   },
+   "equilibrium": {
+    "eq": 16125.15,
+    "high": 18991.34,
+    "low": 13258.96,
+    "pos": 0.02,
+    "zone": "discount"
+   },
+   "htf_bias": "bearish",
+   "market_regime": "trend_down",
+   "meta": {
+    "as_of": "<TS>",
+    "degraded": false,
+    "freshness_seconds": null,
+    "source": "legacy_ctx"
+   },
+   "sessions": "<TIME-DEPENDENT>",
+   "snapshots": {
+    "12h": {
+     "indicators": {
+      "atr": 820.016508,
+      "avg_volume": 80.419294,
+      "bb_breakout_down": false,
+      "bb_breakout_up": false,
+      "bb_expansion": true,
+      "bb_lower": 46643.786548,
+      "bb_mid": 50046.761827,
+      "bb_squeeze": false,
+      "bb_upper": 53449.737107,
+      "bbw": 0.135992,
+      "bbw_avg": 0.060009,
+      "ema100": 53946.638408,
+      "ema20": 49618.695484,
+      "ema200": 59934.045062,
+      "ema50": 51394.910638,
+      "ema_aligned_bearish": true,
+      "ema_aligned_bullish": false,
+      "macd": -1341.896697,
+      "macd_bearish_cross": false,
+      "macd_bullish_cross": false,
+      "macd_hist": -357.758248,
+      "macd_hist_prev": -360.447736,
+      "macd_signal": -984.138449,
+      "price": 46834.799823,
+      "price_above_vwap": false,
+      "price_below_vwap": true,
+      "rsi": 19.532098,
+      "rsi_prev": 21.931585,
+      "stochrsi_bear_turn": false,
+      "stochrsi_bull_turn": true,
+      "stochrsi_k": 4.033281,
+      "tsi": -47.082654,
+      "tsi_bearish": true,
+      "tsi_bullish": false,
+      "tsi_signal": -30.681385,
+      "volume": 62.813125,
+      "vwap": 66626.774652
+     },
+     "role": "phase",
+     "structure": null,
+     "tf": "12h",
+     "trend": "bearish"
+    },
+    "1d": {
+     "indicators": {
+      "atr": 343.002018,
+      "avg_volume": 105.057036,
+      "bb_breakout_down": false,
+      "bb_breakout_up": false,
+      "bb_expansion": false,
+      "bb_lower": 13144.406168,
+      "bb_mid": 14792.349587,
+      "bb_squeeze": false,
+      "bb_upper": 16440.293007,
+      "bbw": 0.22281,
+      "bbw_avg": 0.198283,
+      "ema100": 20329.863663,
+      "ema20": 14601.969616,
+      "ema200": 30970.860286,
+      "ema50": 16274.470448,
+      "ema_aligned_bearish": true,
+      "ema_aligned_bullish": false,
+      "macd": -729.593979,
+      "macd_bearish_cross": false,
+      "macd_bullish_cross": false,
+      "macd_hist": -94.692719,
+      "macd_hist_prev": -96.728971,
+      "macd_signal": -634.90126,
+      "price": 13383.856996,
+      "price_above_vwap": false,
+      "price_below_vwap": true,
+      "rsi": 21.160477,
+      "rsi_prev": 22.978627,
+      "stochrsi_bear_turn": false,
+      "stochrsi_bull_turn": true,
+      "stochrsi_k": 4.151287,
+      "tsi": -47.386804,
+      "tsi_bearish": true,
+      "tsi_bullish": false,
+      "tsi_signal": -39.638807,
+      "volume": 74.311231,
+      "vwap": 44624.683295
+     },
+     "role": "bias",
+     "structure": null,
+     "tf": "1d",
+     "trend": "bearish"
+    },
+    "1h": {
+     "indicators": {
+      "atr": 383.913754,
+      "avg_volume": 97.689027,
+      "bb_breakout_down": false,
+      "bb_breakout_up": false,
+      "bb_expansion": false,
+      "bb_lower": 96227.705746,
+      "bb_mid": 97136.793716,
+      "bb_squeeze": false,
+      "bb_upper": 98045.881685,
+      "bbw": 0.018718,
+      "bbw_avg": 0.029814,
+      "ema100": 96254.62897,
+      "ema20": 97185.000915,
+      "ema200": 96661.371714,
+      "ema50": 96491.193413,
+      "ema_aligned_bearish": false,
+      "ema_aligned_bullish": false,
+      "macd": 443.137876,
+      "macd_bearish_cross": false,
+      "macd_bullish_cross": false,
+      "macd_hist": 12.548413,
+      "macd_hist_prev": 17.249891,
+      "macd_signal": 430.589463,
+      "price": 97776.648708,
+      "price_above_vwap": true,
+      "price_below_vwap": false,
+      "rsi": 66.991211,
+      "rsi_prev": 66.821589,
+      "stochrsi_bear_turn": true,
+      "stochrsi_bull_turn": false,
+      "stochrsi_k": 77.559268,
+      "tsi": 29.538701,
+      "tsi_bearish": false,
+      "tsi_bullish": true,
+      "tsi_signal": 26.127287,
+      "volume": 113.502861,
+      "vwap": 97479.998932
+     },
+     "role": "execution",
+     "structure": null,
+     "tf": "1h",
+     "trend": "bullish"
+    },
+    "4h": {
+     "indicators": {
+      "atr": 673.524894,
+      "avg_volume": 117.244318,
+      "bb_breakout_down": false,
+      "bb_breakout_up": false,
+      "bb_expansion": false,
+      "bb_lower": 68184.775565,
+      "bb_mid": 69697.220647,
+      "bb_squeeze": false,
+      "bb_upper": 71209.665729,
+      "bbw": 0.0434,
+      "bbw_avg": 0.048258,
+      "ema100": 72734.293837,
+      "ema20": 69891.713251,
+      "ema200": 75884.198495,
+      "ema50": 71361.034238,
+      "ema_aligned_bearish": true,
+      "ema_aligned_bullish": false,
+      "macd": -959.9155,
+      "macd_bearish_cross": false,
+      "macd_bullish_cross": true,
+      "macd_hist": 52.733201,
+      "macd_hist_prev": -25.393553,
+      "macd_signal": -1012.648701,
+      "price": 69467.85428,
+      "price_above_vwap": false,
+      "price_below_vwap": true,
+      "rsi": 42.17309,
+      "rsi_prev": 32.324119,
+      "stochrsi_bear_turn": false,
+      "stochrsi_bull_turn": false,
+      "stochrsi_k": 82.29766,
+      "tsi": -32.921786,
+      "tsi_bearish": false,
+      "tsi_bullish": true,
+      "tsi_signal": -33.161263,
+      "volume": 119.065035,
+      "vwap": 79124.690249
+     },
+     "role": "setup",
+     "structure": null,
+     "tf": "4h",
+     "trend": "bearish"
+    }
+   }
+  },
+  "volatility": {
+   "abnormal_candle": null,
+   "abnormal_volatility": false,
+   "atr": 673.524894,
+   "atr_percent": 0.9695,
+   "atr_percentile": 28.6,
+   "candle_expansion_ratio": null,
+   "compression_score": null,
+   "expected_move": {
+    "14d": {
+     "abs": 6173.0,
+     "pct": 8.89
+    },
+    "24h": {
+     "abs": 1650.0,
+     "pct": 2.37
+    },
+    "3d": {
+     "abs": 2858.0,
+     "pct": 4.11
+    },
+    "7d": {
+     "abs": 4365.0,
+     "pct": 6.28
+    }
+   },
+   "hv_percentile": 92.9,
+   "liquidation_event": null,
+   "meta": {
+    "as_of": "<TS>",
+    "degraded": false,
+    "freshness_seconds": null,
+    "source": "legacy_ctx"
+   },
+   "range_width_atr": null,
+   "realized_volatility": null,
+   "regime": "normal"
+  }
+ }
+}
