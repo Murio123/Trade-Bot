@@ -23,7 +23,7 @@ STOOQ_BASE = "https://stooq.com/q/d/l/"
 # Asset -> (stooq symbol, "is BTC-bullish when this rises?")
 MACRO_ASSETS = {
     "DXY": ("dx.f", False),
-    "US10Y": ("10usy.b", False),
+    "US10Y": ("10yusy.b", False),  # тикер Stooq для US 10Y ("10usy.b" — 404)
     "Gold": ("xauusd", True),
     "SPX": ("^spx", True),
     "NASDAQ": ("^ndq", True),
