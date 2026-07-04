@@ -265,6 +265,11 @@ def bucket_metrics(forecasts: list[dict[str, Any]],
             joined, lambda f: _bucket_label(_top_score(f), SCORE_EDGES)),
         "by_freshness_bucket": bucket_by(
             joined, lambda f: _bucket_label(f.get("data_freshness_seconds"), FRESHNESS_EDGES)),
+        # Stage 9 regime analytics: NULL/None regime falls into "unknown".
+        "by_market_regime": bucket_by(
+            joined, lambda f: f.get("market_regime") or "unknown"),
+        "by_volatility_regime": bucket_by(
+            joined, lambda f: f.get("volatility_regime") or "unknown"),
         "by_weekday_hour": bucket_by(joined, _weekday_hour),
         "by_blocked_gate": {
             k: v["n"] for k, v in
@@ -376,8 +381,6 @@ def execution_metrics(forecasts: list[dict[str, Any]],
 # ---------------------------------------------------------------------------
 
 MISSING_DATA: tuple[tuple[str, str], ...] = (
-    ("market_regime bucket", "market_regime не персистится в forecasts — нужна schema-extension (Stage 7/C)"),
-    ("volatility_regime bucket", "режим волатильности не сохраняется — только expected_move_atr"),
     ("calibrated_confidence metrics", "forecasts.calibrated_confidence всегда NULL (будущая калибровка)"),
     ("TP3 metrics", "третий тейк нигде не хранится — только tp1/tp2"),
     ("honest per-forecast R", "forecast_outcomes хранит % за горизонт, не clean R; R доступен только в trades_journal"),
@@ -463,7 +466,8 @@ _SQL_FORECASTS = (
     "blocked_gate, long_score, short_score, raw_confidence, expected_move_points, "
     "expected_move_percent, expected_move_atr, signal_close_price, "
     "executable_price_at_decision, stop_loss, take_profit_levels, tp2_source, "
-    "risk_reward, data_freshness_seconds, decision_latency_seconds, decision_time "
+    "risk_reward, data_freshness_seconds, decision_latency_seconds, "
+    "market_regime, volatility_regime, decision_time "
     "FROM forecasts WHERE symbol = $1"
 )
 _SQL_OUTCOMES = (

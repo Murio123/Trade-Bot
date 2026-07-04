@@ -125,6 +125,11 @@ CREATE TABLE IF NOT EXISTS forecasts (
     no_trade_reasons            JSONB,
     prompt_version              TEXT,
     model_version               TEXT,
+    -- Stage 9 analytics metadata (nullable, never used in trading decisions).
+    market_regime               TEXT,
+    volatility_regime           TEXT,
+    strategy_version            TEXT,
+    context_version             TEXT,
     signal_id                   BIGINT REFERENCES signals(id) ON DELETE SET NULL,
     UNIQUE (symbol, analysis_type, signal_candle_close_time)
 );
@@ -169,6 +174,14 @@ ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS symbol TEXT;
 -- keep NULL (historical, from before the modes were separated).
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS analysis_type TEXT;
 ALTER TABLE trades_journal ADD COLUMN IF NOT EXISTS analysis_type TEXT;
+
+-- Stage 9: additive analytics metadata on forecasts. All nullable, no defaults,
+-- no backfill — old rows stay NULL and read back as "unknown" in the tools.
+-- Pure ledger/analytics; never consulted by any trading decision or score.
+ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS market_regime TEXT;
+ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS volatility_regime TEXT;
+ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS strategy_version TEXT;
+ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS context_version TEXT;
 
 -- Indexes matching the hot query paths (cooldown, daily limit, open trades,
 -- active price alerts). IF NOT EXISTS keeps this idempotent.
@@ -571,7 +584,9 @@ _FORECAST_COLS = [
     "expected_move_points", "expected_move_percent", "expected_move_atr",
     "entry_zone", "signal_close_price", "executable_price_at_decision",
     "stop_loss", "take_profit_levels", "tp2_source", "risk_reward",
-    "no_trade_reasons", "prompt_version", "model_version", "signal_id",
+    "no_trade_reasons", "prompt_version", "model_version",
+    "market_regime", "volatility_regime", "strategy_version", "context_version",
+    "signal_id",
 ]
 _FORECAST_JSON_COLS = {"entry_zone", "take_profit_levels", "no_trade_reasons"}
 _OUTCOME_COLS = [

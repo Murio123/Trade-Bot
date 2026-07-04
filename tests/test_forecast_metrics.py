@@ -130,6 +130,30 @@ def test_bucket_confidence_and_score(metrics):
     assert score["[9,inf)"]["n"] == 1  # intraday score 9.0
 
 
+def test_regime_buckets_null_goes_to_unknown(metrics):
+    # Фикстура без regime-полей -> всё падает в "unknown", ничего не ломается.
+    mkt = metrics["buckets"]["by_market_regime"]
+    vol = metrics["buckets"]["by_volatility_regime"]
+    assert set(mkt) == {"unknown"} and mkt["unknown"]["n"] == 8
+    assert set(vol) == {"unknown"} and vol["unknown"]["n"] == 8
+
+
+def test_regime_buckets_group_by_present_regime():
+    forecasts = [
+        {"id": 1, "candidate_direction": "long", "market_regime": "trend_up",
+         "volatility_regime": "expansion"},
+        {"id": 2, "candidate_direction": "short", "market_regime": "range",
+         "volatility_regime": None},  # NULL -> unknown
+        {"id": 3, "candidate_direction": "long", "market_regime": "trend_up",
+         "volatility_regime": "compression"},
+    ]
+    buckets = fm.bucket_metrics(forecasts, [])
+    assert buckets["by_market_regime"]["trend_up"]["n"] == 2
+    assert buckets["by_market_regime"]["range"]["n"] == 1
+    assert buckets["by_volatility_regime"]["unknown"]["n"] == 1
+    assert buckets["by_volatility_regime"]["expansion"]["n"] == 1
+
+
 # --- calibration ------------------------------------------------------------
 
 def test_calibration(metrics):
@@ -162,9 +186,11 @@ def test_execution_freshness_impact_buckets(metrics):
 
 def test_missing_data_declared(metrics):
     names = {m["metric"] for m in metrics["missing_data"]}
-    assert {"market_regime bucket", "volatility_regime bucket",
-            "calibrated_confidence metrics", "TP3 metrics",
+    assert {"calibrated_confidence metrics", "TP3 metrics",
             "honest per-forecast R", "full live-execution PnL"} <= names
+    # Stage 9 персистит эти два — они больше НЕ в missing-инвентаре.
+    assert "market_regime bucket" not in names
+    assert "volatility_regime bucket" not in names
 
 
 # --- CLI --------------------------------------------------------------------

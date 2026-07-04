@@ -68,6 +68,14 @@ def build_forecast_record(result: dict[str, Any], ctx: dict[str, Any],
         "no_trade_reasons": result.get("no_trade_reasons") or None,
         "prompt_version": config.PROMPT_VERSION,
         "model_version": config.MODEL_VERSION,
+        # Stage 9 analytics metadata (nullable). Read-only snapshot of values the
+        # cascade already computed; never influences the decision. market_regime
+        # is absent on pre-scoring blocks, volatility on missing context — both
+        # degrade to None rather than raising.
+        "market_regime": result.get("market_regime"),
+        "volatility_regime": (ctx.get("volatility") or {}).get("regime"),
+        "strategy_version": config.STRATEGY_VERSION,
+        "context_version": config.CONTEXT_VERSION,
     }
 
 

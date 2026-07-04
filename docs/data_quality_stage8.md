@@ -1,5 +1,14 @@
 # Stage 8 — Data Quality & Missing Context
 
+> **Stage 9 update (реализовано, Option B):** в `forecasts` добавлены 4 additive
+> nullable-поля — `market_regime`, `volatility_regime`, `strategy_version`,
+> `context_version`. Заполняются в `build_forecast_record` из уже существующих
+> `result` / `ctx["volatility"]["regime"]` / `config.{STRATEGY,CONTEXT}_VERSION`;
+> старые строки остаются NULL; `tools/forecast_metrics.py` получил разрезы
+> `by_market_regime` / `by_volatility_regime` (NULL → `"unknown"`). Отложены:
+> `realized_r`, `context_quality_score`, `data_quality_flags`, sidecar
+> `forecast_context` (см. критерии ниже).
+
 **Тип этапа:** аудит + фиксация плана (Option B). Read-only.
 
 **Что Stage 8 НЕ делает:** не меняет схему БД, не добавляет миграций, не меняет

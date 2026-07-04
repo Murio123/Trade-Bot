@@ -142,6 +142,11 @@ OUTCOME_TRACK_INTERVAL_MINUTES = _get_int("OUTCOME_TRACK_INTERVAL_MINUTES", 30)
 # records produced by different prompt/model generations.
 PROMPT_VERSION = _get("PROMPT_VERSION", "2026-07-obs-1")
 MODEL_VERSION = ANTHROPIC_MODEL
+# Analytics lineage (Stage 9): stamped on every forecast row so later analysis
+# can separate records produced by different strategy / context generations.
+# Pure metadata — NOT used in any trading decision, gate, or score.
+STRATEGY_VERSION = _get("STRATEGY_VERSION", "2026-07-stage9-1")
+CONTEXT_VERSION = _get("CONTEXT_VERSION", "2026-07-stage9-1")
 
 # --- Operating mode -------------------------------------------------------
 # Dry-run: run the whole pipeline but do NOT send Telegram alerts (ТЗ step 10).
