@@ -520,24 +520,61 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text(formatting.format_status(s))
 
 
-async def deep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    from pipeline import gather_swing_context
-    from signal_engine.quality_score import compute_quality_score
-    from ai import swing_analysis
+# Поля решения, которые /deep только ОБЪЯСНЯЕТ — движок уже их посчитал и
+# сохранил. forecast_to_deep_input их лишь переносит, ничего не пересчитывая.
+_DEEP_PASSTHROUGH = (
+    "analysis_status", "candidate_direction", "final_bias",
+    "long_score", "short_score", "raw_confidence",
+    "expected_move_min_pct", "expected_move_max_pct",
+    "expected_move_points", "expected_move_percent", "expected_move_atr",
+    "stop_loss", "take_profit_levels", "risk_reward",
+    "no_trade_reasons", "blocked_gate",
+    "market_regime", "volatility_regime",
+    "strategy_version", "context_version", "entry_zone",
+)
 
-    await update.effective_message.reply_text(
-        "🏛 Запускаю глубокий институциональный анализ (1D/12H/4H)… это займёт ~10-20с."
-    )
-    binance = _binance(context)
-    try:
-        ctx = await gather_swing_context(binance)
-        quality = compute_quality_score(ctx)
-        ai_text = await swing_analysis.generate_report(ctx, quality)
-    except Exception as exc:  # noqa: BLE001
-        log.exception("deep_cmd failed")
-        await update.effective_message.reply_text(f"⚠️ Ошибка глубокого анализа: {exc}")
+
+def forecast_to_deep_input(forecast: dict[str, Any]) -> dict[str, Any]:
+    """Сохранённая forecasts-строка -> вход для render_deep. Чистая функция:
+    ничего не решает и не выдумывает направление — только переносит уже
+    посчитанные поля. Синтезирует ТОЛЬКО совместимый ``status``, чтобы
+    render_deep не приписал ложный blocked_gate="unknown" (в строке нет ключа
+    ``status``, а его дефолт там — "blocked"). Вход не мутируется."""
+    deep: dict[str, Any] = {k: forecast.get(k) for k in _DEEP_PASSTHROUGH}
+
+    analysis_status = forecast.get("analysis_status")
+    blocked_gate = forecast.get("blocked_gate")
+    if analysis_status == "ENTER":
+        status = "alert"
+    elif analysis_status == "WAIT":
+        status = "journal"
+    elif analysis_status == "NO_TRADE":
+        status = "blocked" if blocked_gate else "ignored"
+    else:
+        status = "ignored"
+    deep["status"] = status
+    return deep
+
+
+async def deep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Объяснить ПОСЛЕДНИЙ сохранённый прогноз движка. /deep ничего не решает
+    и не пересчитывает: saved forecast — источник истины."""
+    from signal_engine.deep_renderer import render_deep
+    from signal_engine.profiles import get_profile
+
+    analysis_type = get_profile("swing")["analysis_type"]
+    forecast = await db.latest_forecast(symbol=config.SYMBOL,
+                                        analysis_type=analysis_type)
+    if forecast is None:
+        await update.effective_message.reply_text(
+            "📭 Пока нет сохранённого прогноза. Дождитесь ближайшего анализа."
+        )
         return
-    await update.effective_message.reply_text(formatting.format_deep(quality, ctx, ai_text))
+
+    sections = render_deep(forecast_to_deep_input(forecast))
+    await update.effective_message.reply_text(
+        formatting.format_deep_sections(sections)
+    )
 
 
 async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
