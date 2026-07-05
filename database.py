@@ -422,6 +422,23 @@ class Database:
             )
             return row is not None
 
+    async def latest_forecast(self, symbol: str,
+                              analysis_type: str) -> Optional[dict[str, Any]]:
+        """Newest saved forecast for a mode; read-only. None when none exist.
+
+        Used to *explain* the engine's already-persisted decision (e.g. /deep):
+        pure SELECT, never writes, never influences a trading decision. JSONB
+        fields are decoded via the same _row_to_signal path as other reads."""
+        if not self.pool:
+            return self._mem.latest_forecast(symbol, analysis_type)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM forecasts WHERE symbol=$1 AND analysis_type=$2 "
+                "ORDER BY created_at DESC, id DESC LIMIT 1",
+                symbol, analysis_type,
+            )
+            return _row_to_signal(row) if row else None
+
     async def link_forecast_signal(self, forecast_id: int, signal_id: int) -> None:
         if not self.pool:
             return self._mem.link_forecast_signal(forecast_id, signal_id)
@@ -778,6 +795,18 @@ class _MemoryStore:
             and f.get("signal_candle_close_time") == candle_close_time
             for f in self.forecasts
         )
+
+    def latest_forecast(self, symbol: str,
+                        analysis_type: str) -> Optional[dict[str, Any]]:
+        matches = [
+            f for f in self.forecasts
+            if f.get("symbol") == symbol and f.get("analysis_type") == analysis_type
+        ]
+        if not matches:
+            return None
+        newest = max(matches,
+                     key=lambda f: (f.get("created_at") or utcnow(), f.get("id") or 0))
+        return dict(newest)
 
     def link_forecast_signal(self, forecast_id: int, signal_id: int) -> None:
         for f in self.forecasts:

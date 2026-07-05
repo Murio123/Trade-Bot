@@ -121,3 +121,80 @@ def test_legacy_outcome_without_realized_r_does_not_break():
     asyncio.run(db.upsert_outcome(legacy))
     row = asyncio.run(db.forecast_outcome(1))
     assert "realized_r" not in row or row["realized_r"] is None
+
+
+# --- Stage 14 Option B / Step 2.1: read-only latest_forecast ----------------
+# Helper ЧИТАЕТ последний сохранённый forecast (для /deep-объяснения), никогда
+# не пишет и не влияет на decision-path. Проверяем фильтры, порядок и read-only.
+
+def _fc(symbol="BTCUSDT", analysis_type="SWING", close_h=4, **kw):
+    base = {
+        "symbol": symbol, "analysis_type": analysis_type, "timeframe": "4h",
+        "signal_candle_close_time": datetime(2026, 6, 1, close_h, tzinfo=UTC),
+        "decision_time": datetime(2026, 6, 1, close_h, 1, tzinfo=UTC),
+        "analysis_status": "ENTER", "candidate_direction": "long",
+        "take_profit_levels": [101_000.0, 102_000.0],
+        "no_trade_reasons": None,
+    }
+    base.update(kw)
+    return base
+
+
+def test_latest_forecast_none_when_empty():
+    db = Database(dsn=None)
+    assert asyncio.run(db.latest_forecast("BTCUSDT", "SWING")) is None
+
+
+def test_latest_forecast_filters_by_symbol():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_fc(symbol="ETHUSDT")))
+    assert asyncio.run(db.latest_forecast("BTCUSDT", "SWING")) is None
+    got = asyncio.run(db.latest_forecast("ETHUSDT", "SWING"))
+    assert got is not None and got["symbol"] == "ETHUSDT"
+
+
+def test_latest_forecast_filters_by_analysis_type():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_fc(analysis_type="SCALP")))
+    assert asyncio.run(db.latest_forecast("BTCUSDT", "SWING")) is None
+    got = asyncio.run(db.latest_forecast("BTCUSDT", "SCALP"))
+    assert got is not None and got["analysis_type"] == "SCALP"
+
+
+def test_latest_forecast_returns_newest_by_created_at():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_fc(close_h=4)))   # id 1
+    asyncio.run(db.insert_forecast(_fc(close_h=8)))   # id 2
+    # id 1 сделаем новее по created_at, несмотря на меньший id.
+    db._mem.forecasts[0]["created_at"] = datetime(2026, 6, 2, tzinfo=UTC)
+    db._mem.forecasts[1]["created_at"] = datetime(2026, 6, 1, tzinfo=UTC)
+    got = asyncio.run(db.latest_forecast("BTCUSDT", "SWING"))
+    assert got["signal_candle_close_time"] == datetime(2026, 6, 1, 4, tzinfo=UTC)
+
+
+def test_latest_forecast_tie_breaks_by_id():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_fc(close_h=4)))   # id 1
+    asyncio.run(db.insert_forecast(_fc(close_h=8)))   # id 2
+    ts = datetime(2026, 6, 1, 12, tzinfo=UTC)
+    db._mem.forecasts[0]["created_at"] = ts
+    db._mem.forecasts[1]["created_at"] = ts           # точная ничья по времени
+    got = asyncio.run(db.latest_forecast("BTCUSDT", "SWING"))
+    assert got["id"] == 2                              # выигрывает больший id
+
+
+def test_latest_forecast_json_fields_decoded():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_fc()))
+    got = asyncio.run(db.latest_forecast("BTCUSDT", "SWING"))
+    assert got["take_profit_levels"] == [101_000.0, 102_000.0]  # list, не str
+
+
+def test_latest_forecast_query_is_read_only():
+    import inspect
+    src = inspect.getsource(Database.latest_forecast).upper()
+    # Границы слова, иначе «CREATED_AT» ложно ловится на CREATE.
+    for kw in ("INSERT", "UPDATE", "DELETE", "ALTER", "CREATE", "DROP", "TRUNCATE"):
+        assert not re.search(rf"\b{kw}\b", src), \
+            f"latest_forecast must not contain {kw}"
+    assert "SELECT" in src
