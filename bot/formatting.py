@@ -992,3 +992,116 @@ CATEGORY_LABEL = {
     "trend": "Тренд", "momentum": "Импульс", "volume": "Объём",
     "structure": "Структура", "macro": "Макро",
 }
+
+
+# --- Stage 14 Option B / Step 1 -----------------------------------------------
+# Pure presentation for signal_engine.deep_renderer.render_deep output.
+# ЖЁСТКИЙ инвариант: только показ уже готовых значений из sections. Никаких
+# решений, вычислений, вывода LONG/SHORT/ENTER/WAIT/NO_TRADE — decision/bias
+# берутся из sections как есть. Отсутствующее -> «н/д». Не мутирует вход,
+# не импортирует БД/scheduler/pipeline/ai/risk.
+DEEP_DECISION_EMOJI = {"ENTER": "🟢", "WAIT": "🟡", "NO_TRADE": "⚪", "blocked": "🚫"}
+
+_MISSING = "н/д"
+
+
+def _deep_val(value: Any) -> str:
+    """Скаляр -> строка; None/пусто -> «н/д». Числа не переформатируем в цену."""
+    if value is None or value == "":
+        return _MISSING
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def _deep_list(items: Any) -> list[str]:
+    """Нормализовать секцию-список в список строк (пустое -> [])."""
+    if not items:
+        return []
+    if isinstance(items, (list, tuple)):
+        return [str(x) for x in items]
+    return [str(items)]
+
+
+def _deep_kv(value: Any) -> str:
+    """Опциональный dict-контекст (volatility/bollinger/historical) в компактную
+    строку «ключ: значение», пропуская None. Не-dict -> _deep_val."""
+    if not value:
+        return _MISSING
+    if not isinstance(value, dict):
+        return _deep_val(value)
+    parts = [f"{k}: {_deep_val(v)}" for k, v in value.items() if v is not None]
+    return ", ".join(parts) if parts else _MISSING
+
+
+def format_deep_sections(sections: dict[str, Any]) -> str:
+    """Отрендерить render_deep-секции в Telegram-friendly текст /deep.
+
+    Только чтение sections: функция ничего не решает и не выводит направление —
+    decision/bias/scores/confidence уже посчитаны движком и лежат в sections.
+    """
+    decision = sections.get("decision") or _MISSING
+    bias = sections.get("bias") or _MISSING
+    emoji = DEEP_DECISION_EMOJI.get(sections.get("decision"), "")
+
+    conf = sections.get("confidence") or {}
+    scores = sections.get("scores") or {}
+    move = sections.get("expected_move") or {}
+    stop = sections.get("stop") or {}
+    targets = sections.get("targets") or {}
+    regime = sections.get("regime") or {}
+
+    lines: list[str] = [
+        f"🏛 ГЛУБОКИЙ РАЗБОР {config.SYMBOL_DISPLAY}",
+        f"{emoji} Решение: {decision}".strip(),
+        f"🧭 Смещение: {bias}",
+        f"🗂 Тип анализа: {_deep_val(sections.get('analysis_type'))}",
+        "",
+        f"📊 Уверенность: {_deep_val(conf.get('score'))}",
+        f"⚔️ Скоринг: LONG {_deep_val(scores.get('long'))} / "
+        f"SHORT {_deep_val(scores.get('short'))}",
+        "",
+        f"📈 Ожидаемый ход: {_deep_val(move.get('points'))} п · "
+        f"{_deep_val(move.get('percent'))}% · {_deep_val(move.get('atr'))} ATR",
+        f"🛑 Стоп: {_fmt_price(stop.get('stop_loss'))} "
+        f"(инвалидация {_fmt_price(stop.get('invalidation_level'))})",
+    ]
+
+    tp_levels = targets.get("levels") or []
+    tp1 = tp_levels[0] if len(tp_levels) > 0 else None
+    tp2 = tp_levels[1] if len(tp_levels) > 1 else None
+    lines.append(f"🎯 Цели: TP1 {_fmt_price(tp1)} · TP2 {_fmt_price(tp2)}")
+    lines.append(f"⚖️ R:R: {_deep_val(sections.get('risk_reward'))}")
+
+    # Режим/волатильность/Bollinger/история — опциональные обогащения.
+    lines += [
+        "",
+        f"🌡 Режим: {_deep_val(regime.get('market_regime'))} / "
+        f"волатильность {_deep_val(regime.get('volatility_regime'))}",
+        f"🌪 Волатильность: {_deep_kv(sections.get('volatility'))}",
+    ]
+    if sections.get("bollinger"):
+        lines.append(f"📉 Bollinger: {_deep_kv(sections.get('bollinger'))}")
+    if sections.get("historical_quality"):
+        lines.append(f"📚 История: {_deep_kv(sections.get('historical_quality'))}")
+
+    # Blocked-путь: показать гейт как есть (не решаем, лишь отображаем).
+    blocked_gate = sections.get("blocked_gate")
+    if blocked_gate:
+        lines += ["", f"🚫 Заблокировавший гейт: {_deep_val(blocked_gate)}"]
+
+    def _block(title: str, key: str) -> None:
+        vals = _deep_list(sections.get(key))
+        if vals:
+            lines.append("")
+            lines.append(title)
+            lines.extend(f"  • {v}" for v in vals)
+
+    _block("✅ За:", "supporting_factors")
+    _block("⚠️ Против:", "contradicting_factors")
+    _block("📋 Причины NO_TRADE:", "no_trade_reasons")
+    _block("🔧 Что должно измениться:", "what_must_change")
+    _block("❌ Инвалидация сетапа:", "what_invalidates")
+    _block("👀 За чем следить:", "what_to_watch")
+
+    return "\n".join(lines)
