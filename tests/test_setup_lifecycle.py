@@ -80,8 +80,8 @@ def test_same_state_subthreshold_is_continuation():
 
 
 def test_mixed_up_and_down_is_continuation():
-    # confidence вырос, но relevant long_score упал -> неоднозначно.
-    prev = _fc(raw_confidence=0.60, long_score=8.0,
+    # confidence вырос, но relevant long_score упал (>= SWING-порога 2.5) -> неоднозначно.
+    prev = _fc(raw_confidence=0.60, long_score=9.0,
                signal_candle_close_time=T0)
     cur = _fc(raw_confidence=0.70, long_score=6.0,
               signal_candle_close_time=T0 + timedelta(hours=4))
@@ -152,13 +152,15 @@ def test_irrelevant_side_score_move_is_continuation():
 
 # --- INVALIDATED ------------------------------------------------------------
 
-def test_direction_flip_is_invalidated():
-    prev = _fc(candidate_direction="long", signal_candle_close_time=T0)
-    cur = _fc(candidate_direction="short",
+def test_direction_flip_from_active_is_invalidated():
+    # WAIT (активный) с разворотом candidate_direction -> INVALIDATED.
+    prev = _fc(analysis_status="WAIT", candidate_direction="long",
+               signal_candle_close_time=T0)
+    cur = _fc(analysis_status="WAIT", candidate_direction="short",
               signal_candle_close_time=T0 + timedelta(hours=4))
     res = classify_transition(prev, cur)
     assert res.status == INVALIDATED
-    assert "bias_flip" in res.reasons
+    assert "direction_flip" in res.reasons
 
 
 def test_active_killed_by_new_gate_is_invalidated():
@@ -294,3 +296,143 @@ def test_pure_no_input_mutation():
     prev_copy, cur_copy = dict(prev), dict(cur)
     classify_transition(prev, cur)
     assert prev == prev_copy and cur == cur_copy
+
+
+# --- Stage 15A.1: flip инвалидирует ТОЛЬКО активный сетап -------------------
+
+def _t(h):  # хелпер: время close с заданным сдвигом часов от T0
+    return T0 + timedelta(hours=h)
+
+
+def test_no_trade_to_no_trade_bias_flip_not_invalidated():
+    prev = _fc(analysis_status="NO_TRADE", candidate_direction=None,
+               final_bias="LONG", signal_candle_close_time=T0)
+    cur = _fc(analysis_status="NO_TRADE", candidate_direction=None,
+              final_bias="SHORT", signal_candle_close_time=_t(4))
+    res = classify_transition(prev, cur)
+    assert res.status != INVALIDATED
+    assert res.status == CONTINUATION
+    assert "bias_flip" in res.reasons
+
+
+def test_no_trade_to_no_trade_direction_flip_not_invalidated():
+    prev = _fc(analysis_status="NO_TRADE", candidate_direction="long",
+               final_bias=None, signal_candle_close_time=T0)
+    cur = _fc(analysis_status="NO_TRADE", candidate_direction="short",
+              final_bias=None, signal_candle_close_time=_t(4))
+    res = classify_transition(prev, cur)
+    assert res.status != INVALIDATED
+    assert "direction_flip" in res.reasons
+
+
+def test_no_trade_to_wait_bias_flip_is_upgraded():
+    prev = _fc(analysis_status="NO_TRADE", candidate_direction=None,
+               final_bias="LONG", signal_candle_close_time=T0)
+    cur = _fc(analysis_status="WAIT", candidate_direction=None,
+              final_bias="SHORT", signal_candle_close_time=_t(4))
+    res = classify_transition(prev, cur)
+    assert res.status == UPGRADED
+    assert "state_up" in res.reasons
+    assert "bias_flip" in res.reasons
+
+
+def test_no_trade_to_enter_bias_flip_is_upgraded():
+    prev = _fc(analysis_status="NO_TRADE", candidate_direction=None,
+               final_bias="LONG", signal_candle_close_time=T0)
+    cur = _fc(analysis_status="ENTER", candidate_direction=None,
+              final_bias="SHORT", signal_candle_close_time=_t(4))
+    res = classify_transition(prev, cur)
+    assert res.status == UPGRADED
+    assert "state_up" in res.reasons
+    assert "bias_flip" in res.reasons
+
+
+def test_wait_to_no_trade_bias_flip_is_invalidated():
+    prev = _fc(analysis_status="WAIT", candidate_direction="long",
+               final_bias="LONG", signal_candle_close_time=T0)
+    cur = _fc(analysis_status="NO_TRADE", candidate_direction="long",
+              final_bias="SHORT", signal_candle_close_time=_t(4))
+    res = classify_transition(prev, cur)
+    assert res.status == INVALIDATED
+    assert "bias_flip" in res.reasons
+    assert "state_down" in res.reasons
+
+
+def test_enter_to_no_trade_new_gate_is_invalidated():
+    prev = _fc(analysis_status="ENTER", blocked_gate=None,
+               signal_candle_close_time=T0)
+    cur = _fc(analysis_status="NO_TRADE", blocked_gate="htf_veto",
+              signal_candle_close_time=_t(4))
+    res = classify_transition(prev, cur)
+    assert res.status == INVALIDATED
+    assert "gate_appeared" in res.reasons
+
+
+def test_no_trade_to_no_trade_gate_change_not_invalidated():
+    prev = _fc(analysis_status="NO_TRADE", blocked_gate="gate_a",
+               signal_candle_close_time=T0)
+    cur = _fc(analysis_status="NO_TRADE", blocked_gate="gate_b",
+              signal_candle_close_time=_t(4))
+    res = classify_transition(prev, cur)
+    assert res.status != INVALIDATED
+    assert "gate_changed" in res.reasons
+
+
+# --- Stage 15A.1: per-mode score thresholds --------------------------------
+
+def _score_move(atype, prev_score, cur_score):
+    prev = _fc(analysis_type=atype, analysis_status="WAIT",
+               candidate_direction="long", long_score=prev_score,
+               signal_candle_close_time=T0)
+    cur = _fc(analysis_type=atype, analysis_status="WAIT",
+              candidate_direction="long", long_score=cur_score,
+              signal_candle_close_time=_t(1))
+    return classify_transition(prev, cur)
+
+
+def test_intraday_effective_threshold_ignores_small_move():
+    # +2.0 < INTRADAY-порог 3.0 -> шум -> CONTINUATION
+    res = _score_move("INTRADAY", 6.0, 8.0)
+    assert res.status == CONTINUATION
+    assert "long_score_up" not in res.reasons
+
+
+def test_intraday_effective_threshold_triggers_at_3():
+    res = _score_move("INTRADAY", 6.0, 9.0)  # +3.0
+    assert res.status == UPGRADED
+    assert "long_score_up" in res.reasons
+
+
+def test_swing_effective_threshold_triggers_at_2_5():
+    res = _score_move("SWING", 6.0, 8.5)  # +2.5
+    assert res.status == UPGRADED
+    assert "long_score_up" in res.reasons
+
+
+def test_positional_effective_threshold_triggers_at_2_5():
+    res = _score_move("POSITIONAL", 6.0, 8.5)  # +2.5
+    assert res.status == UPGRADED
+    assert "long_score_up" in res.reasons
+
+
+def test_unknown_analysis_type_uses_fallback_threshold():
+    prev = _fc(analysis_type="FOO", analysis_status="WAIT",
+               candidate_direction="long", long_score=6.0,
+               signal_candle_close_time=T0)
+    cur = _fc(analysis_type="FOO", analysis_status="WAIT",
+              candidate_direction="long", long_score=7.0,  # +1.0
+              signal_candle_close_time=_t(1))
+    res = classify_transition(prev, cur, thresholds=Thresholds(score_delta=1.0))
+    assert res.status == UPGRADED
+    assert "long_score_up" in res.reasons
+
+
+def test_missing_analysis_type_uses_fallback_threshold():
+    prev = _fc(analysis_type=None, analysis_status="WAIT",
+               candidate_direction="long", long_score=6.0,
+               signal_candle_close_time=T0)
+    cur = _fc(analysis_type=None, analysis_status="WAIT",
+              candidate_direction="long", long_score=7.0,  # +1.0
+              signal_candle_close_time=_t(1))
+    res = classify_transition(prev, cur, thresholds=Thresholds(score_delta=1.0))
+    assert res.status == UPGRADED

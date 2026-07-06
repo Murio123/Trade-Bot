@@ -98,8 +98,9 @@ def classify_transition(
         1. нет предыдущего / несопоставим        -> NEW_SETUP
         2. предыдущий ENTER с resolved-исходом    -> RESOLVED
         3. разрыв > max_gap_seconds, предыдущий активен -> EXPIRED
-        4. разворот направления, либо активный сетап убит новым гейтом/причиной
-                                                   -> INVALIDATED
+        4. активный сетап (WAIT/ENTER) убит: разворот направления/bias, либо
+           падение в NO_TRADE с новым гейтом/причиной -> INVALIDATED
+           (на NO_TRADE->NO_TRADE флип/гейт НЕ инвалидируют — нечего)
         5. сдвиг по оси состояния вверх/вниз       -> UPGRADED / DOWNGRADED
         6. та же ось+направление: сила выросла/упала >= порога -> UPGRADED /
            DOWNGRADED, иначе                        -> CONTINUATION
@@ -128,11 +129,15 @@ def classify_transition(
             and prev_status in _ACTIVE:
         return LifecycleResult(EXPIRED, reasons, previous_id=prev_id)
 
-    # 4. Инвалидация: жёсткий разворот направления, либо активный сетап,
-    #    обнулённый новым блокирующим фактором (упал в NO_TRADE).
-    if "bias_flip" in reasons:
+    # 4. Инвалидация ТОЛЬКО активного сетапа (previous WAIT/ENTER). Валидация на
+    #    реальной истории показала: флип направления / смена гейта на
+    #    NO_TRADE→NO_TRADE — это дёрганье кандидата, а не инвалидация (нечего
+    #    инвалидировать). Поэтому и разворот, и новый блокирующий фактор
+    #    инвалидируют лишь то, что перед этим было активным.
+    prev_active = prev_status in _ACTIVE
+    if prev_active and ("direction_flip" in reasons or "bias_flip" in reasons):
         return LifecycleResult(INVALIDATED, reasons, previous_id=prev_id)
-    if cur_rank == 0 and (pr_rank or 0) >= 1 \
+    if prev_active and cur_rank == 0 \
             and ("gate_appeared" in reasons or "reasons_added" in reasons):
         return LifecycleResult(INVALIDATED, reasons, previous_id=prev_id)
 
@@ -174,22 +179,32 @@ def _change_reasons(previous: dict[str, Any], current: dict[str, Any],
         elif cur_rank < pr_rank:
             reasons.append("state_down")
 
+    # candidate_direction (long/short) — торговое направление кандидата.
     pd_, cd = previous.get("candidate_direction"), current.get("candidate_direction")
     pd_dir = pd_ if pd_ in ("long", "short") else None
     cd_dir = cd if cd in ("long", "short") else None
     if pd_dir and cd_dir and pd_dir != cd_dir:
-        reasons.append("bias_flip")
+        reasons.append("direction_flip")
     elif pd_dir and cd_dir is None:
-        reasons.append("bias_to_neutral")
+        reasons.append("direction_to_neutral")
     elif pd_dir is None and cd_dir:
-        reasons.append("bias_from_neutral")
+        reasons.append("direction_from_neutral")
 
+    # final_bias (LONG/SHORT) — итоговый bias движка; флип отдельным сигналом.
+    pb = previous.get("final_bias")
+    cb = current.get("final_bias")
+    pb_dir = pb if pb in ("LONG", "SHORT") else None
+    cb_dir = cb if cb in ("LONG", "SHORT") else None
+    if pb_dir and cb_dir and pb_dir != cb_dir:
+        reasons.append("bias_flip")
+
+    score_delta = _effective_score_delta(current, thresholds)
     _delta_flags(reasons, _conf(previous), _conf(current),
                  thresholds.confidence_delta, "confidence_up", "confidence_down")
     _delta_flags(reasons, previous.get("long_score"), current.get("long_score"),
-                 thresholds.score_delta, "long_score_up", "long_score_down")
+                 score_delta, "long_score_up", "long_score_down")
     _delta_flags(reasons, previous.get("short_score"), current.get("short_score"),
-                 thresholds.score_delta, "short_score_up", "short_score_down")
+                 score_delta, "short_score_up", "short_score_down")
 
     pg, cg = previous.get("blocked_gate"), current.get("blocked_gate")
     if pg is None and cg is not None:
@@ -227,6 +242,20 @@ def _relevant_strength(previous: dict[str, Any], current: dict[str, Any],
         up = up or "short_score_up" in reasons
         down = down or "short_score_down" in reasons
     return up, down
+
+
+def _effective_score_delta(current: dict[str, Any],
+                           thresholds: Thresholds) -> float:
+    """Порог дельты score, откалиброванный per-mode на реальной истории
+    (Stage 15A validation): INTRADAY шумит сильнее -> выше порог; медленные моды
+    ниже, чтобы не терять реальное усиление. Неизвестный/пустой тип -> дефолт из
+    Thresholds. Это порог lifecycle-отчёта, НЕ торговый порог."""
+    analysis_type = str(current.get("analysis_type") or "").upper()
+    if analysis_type == "INTRADAY":
+        return 3.0
+    if analysis_type in {"SWING", "POSITIONAL"}:
+        return 2.5
+    return thresholds.score_delta
 
 
 def _delta_flags(reasons: list[str], prev: Any, cur: Any, threshold: float,
