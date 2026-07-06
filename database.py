@@ -145,6 +145,17 @@ CREATE TABLE IF NOT EXISTS forecasts (
     volatility_regime           TEXT,
     strategy_version            TEXT,
     context_version             TEXT,
+    -- Stage 15B setup-lifecycle metadata (nullable analytics, never used in
+    -- trading decisions). Derived post-factum by comparing the previous
+    -- comparable forecast to the current one; wired to the producer in a later
+    -- step. Columns are added here so fresh DBs match the migration path.
+    setup_lifecycle_status      TEXT,
+    setup_lifecycle_reasons     JSONB,
+    previous_forecast_id        BIGINT,
+    setup_lifecycle_comparable  BOOLEAN,
+    setup_score_delta           DOUBLE PRECISION,
+    setup_confidence_delta      DOUBLE PRECISION,
+    setup_thresholds_used       JSONB,
     signal_id                   BIGINT REFERENCES signals(id) ON DELETE SET NULL,
     UNIQUE (symbol, analysis_type, signal_candle_close_time)
 );
@@ -203,6 +214,17 @@ ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS context_version TEXT;
 -- No backfill — historical resolved rows stay NULL; coverage grows forward as
 -- new forecasts resolve. Pure analytics ledger; never read by any decision.
 ALTER TABLE forecast_outcomes ADD COLUMN IF NOT EXISTS realized_r DOUBLE PRECISION;
+
+-- Stage 15B: additive nullable setup-lifecycle metadata on forecasts. All
+-- nullable, no defaults, no backfill — old rows stay NULL and read back as
+-- "unknown". Pure analytics; never consulted by any trading decision or score.
+ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS setup_lifecycle_status TEXT;
+ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS setup_lifecycle_reasons JSONB;
+ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS previous_forecast_id BIGINT;
+ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS setup_lifecycle_comparable BOOLEAN;
+ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS setup_score_delta DOUBLE PRECISION;
+ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS setup_confidence_delta DOUBLE PRECISION;
+ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS setup_thresholds_used JSONB;
 
 -- Indexes matching the hot query paths (cooldown, daily limit, open trades,
 -- active price alerts). IF NOT EXISTS keeps this idempotent.

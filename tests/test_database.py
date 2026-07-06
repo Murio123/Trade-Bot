@@ -99,6 +99,54 @@ def test_no_destructive_sql_against_forecast_outcomes():
     assert not forbidden, f"destructive/backfill SQL found: {set(forbidden)}"
 
 
+# --- Stage 15B1-a: setup-lifecycle schema columns (DDL only) ----------------
+# Nullable analytics metadata; NOT added to _FORECAST_COLS / insert / row decode
+# in this step — schema readiness only. (col_name -> SQL type.)
+LIFECYCLE_COLS = {
+    "setup_lifecycle_status": "TEXT",
+    "setup_lifecycle_reasons": "JSONB",
+    "previous_forecast_id": "BIGINT",
+    "setup_lifecycle_comparable": "BOOLEAN",
+    "setup_score_delta": "DOUBLE PRECISION",
+    "setup_confidence_delta": "DOUBLE PRECISION",
+    "setup_thresholds_used": "JSONB",
+}
+
+
+def test_lifecycle_columns_present_in_schema():
+    for col in LIFECYCLE_COLS:
+        assert f"{col} " in SCHEMA, f"{col} missing from forecasts CREATE TABLE"
+
+
+def test_lifecycle_migrations_add_columns_idempotently():
+    for col, sql_type in LIFECYCLE_COLS.items():
+        stmt = f"ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS {col} {sql_type};"
+        assert stmt in MIGRATIONS, f"missing idempotent migration for {col}"
+
+
+def test_lifecycle_migrations_are_nullable_no_defaults():
+    for line in MIGRATIONS.splitlines():
+        if "ADD COLUMN IF NOT EXISTS" in line and any(
+                c in line for c in LIFECYCLE_COLS):
+            assert "NOT NULL" not in line.upper(), line
+            assert "DEFAULT" not in line.upper(), line
+
+
+def test_lifecycle_migrations_no_destructive_sql():
+    # Guard the whole migration file: no destructive/backfill verbs at all.
+    forbidden = re.findall(
+        r"\b(DROP|RENAME|DELETE|TRUNCATE|UPDATE)\b", MIGRATIONS, re.IGNORECASE)
+    assert not forbidden, f"destructive/backfill SQL found: {set(forbidden)}"
+
+
+def test_lifecycle_columns_not_in_forecast_cols_yet():
+    # Stage 15B1-a is DDL only: insert wiring (_FORECAST_COLS) comes in 15B1-b.
+    for col in LIFECYCLE_COLS:
+        assert col not in _FORECAST_COLS, (
+            f"{col} added to _FORECAST_COLS prematurely (Stage 15B1-a is DDL only)"
+        )
+
+
 def _outcome(**kw):
     base = {"forecast_id": 1, "anchor_time": datetime(2026, 6, 1, 4, tzinfo=UTC),
             "reference_price": 100_000.0, "tp1_hit": True, "tp2_hit": True,
