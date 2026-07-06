@@ -25,6 +25,7 @@ from apscheduler.triggers.cron import CronTrigger
 import config
 from bot import alerts, formatting, journal
 from database import db
+from forecast_lifecycle import enrich_forecast_with_lifecycle
 from pipeline import _drop_unclosed, gather_market_context, run_cascade
 
 log = logging.getLogger(__name__)
@@ -98,6 +99,11 @@ async def analysis_job(application, profile_name: str = "swing") -> None:
         try:
             fc = build_forecast_record(result, ctx, profile)
             if fc:
+                # Analytics-only lifecycle metadata, computed AFTER the decision
+                # and record, BEFORE persistence. Failure-safe: {} on any error,
+                # so the forecast still inserts (columns stay NULL). Never feeds
+                # back into the decision, Telegram or risk path.
+                fc = {**fc, **await enrich_forecast_with_lifecycle(db, fc)}
                 forecast_id = await db.insert_forecast(fc)
         except Exception:  # noqa: BLE001
             log.exception("forecast ledger insert failed [%s]", profile_name)

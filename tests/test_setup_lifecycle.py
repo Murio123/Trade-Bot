@@ -9,9 +9,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from analyzer.setup_lifecycle import (
     CONTINUATION, DOWNGRADED, EXPIRED, INVALIDATED, NEW_SETUP, RESOLVED,
-    STATUSES, UPGRADED, Thresholds, classify_transition,
+    STATUSES, UPGRADED, LIFECYCLE_FIELD_KEYS, Thresholds,
+    build_lifecycle_fields, classify_transition,
 )
 
 T0 = datetime(2026, 7, 5, 12, 0, tzinfo=timezone.utc)
@@ -436,3 +439,152 @@ def test_missing_analysis_type_uses_fallback_threshold():
               signal_candle_close_time=_t(1))
     res = classify_transition(prev, cur, thresholds=Thresholds(score_delta=1.0))
     assert res.status == UPGRADED
+
+
+# ===========================================================================
+# Stage 15B2: build_lifecycle_fields — persist-ready поля (7 ключей)
+# ===========================================================================
+
+def test_fields_no_previous_is_new_setup_with_none_deltas():
+    out = build_lifecycle_fields(None, _fc())
+    assert out["setup_lifecycle_status"] == NEW_SETUP
+    assert out["previous_forecast_id"] is None
+    assert out["setup_lifecycle_comparable"] is False
+    assert out["setup_score_delta"] is None
+    assert out["setup_confidence_delta"] is None
+    assert out["setup_lifecycle_reasons"] == []
+
+
+def test_fields_incomparable_has_none_deltas():
+    out = build_lifecycle_fields(_fc(symbol="ETHUSDT"), _fc(symbol="BTCUSDT"))
+    assert out["setup_lifecycle_comparable"] is False
+    assert out["setup_score_delta"] is None
+    assert out["setup_confidence_delta"] is None
+
+
+def test_fields_returns_exactly_seven_persisted_keys():
+    out = build_lifecycle_fields(_fc(id=41), _fc(long_score=7.0))
+    assert set(out) == set(LIFECYCLE_FIELD_KEYS)
+    assert len(LIFECYCLE_FIELD_KEYS) == 7
+    # previous_id propagated from the previous row.
+    assert out["previous_forecast_id"] == 41
+
+
+def test_fields_long_score_delta():
+    prev = _fc(candidate_direction="long", long_score=6.0, short_score=2.0)
+    cur = _fc(candidate_direction="long", long_score=7.5, short_score=1.0,
+              signal_candle_close_time=_t(1))
+    out = build_lifecycle_fields(prev, cur)
+    assert out["setup_score_delta"] == 1.5  # 7.5 - 6.0 (long side)
+
+
+def test_fields_short_score_delta():
+    prev = _fc(candidate_direction="short", long_score=2.0, short_score=6.0)
+    cur = _fc(candidate_direction="short", long_score=1.0, short_score=8.0,
+              signal_candle_close_time=_t(1))
+    out = build_lifecycle_fields(prev, cur)
+    assert out["setup_score_delta"] == 2.0  # 8.0 - 6.0 (short side)
+
+
+def test_fields_direction_falls_back_to_previous():
+    prev = _fc(candidate_direction="long", long_score=6.0)
+    cur = _fc(candidate_direction=None, long_score=9.0,
+              signal_candle_close_time=_t(1))
+    out = build_lifecycle_fields(prev, cur)
+    assert out["setup_score_delta"] == 3.0
+
+
+def test_fields_neutral_direction_score_delta_none():
+    prev = _fc(candidate_direction=None, long_score=6.0)
+    cur = _fc(candidate_direction=None, long_score=9.0,
+              signal_candle_close_time=_t(1))
+    out = build_lifecycle_fields(prev, cur)
+    assert out["setup_score_delta"] is None
+
+
+def test_fields_missing_score_delta_none_no_raise():
+    prev = _fc(candidate_direction="long", long_score=None)
+    cur = _fc(candidate_direction="long", long_score=7.0,
+              signal_candle_close_time=_t(1))
+    out = build_lifecycle_fields(prev, cur)
+    assert out["setup_score_delta"] is None
+
+
+def test_fields_non_numeric_score_delta_none_no_raise():
+    prev = _fc(candidate_direction="long", long_score="oops")
+    cur = _fc(candidate_direction="long", long_score=7.0,
+              signal_candle_close_time=_t(1))
+    out = build_lifecycle_fields(prev, cur)
+    assert out["setup_score_delta"] is None
+
+
+def test_fields_confidence_delta_raw_preferred():
+    prev = _fc(raw_confidence=0.50)
+    cur = _fc(raw_confidence=0.65, signal_candle_close_time=_t(1))
+    out = build_lifecycle_fields(prev, cur)
+    assert out["setup_confidence_delta"] == pytest.approx(0.15)
+
+
+def test_fields_confidence_delta_falls_back_to_confidence():
+    prev = _fc(raw_confidence=None, confidence=0.40)
+    cur = _fc(raw_confidence=None, confidence=0.55,
+              signal_candle_close_time=_t(1))
+    out = build_lifecycle_fields(prev, cur)
+    assert out["setup_confidence_delta"] == pytest.approx(0.15)
+
+
+def test_fields_missing_confidence_delta_none_no_raise():
+    prev = _fc(raw_confidence=None, confidence=None)
+    cur = _fc(raw_confidence=None, confidence=None,
+              signal_candle_close_time=_t(1))
+    out = build_lifecycle_fields(prev, cur)
+    assert out["setup_confidence_delta"] is None
+
+
+def test_fields_non_numeric_confidence_delta_none_no_raise():
+    prev = _fc(raw_confidence="nan?")
+    cur = _fc(raw_confidence=0.6, signal_candle_close_time=_t(1))
+    out = build_lifecycle_fields(prev, cur)
+    assert out["setup_confidence_delta"] is None
+
+
+def test_thresholds_used_intraday():
+    out = build_lifecycle_fields(None, _fc(analysis_type="INTRADAY"))
+    tu = out["setup_thresholds_used"]
+    assert tu["analysis_type"] == "INTRADAY"
+    assert tu["score_delta"] == 3.0
+    assert tu["source"] == "stage15a"
+    assert tu["confidence_delta"] == Thresholds().confidence_delta
+    assert tu["max_gap_seconds"] == Thresholds().max_gap_seconds
+
+
+def test_thresholds_used_swing():
+    out = build_lifecycle_fields(None, _fc(analysis_type="SWING"))
+    assert out["setup_thresholds_used"]["score_delta"] == 2.5
+
+
+def test_thresholds_used_positional():
+    out = build_lifecycle_fields(None, _fc(analysis_type="POSITIONAL"))
+    assert out["setup_thresholds_used"]["score_delta"] == 2.5
+
+
+def test_thresholds_used_fallback():
+    out = build_lifecycle_fields(
+        None, _fc(analysis_type="FOO"),
+        thresholds=Thresholds(score_delta=1.25))
+    assert out["setup_thresholds_used"]["score_delta"] == 1.25
+
+
+def test_thresholds_used_is_json_serializable():
+    import json
+    out = build_lifecycle_fields(None, _fc())
+    json.dumps(out["setup_thresholds_used"])  # must not raise
+
+
+def test_build_fields_does_not_mutate_inputs():
+    prev = _fc(id=7, candidate_direction="long", long_score=6.0)
+    cur = _fc(candidate_direction="long", long_score=7.0,
+              signal_candle_close_time=_t(1))
+    prev_copy, cur_copy = dict(prev), dict(cur)
+    build_lifecycle_fields(prev, cur)
+    assert prev == prev_copy and cur == cur_copy

@@ -156,6 +156,93 @@ def classify_transition(
 
 
 # ---------------------------------------------------------------------------
+# Stage 15B2: persist-ready field builder (по-прежнему чистая функция)
+# ---------------------------------------------------------------------------
+
+# Ровно те 7 ключей, что персистятся в forecasts (Stage 15B колонки).
+LIFECYCLE_FIELD_KEYS = (
+    "setup_lifecycle_status",
+    "setup_lifecycle_reasons",
+    "previous_forecast_id",
+    "setup_lifecycle_comparable",
+    "setup_score_delta",
+    "setup_confidence_delta",
+    "setup_thresholds_used",
+)
+
+
+def build_lifecycle_fields(
+    previous: dict[str, Any] | None,
+    current: dict[str, Any],
+    *,
+    previous_outcome: dict[str, Any] | None = None,
+    thresholds: Thresholds = DEFAULT_THRESHOLDS,
+) -> dict[str, Any]:
+    """Собрать persist-ready lifecycle-поля для ОДНОЙ новой forecasts-строки.
+
+    Чистая функция-обёртка над ``classify_transition``: не мутирует входы, не
+    трогает decision-path/scoring, лишь читает уже вычисленные поля рядов.
+    Возвращает ровно ``LIFECYCLE_FIELD_KEYS`` — статус/причины/сопоставимость из
+    классификатора плюс аналитические дельты и снимок применённых порогов.
+
+    Дельты считаются ТОЛЬКО для сопоставимого previous (иначе None): при
+    несопоставимости «предыдущего мира» разность величин смысла не имеет.
+    """
+    result = classify_transition(previous, current,
+                                 previous_outcome=previous_outcome,
+                                 thresholds=thresholds)
+
+    comparable = previous is not None and result.comparable
+    if comparable:
+        score_delta = _setup_score_delta(previous, current)
+        confidence_delta = _delta(_conf(previous), _conf(current))
+    else:
+        score_delta = None
+        confidence_delta = None
+
+    return {
+        "setup_lifecycle_status": result.status,
+        "setup_lifecycle_reasons": list(result.reasons),
+        "previous_forecast_id": result.previous_id,
+        "setup_lifecycle_comparable": result.comparable,
+        "setup_score_delta": score_delta,
+        "setup_confidence_delta": confidence_delta,
+        "setup_thresholds_used": _thresholds_used(current, thresholds),
+    }
+
+
+def _setup_score_delta(previous: dict[str, Any],
+                       current: dict[str, Any]) -> float | None:
+    """Дельта score стороны сетапа (long_score для long и т.д.).
+
+    Направление берём у current, при отсутствии — у previous. NEUTRAL/None
+    направление, отсутствующий или нечисловой score -> None. Симметрично оси,
+    по которой судит ``_relevant_strength``; торговое решение не затрагивает."""
+    direction = (current.get("candidate_direction")
+                 or previous.get("candidate_direction"))
+    direction = str(direction).lower() if direction is not None else None
+    if direction == "long":
+        side = "long_score"
+    elif direction == "short":
+        side = "short_score"
+    else:
+        return None
+    return _delta(previous.get(side), current.get(side))
+
+
+def _thresholds_used(current: dict[str, Any],
+                     thresholds: Thresholds) -> dict[str, Any]:
+    """JSON-сериализуемый снимок фактически применённых порогов (аудит)."""
+    return {
+        "analysis_type": current.get("analysis_type"),
+        "score_delta": _effective_score_delta(current, thresholds),
+        "confidence_delta": thresholds.confidence_delta,
+        "max_gap_seconds": thresholds.max_gap_seconds,
+        "source": "stage15a",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Сопоставимость и объясняющие флаги (чистые помощники)
 # ---------------------------------------------------------------------------
 
@@ -270,9 +357,17 @@ def _delta_flags(reasons: list[str], prev: Any, cur: Any, threshold: float,
 
 
 def _delta(prev: Any, cur: Any) -> float | None:
+    """Numeric difference cur-prev; None on missing or non-numeric inputs.
+
+    Non-numeric fields degrade to None (no delta flag / no analytics delta)
+    rather than raising — a dirty persisted value must never break the pure
+    classifier or the producer that persists lifecycle metadata."""
     if prev is None or cur is None:
         return None
-    return float(cur) - float(prev)
+    try:
+        return float(cur) - float(prev)
+    except (TypeError, ValueError):
+        return None
 
 
 def _conf(forecast: dict[str, Any]) -> Any:
