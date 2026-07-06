@@ -77,6 +77,29 @@ def test_record_with_new_fields_inserts_via_memory_store():
     assert stored["context_version"] == config.CONTEXT_VERSION
 
 
+def test_all_persistable_fields_are_covered_by_forecast_cols():
+    """Drift guardrail: every field build_forecast_record emits must be listed
+    in database._FORECAST_COLS.
+
+    insert_forecast builds its INSERT from `[c for c in _FORECAST_COLS if c in
+    fc]`, so any emitted key NOT on the whitelist is silently dropped (data loss
+    with no error). A new forecast field added without updating the whitelist
+    would fail this test instead of vanishing at write time.
+    """
+    from database import _FORECAST_COLS
+
+    fc = build_forecast_record(
+        _base(direction="long", long_score=4.0, short_score=1.0,
+              market_regime="trend_up"),
+        {"volatility": {"regime": "expansion"}}, get_profile("swing"))
+
+    dropped = set(fc) - set(_FORECAST_COLS)
+    assert not dropped, (
+        "build_forecast_record emits fields absent from _FORECAST_COLS; "
+        f"insert_forecast would silently drop them: {sorted(dropped)}"
+    )
+
+
 def test_decision_fields_unchanged_by_stage9():
     # Направление/статус/скор — как раньше; новые поля ничего не переопределяют.
     fc = build_forecast_record(
