@@ -198,3 +198,92 @@ def test_latest_forecast_query_is_read_only():
         assert not re.search(rf"\b{kw}\b", src), \
             f"latest_forecast must not contain {kw}"
     assert "SELECT" in src
+
+
+# --- Guardrail 2: read-only previous_forecast(before) -----------------------
+# Явно берёт ПРЕДЫДУЩИЙ сопоставимый forecast строго ДО указанного времени —
+# чтобы lifecycle-чтение Stage 15B не зависело от порядка вызовов. Только SELECT.
+
+def test_previous_forecast_none_when_empty():
+    db = Database(dsn=None)
+    before = datetime(2026, 6, 1, 12, tzinfo=UTC)
+    assert asyncio.run(db.previous_forecast("BTCUSDT", "SWING", before)) is None
+
+
+def test_previous_forecast_none_when_only_current_or_after_rows():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_fc(close_h=12)))   # == before
+    asyncio.run(db.insert_forecast(_fc(close_h=16)))   # > before
+    before = datetime(2026, 6, 1, 12, tzinfo=UTC)
+    assert asyncio.run(db.previous_forecast("BTCUSDT", "SWING", before)) is None
+
+
+def test_previous_forecast_returns_row_immediately_before():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_fc(close_h=4)))    # before
+    asyncio.run(db.insert_forecast(_fc(close_h=8)))    # closest before
+    asyncio.run(db.insert_forecast(_fc(close_h=16)))   # after
+    before = datetime(2026, 6, 1, 12, tzinfo=UTC)
+    got = asyncio.run(db.previous_forecast("BTCUSDT", "SWING", before))
+    assert got is not None
+    assert got["signal_candle_close_time"] == datetime(2026, 6, 1, 8, tzinfo=UTC)
+
+
+def test_previous_forecast_excludes_row_equal_to_before():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_fc(close_h=8)))    # strictly before
+    asyncio.run(db.insert_forecast(_fc(close_h=12)))   # == before -> excluded
+    before = datetime(2026, 6, 1, 12, tzinfo=UTC)
+    got = asyncio.run(db.previous_forecast("BTCUSDT", "SWING", before))
+    assert got["signal_candle_close_time"] == datetime(2026, 6, 1, 8, tzinfo=UTC)
+
+
+def test_previous_forecast_filters_by_symbol():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_fc(symbol="ETHUSDT", close_h=8)))
+    before = datetime(2026, 6, 1, 12, tzinfo=UTC)
+    assert asyncio.run(db.previous_forecast("BTCUSDT", "SWING", before)) is None
+    got = asyncio.run(db.previous_forecast("ETHUSDT", "SWING", before))
+    assert got is not None and got["symbol"] == "ETHUSDT"
+
+
+def test_previous_forecast_filters_by_analysis_type():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_fc(analysis_type="SCALP", close_h=8)))
+    before = datetime(2026, 6, 1, 12, tzinfo=UTC)
+    assert asyncio.run(db.previous_forecast("BTCUSDT", "SWING", before)) is None
+    got = asyncio.run(db.previous_forecast("BTCUSDT", "SCALP", before))
+    assert got is not None and got["analysis_type"] == "SCALP"
+
+
+def test_previous_forecast_tie_breaks_deterministically():
+    db = Database(dsn=None)
+    # Две строки с ОДИНАКОВЫМ signal_candle_close_time и created_at: решает id.
+    asyncio.run(db.insert_forecast(_fc(close_h=8, analysis_type="SWING")))   # id 1
+    # второй ряд обходит candle-dedup через другой analysis_type, затем
+    # выравниваем его обратно, чтобы получить точную ничью по времени.
+    asyncio.run(db.insert_forecast(_fc(close_h=8, analysis_type="TIE")))     # id 2
+    db._mem.forecasts[1]["analysis_type"] = "SWING"
+    ts = datetime(2026, 6, 2, tzinfo=UTC)
+    db._mem.forecasts[0]["created_at"] = ts
+    db._mem.forecasts[1]["created_at"] = ts
+    before = datetime(2026, 6, 1, 12, tzinfo=UTC)
+    got = asyncio.run(db.previous_forecast("BTCUSDT", "SWING", before))
+    assert got["id"] == 2                              # больший id выигрывает
+
+
+def test_previous_forecast_json_fields_decoded():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_fc(close_h=8)))
+    before = datetime(2026, 6, 1, 12, tzinfo=UTC)
+    got = asyncio.run(db.previous_forecast("BTCUSDT", "SWING", before))
+    assert got["take_profit_levels"] == [101_000.0, 102_000.0]  # list, не str
+
+
+def test_previous_forecast_query_is_read_only():
+    import inspect
+    src = inspect.getsource(Database.previous_forecast).upper()
+    for kw in ("INSERT", "UPDATE", "DELETE", "ALTER", "CREATE", "DROP", "TRUNCATE"):
+        assert not re.search(rf"\b{kw}\b", src), \
+            f"previous_forecast must not contain {kw}"
+    assert "SELECT" in src

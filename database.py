@@ -28,6 +28,21 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _coerce_dt(value: Any) -> Optional[datetime]:
+    """datetime passthrough / ISO-string parse, for query params and in-memory
+    comparison. Naive datetimes are treated as UTC; unparseable input -> None."""
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, str):
+        try:
+            dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    else:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS signals (
     id              BIGSERIAL PRIMARY KEY,
@@ -439,6 +454,31 @@ class Database:
             )
             return _row_to_signal(row) if row else None
 
+    async def previous_forecast(self, symbol: str, analysis_type: str,
+                                before: Any) -> Optional[dict[str, Any]]:
+        """Newest saved forecast for a mode STRICTLY BEFORE ``before`` (compared
+        on signal_candle_close_time); read-only. None when none exist.
+
+        Unlike ``latest_forecast`` (newest overall), the explicit ``before``
+        cutoff picks the previous comparable row by time — so a lifecycle read
+        does not depend on call ordering versus the current row being written.
+        Pure SELECT, never writes. JSONB fields decode via the same
+        _row_to_signal path as other reads."""
+        cutoff = _coerce_dt(before)
+        if cutoff is None:
+            return None
+        if not self.pool:
+            return self._mem.previous_forecast(symbol, analysis_type, cutoff)
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM forecasts WHERE symbol=$1 AND analysis_type=$2 "
+                "AND signal_candle_close_time < $3 "
+                "ORDER BY signal_candle_close_time DESC, created_at DESC, id DESC "
+                "LIMIT 1",
+                symbol, analysis_type, cutoff,
+            )
+            return _row_to_signal(row) if row else None
+
     async def link_forecast_signal(self, forecast_id: int, signal_id: int) -> None:
         if not self.pool:
             return self._mem.link_forecast_signal(forecast_id, signal_id)
@@ -807,6 +847,26 @@ class _MemoryStore:
         newest = max(matches,
                      key=lambda f: (f.get("created_at") or utcnow(), f.get("id") or 0))
         return dict(newest)
+
+    def previous_forecast(self, symbol: str, analysis_type: str,
+                          before: Any) -> Optional[dict[str, Any]]:
+        cutoff = _coerce_dt(before)
+        if cutoff is None:
+            return None
+        matches: list[tuple[datetime, dict[str, Any]]] = []
+        for f in self.forecasts:
+            if (f.get("symbol") != symbol
+                    or f.get("analysis_type") != analysis_type):
+                continue
+            cct = _coerce_dt(f.get("signal_candle_close_time"))
+            if cct is None or cct >= cutoff:   # missing/after/equal -> skip
+                continue
+            matches.append((cct, f))
+        if not matches:
+            return None
+        newest = max(matches, key=lambda m: (
+            m[0], m[1].get("created_at") or utcnow(), m[1].get("id") or 0))
+        return dict(newest[1])
 
     def link_forecast_signal(self, forecast_id: int, signal_id: int) -> None:
         for f in self.forecasts:
