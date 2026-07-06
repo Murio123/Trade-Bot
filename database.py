@@ -671,9 +671,18 @@ _FORECAST_COLS = [
     "stop_loss", "take_profit_levels", "tp2_source", "risk_reward",
     "no_trade_reasons", "prompt_version", "model_version",
     "market_regime", "volatility_regime", "strategy_version", "context_version",
+    # Stage 15B setup-lifecycle metadata (nullable analytics; persisted only when
+    # a later producer step supplies them — build_forecast_record still omits
+    # them, so they stay absent from the INSERT until Stage 15B2 wiring).
+    "setup_lifecycle_status", "setup_lifecycle_reasons", "previous_forecast_id",
+    "setup_lifecycle_comparable", "setup_score_delta", "setup_confidence_delta",
+    "setup_thresholds_used",
     "signal_id",
 ]
-_FORECAST_JSON_COLS = {"entry_zone", "take_profit_levels", "no_trade_reasons"}
+_FORECAST_JSON_COLS = {
+    "entry_zone", "take_profit_levels", "no_trade_reasons",
+    "setup_lifecycle_reasons", "setup_thresholds_used",
+}
 _OUTCOME_COLS = [
     "forecast_id", "anchor_time", "reference_price",
     "return_1h", "return_4h", "return_12h", "return_24h", "return_72h",
@@ -691,7 +700,8 @@ def _forecast_param(col: str, value: Any) -> Any:
 def _row_to_signal(row) -> dict[str, Any]:
     d = dict(row)
     for key in ("category_scores", "reasons", "entry_zone",
-                "take_profit_levels", "no_trade_reasons"):
+                "take_profit_levels", "no_trade_reasons",
+                "setup_lifecycle_reasons", "setup_thresholds_used"):
         val = d.get(key)
         if isinstance(val, str):
             try:

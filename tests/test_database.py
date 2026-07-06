@@ -11,7 +11,10 @@ import asyncio
 import re
 from datetime import datetime, timezone
 
-from database import MIGRATIONS, SCHEMA, _FORECAST_COLS, _OUTCOME_COLS, Database
+from database import (
+    MIGRATIONS, SCHEMA, _FORECAST_COLS, _FORECAST_JSON_COLS, _OUTCOME_COLS,
+    Database,
+)
 
 UTC = timezone.utc
 NEW_COLS = ("market_regime", "volatility_regime",
@@ -139,12 +142,83 @@ def test_lifecycle_migrations_no_destructive_sql():
     assert not forbidden, f"destructive/backfill SQL found: {set(forbidden)}"
 
 
-def test_lifecycle_columns_not_in_forecast_cols_yet():
-    # Stage 15B1-a is DDL only: insert wiring (_FORECAST_COLS) comes in 15B1-b.
+# --- Stage 15B1-b: insert/read wiring for lifecycle fields ------------------
+
+def test_lifecycle_columns_in_forecast_cols():
     for col in LIFECYCLE_COLS:
-        assert col not in _FORECAST_COLS, (
-            f"{col} added to _FORECAST_COLS prematurely (Stage 15B1-a is DDL only)"
-        )
+        assert col in _FORECAST_COLS, f"{col} missing from _FORECAST_COLS"
+
+
+def test_lifecycle_json_cols_registered_for_decode():
+    for col in ("setup_lifecycle_reasons", "setup_thresholds_used"):
+        assert col in _FORECAST_JSON_COLS, f"{col} missing from _FORECAST_JSON_COLS"
+
+
+def _lifecycle_forecast(**kw):
+    """Forecast-dict carrying lifecycle analytics (as a future producer would)."""
+    fc = {
+        "symbol": "BTCUSDT", "analysis_type": "SWING", "timeframe": "4h",
+        "signal_candle_close_time": datetime(2026, 6, 2, 4, tzinfo=UTC),
+        "decision_time": datetime(2026, 6, 2, 4, 1, tzinfo=UTC),
+        "analysis_status": "ENTER", "candidate_direction": "long",
+        "setup_lifecycle_status": "UPGRADED",
+        "setup_lifecycle_reasons": ["confidence_up", "long_score_up"],
+        "previous_forecast_id": 41,
+        "setup_lifecycle_comparable": True,
+        "setup_score_delta": 3.0,
+        "setup_confidence_delta": 0.2,
+        "setup_thresholds_used": {"score_delta": 2.5, "confidence_delta": 0.05},
+    }
+    fc.update(kw)
+    return fc
+
+
+def test_insert_forecast_persists_and_reads_lifecycle_fields():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_lifecycle_forecast()))
+    got = asyncio.run(db.latest_forecast("BTCUSDT", "SWING"))
+    assert got["setup_lifecycle_status"] == "UPGRADED"
+    assert got["previous_forecast_id"] == 41
+    assert got["setup_lifecycle_comparable"] is True
+    assert got["setup_score_delta"] == 3.0
+    assert got["setup_confidence_delta"] == 0.2
+
+
+def test_lifecycle_reasons_round_trips_as_list():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_lifecycle_forecast()))
+    got = asyncio.run(db.latest_forecast("BTCUSDT", "SWING"))
+    assert got["setup_lifecycle_reasons"] == ["confidence_up", "long_score_up"]
+    assert isinstance(got["setup_lifecycle_reasons"], list)
+
+
+def test_lifecycle_thresholds_round_trips_as_dict():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_lifecycle_forecast()))
+    got = asyncio.run(db.latest_forecast("BTCUSDT", "SWING"))
+    assert got["setup_thresholds_used"] == {"score_delta": 2.5,
+                                            "confidence_delta": 0.05}
+    assert isinstance(got["setup_thresholds_used"], dict)
+
+
+def test_previous_forecast_reads_lifecycle_fields():
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_lifecycle_forecast()))
+    before = datetime(2026, 6, 3, 4, tzinfo=UTC)
+    got = asyncio.run(db.previous_forecast("BTCUSDT", "SWING", before))
+    assert got is not None
+    assert got["setup_lifecycle_status"] == "UPGRADED"
+    assert got["setup_lifecycle_reasons"] == ["confidence_up", "long_score_up"]
+    assert got["setup_thresholds_used"]["score_delta"] == 2.5
+
+
+def test_legacy_forecast_reads_lifecycle_fields_as_none():
+    # Old-shape dict without lifecycle keys still inserts; lifecycle reads None.
+    db = Database(dsn=None)
+    asyncio.run(db.insert_forecast(_legacy_forecast()))
+    got = asyncio.run(db.latest_forecast("BTCUSDT", "SWING"))
+    for col in LIFECYCLE_COLS:
+        assert got[col] is None, col
 
 
 def _outcome(**kw):
