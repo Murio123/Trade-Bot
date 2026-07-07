@@ -59,3 +59,39 @@ def test_signal_command_captures_one_display_price_snapshot(monkeypatch):
 
     assert calls["current_price"] == 1
     assert calls["run_signal"] == [("swing", 63_094.0)]
+
+
+def test_format_blocked_uses_display_price_and_labels_context_price():
+    text = formatting.format_blocked(
+        {
+            "blocked_at": "no_trade",
+            "price": 63_378.0,
+            "htf_bias": "neutral",
+            "htf_tf": "4h",
+        },
+        display_price=63_094.0,
+    )
+
+    assert "💰 Текущая цена: 63 094" in text
+    assert "🕯 Цена свечи / контекста: 63 378" in text
+    assert "\nЦена: 63 378" not in text
+
+
+def test_combined_blocked_sections_do_not_show_conflicting_generic_prices():
+    display_price = 63_094.0
+    text = "\n\n".join([
+        formatting.format_blocked(
+            {"blocked_at": "no_trade", "price": 63_094.0, "htf_tf": "1h"},
+            display_price=display_price,
+        ),
+        formatting.format_blocked(
+            {"blocked_at": "no_trade", "price": 63_378.0, "htf_tf": "4h"},
+            display_price=display_price,
+        ),
+    ])
+
+    assert text.count("💰 Текущая цена: 63 094") == 2
+    assert "🕯 Цена свечи / контекста: 63 094" in text
+    assert "🕯 Цена свечи / контекста: 63 378" in text
+    assert "\nЦена: 63 094" not in text
+    assert "\nЦена: 63 378" not in text

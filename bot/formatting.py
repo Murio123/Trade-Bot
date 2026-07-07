@@ -966,7 +966,8 @@ def format_last_signal_note(last: dict[str, Any] | None,
     )
 
 
-def format_blocked(result: dict[str, Any]) -> str:
+def format_blocked(result: dict[str, Any],
+                   display_price: float | None = None) -> str:
     stage = result.get("blocked_at")
     bias = result.get("htf_bias", "neutral")
     long_s = result.get("long_score")
@@ -976,8 +977,10 @@ def format_blocked(result: dict[str, Any]) -> str:
     lines.append(f"Причина: {BLOCK_REASON.get(stage, stage or 'нет данных')}")
 
     price = result.get("price")
+    if display_price is not None:
+        lines.append(f"💰 Текущая цена: {_fmt_price(display_price)}")
     if price is not None:
-        lines.append(f"Цена: {_fmt_price(price)}")
+        lines.append(f"🕯 Цена свечи / контекста: {_fmt_price(price)}")
 
     lines.append(f"HTF ({result.get('htf_tf', '1d').upper()}): {HTF_LINE.get(bias, bias)}")
 

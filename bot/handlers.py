@@ -202,7 +202,7 @@ async def _run_signal(update: Update, context: ContextTypes.DEFAULT_TYPE,
         return
 
     if result.get("status") == "blocked":
-        text = formatting.format_blocked(result)
+        text = formatting.format_blocked(result, display_price=display_price)
         # Continuity: no NEW setup does not mean the previous one vanished.
         note = formatting.format_last_signal_note(
             last_signal, max_age_hours=profile["cooldown_hours"] * 3)
