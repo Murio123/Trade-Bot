@@ -864,7 +864,14 @@ def _ai_status_line(s: dict[str, Any]) -> str:
 
 def format_status(s: dict[str, Any]) -> str:
     dry = s.get("dry_run")
+    dry_alerts = s.get("send_dry_run_alerts")
     db_ok = s.get("db_connected")
+    if dry:
+        mode = ("DRY-RUN 🧪 (уведомления шлются, manual only)"
+                if dry_alerts else
+                "DRY-RUN 🧪 (уведомления НЕ шлются)")
+    else:
+        mode = "LIVE ✅ (уведомления включены)"
     lines = [
         "🩺 Статус бота",
         "",
@@ -872,7 +879,7 @@ def format_status(s: dict[str, Any]) -> str:
         f"💰 Цена {config.SYMBOL_DISPLAY}: {_fmt_price(s.get('price'))}",
         f"🗄 База данных: {'PostgreSQL ✅' if db_ok else 'in-memory ⚠️ (без персистентности)'}",
         _ai_status_line(s),
-        f"📡 Режим: {'DRY-RUN 🧪 (уведомления НЕ шлются)' if dry else 'LIVE ✅ (уведомления включены)'}",
+        f"📡 Режим: {mode}",
         f"🔔 Получатели алертов: {s.get('alert_chats', 0)}",
         "",
         f"⏱ Последний анализ: {_ago(s.get('last_analysis_at'))}"

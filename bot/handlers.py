@@ -504,6 +504,7 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "ai_error": (bot_data.get("ai_health") or {}).get("error"),
         "ai_model": config.ANTHROPIC_MODEL,
         "dry_run": config.DRY_RUN,
+        "send_dry_run_alerts": config.SEND_DRY_RUN_ALERTS,
         "alert_chats": len(config.TELEGRAM_ALERT_CHAT_IDS),
         "last_analysis_at": bot_data.get("last_analysis_at"),
         "last_analysis_tf": bot_data.get("last_analysis_tf"),

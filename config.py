@@ -149,8 +149,11 @@ STRATEGY_VERSION = _get("STRATEGY_VERSION", "2026-07-stage9-1")
 CONTEXT_VERSION = _get("CONTEXT_VERSION", "2026-07-stage9-1")
 
 # --- Operating mode -------------------------------------------------------
-# Dry-run: run the whole pipeline but do NOT send Telegram alerts (ТЗ step 10).
+# Dry-run: run the whole pipeline but do NOT send Telegram alerts by default
+# (ТЗ step 10). SEND_DRY_RUN_ALERTS keeps dry-run enabled but allows manual
+# Telegram notifications for visibility.
 DRY_RUN = _get_bool("DRY_RUN", True)
+SEND_DRY_RUN_ALERTS = _get_bool("SEND_DRY_RUN_ALERTS", False)
 
 # HTTP behaviour
 HTTP_TIMEOUT = _get_float("HTTP_TIMEOUT", 15.0)
