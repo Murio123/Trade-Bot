@@ -124,7 +124,7 @@ async def analysis_job(application, profile_name: str = "swing") -> None:
 
     # Persist anything at journal threshold or above.
     if result.get("score", 0) >= config.SCORE_JOURNAL_MIN:
-        record = {**result, "delivered": status == "alert"}
+        record = {**result, "delivered": False}
         signal_id = await db.insert_signal(record)
         if forecast_id:
             try:
@@ -139,16 +139,21 @@ async def analysis_job(application, profile_name: str = "swing") -> None:
             text = formatting.format_signal(result)
             if not can_open:
                 text += "\n\n" + formatting.format_risk_cap_note()
-            await alerts.send_signal_alert(application.bot, text)
-            await _send_signal_chart(application, ctx, result)
-            await db.mark_delivered(signal_id)
-            if can_open:
-                await journal.record_signal_as_trade(signal_id, result)
+            sent = await alerts.send_signal_alert(application.bot, text)
+            if sent:
+                await db.mark_delivered(signal_id)
+                await _send_signal_chart(application, ctx, result)
+                if can_open:
+                    await journal.record_signal_as_trade(signal_id, result)
+                else:
+                    log.warning("Risk cap: %s open trades >= MAX_OPEN_TRADES=%s — "
+                                "alert #%s delivered without a journal trade",
+                                config.SYMBOL, config.MAX_OPEN_TRADES, signal_id)
+                log.info("Delivered alert signal #%s (score %s)",
+                         signal_id, result["score"])
             else:
-                log.warning("Risk cap: %s open trades >= MAX_OPEN_TRADES=%s — "
-                            "alert #%s delivered without a journal trade",
-                            config.SYMBOL, config.MAX_OPEN_TRADES, signal_id)
-            log.info("Delivered alert signal #%s (score %s)", signal_id, result["score"])
+                log.info("Alert signal #%s was not delivered; journal trade not opened",
+                         signal_id)
         else:
             log.info("Stored journal signal #%s (score %s)", signal_id, result["score"])
 

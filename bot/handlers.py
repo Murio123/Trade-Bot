@@ -453,9 +453,9 @@ async def testalert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Diagnose why auto-alerts may not arrive, and send a test if configured."""
     from bot import alerts
     problems = []
-    if config.DRY_RUN:
-        problems.append("• DRY_RUN=true — реальная отправка ВЫКЛЮЧЕНА. "
-                        "Поставь DRY_RUN=false в Railway.")
+    if config.DRY_RUN and not config.SEND_DRY_RUN_ALERTS:
+        problems.append("• DRY_RUN=true и SEND_DRY_RUN_ALERTS=false — "
+                        "dry-run отправка алертов выключена.")
     if not config.TELEGRAM_ALERT_CHAT_IDS:
         problems.append("• TELEGRAM_ALERT_CHAT_IDS пуст — нет получателей. "
                         "Впиши свой chat_id (узнать: @userinfobot).")
@@ -465,12 +465,18 @@ async def testalert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             + "\n\nПосле исправления снова нажми /testalert."
         )
         return
-    await alerts.broadcast(
+    sent = await alerts.send_signal_alert(
         context.application.bot,
         "✅ Тестовый алерт: канал автосигналов настроен и работает.\n"
         "Реальные сигналы придут сюда же, когда сетап наберёт порог.")
+    if not sent:
+        await update.effective_message.reply_text(
+            "❌ Тестовый алерт не был отправлен. Проверь Telegram получателей "
+            "и логи отправки.")
+        return
+    mode = "DRY-RUN / MANUAL ONLY" if config.DRY_RUN else "LIVE"
     await update.effective_message.reply_text(
-        f"✅ Конфигурация в порядке (LIVE, получателей: "
+        f"✅ Конфигурация в порядке ({mode}, получателей: "
         f"{len(config.TELEGRAM_ALERT_CHAT_IDS)}).\n"
         "Отправил тестовый алерт получателям — проверь, что он пришёл.\n\n"
         "Если тест пришёл, но сигналов нет — значит сетап пока не набирает "

@@ -94,8 +94,10 @@ tests/                  pytest: каскад, лайфцикл сделок, а�
    `TELEGRAM_ALERT_CHAT_IDS` (chat_id получателя).
 3. Безопасность: `TELEGRAM_ALLOWED_CHAT_IDS` — кто вообще может писать боту
    (по умолчанию = получатели алертов; чужие отклоняются).
-4. Старт в **`DRY_RUN=true`**: анализ идёт, уведомления не шлются. Проверить
-   `/status` и `/testalert`, затем `DRY_RUN=false`.
+4. Старт в **`DRY_RUN=true`**: анализ идёт, уведомления не шлются. Для
+   manual-only Telegram-сигналов без авто-сделок можно включить
+   `SEND_DRY_RUN_ALERTS=true`. Проверить `/status` и `/testalert`, затем
+   `DRY_RUN=false` для LIVE-уведомлений.
 5. Источник данных: `EXCHANGE=auto` (Bybit↔Binance c автофейловером при 451).
 
 Полный список переменных — в `.env.example`. Все внешние источники, кроме
