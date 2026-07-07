@@ -51,7 +51,11 @@ def format_signal(signal: dict[str, Any]) -> str:
     lines = [
         f"{emoji} {config.SYMBOL_DISPLAY} {style} | {signal.get('timeframe', '').upper()} | {ts_str}",
         f"📊 Направление: {DIRECTION_LABEL.get(direction, direction)}",
-        f"💰 Вход: {_fmt_price(signal.get('entry_price'))}",
+    ]
+    if signal.get("display_price") is not None:
+        lines.append(f"💰 Текущая цена: {_fmt_price(signal.get('display_price'))}")
+    lines += [
+        f"🕯 Цена свечи / вход: {_fmt_price(signal.get('entry_price'))}",
         "",
         "📐 Risk Management:",
         f"🛑 Стоп-лосс: {_fmt_price(signal.get('stop_loss'))} "

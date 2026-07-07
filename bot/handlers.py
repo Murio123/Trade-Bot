@@ -103,6 +103,14 @@ async def _fresh_context(context: ContextTypes.DEFAULT_TYPE,
     return ctx
 
 
+async def _signal_display_price(context: ContextTypes.DEFAULT_TYPE) -> float | None:
+    try:
+        return float(await _binance(context).current_price())
+    except Exception as exc:  # noqa: BLE001
+        log.warning("signal display price fetch failed: %s", exc)
+        return None
+
+
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Show the persistent reply keyboard and an inline quick-menu.
     await update.effective_message.reply_text(
@@ -173,7 +181,8 @@ async def guide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def _run_signal(update: Update, context: ContextTypes.DEFAULT_TYPE,
-                      profile_name: str) -> None:
+                      profile_name: str,
+                      display_price: float | None = None) -> None:
     from signal_engine.profiles import get_profile
     profile = get_profile(profile_name)
     await update.effective_message.reply_text(
@@ -215,7 +224,12 @@ async def _run_signal(update: Update, context: ContextTypes.DEFAULT_TYPE,
             else:
                 risk_capped = True
 
-    text = formatting.format_signal(result)
+    display_result = dict(result)
+    display_result["display_price"] = (
+        display_price if display_price is not None
+        else result.get("executable_price_at_decision")
+    )
+    text = formatting.format_signal(display_result)
     if risk_capped:
         text += "\n\n" + formatting.format_risk_cap_note()
     if result.get("status") == "cooldown":
@@ -241,15 +255,18 @@ async def _send_chart(update: Update, ctx: dict[str, Any],
 
 
 async def signal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _run_signal(update, context, "swing")
+    display_price = await _signal_display_price(context)
+    await _run_signal(update, context, "swing", display_price=display_price)
 
 
 async def intraday_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _run_signal(update, context, "intraday")
+    display_price = await _signal_display_price(context)
+    await _run_signal(update, context, "intraday", display_price=display_price)
 
 
 async def position_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _run_signal(update, context, "position")
+    display_price = await _signal_display_price(context)
+    await _run_signal(update, context, "position", display_price=display_price)
 
 
 async def reversal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
