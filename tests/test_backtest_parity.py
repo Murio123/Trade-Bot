@@ -108,10 +108,10 @@ def test_observable_drift_demonstrated_per_scenario():
 
 def test_injected_identity_break_is_unexpected(monkeypatch):
     """Слом общего helper (как при скрытом форке логики) => unexpected + exit != 0."""
-    monkeypatch.setattr(bp.pipeline, "filter_by_htf",
+    monkeypatch.setattr(bp.pipeline, "apply_htf_policy",
                         lambda *a, **k: None, raising=True)
     checks = bp.reproduced_checks()
-    assert any(c.name == "filter_by_htf" and not c.ok for c in checks)
+    assert any(c.name == "apply_htf_policy" and not c.ok for c in checks)
     _, summary = bp.evaluate()
     assert summary.unexpected
     assert bp.main() == 1

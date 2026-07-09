@@ -36,7 +36,7 @@ from risk.position_sizing import calculate_position
 from signal_engine.confluence import (calculate_confluence_score,
                                       has_diverse_confirmation)
 from analyzer.volatility import analyze_volatility
-from signal_engine.htf_filter import filter_by_htf, get_htf_bias
+from signal_engine.htf_filter import apply_htf_policy, get_htf_bias
 from signal_engine.profiles import get_profile
 from signal_engine.regime import detect_regime, weighted_total
 from signal_engine.no_trade_gate import effective_expected_move
@@ -209,7 +209,7 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
             continue
         direction, total, scores = ("long", lt, ls) if lt > st else ("short", st, ss)
 
-        if filter_by_htf(direction, htf_bias) is None:
+        if apply_htf_policy(direction, htf_bias, profile) is None:
             continue
         if not has_diverse_confirmation(scores, config.MIN_DIVERSE_CATEGORIES):
             continue

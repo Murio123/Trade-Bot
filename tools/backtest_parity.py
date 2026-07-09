@@ -58,7 +58,7 @@ from tests.synthetic_market import TF_MINUTES, build_ctx, make_klines
 REPRODUCED_SHARED: tuple[str, ...] = (
     "calculate_confluence_score",
     "has_diverse_confirmation",
-    "filter_by_htf",
+    "apply_htf_policy",
     "get_htf_bias",
     "weighted_total",
     "detect_regime",
@@ -105,7 +105,7 @@ GATE_CLASSIFICATION: dict[str, tuple[str, str | None, str]] = {
     # --- воспроизводимые в backtest (общий helper, тот же вход по построению) ---
     "abnormal_volatility": (REPRODUCED, None, "vetoes.abnormal_volatility, общий"),
     "direction_conflict": (REPRODUCED, None, "lt == st -> skip, зеркально каскаду"),
-    "htf_filter": (REPRODUCED, None, "filter_by_htf, общий"),
+    "htf_filter": (REPRODUCED, None, "apply_htf_policy, общий"),
     "diversity": (REPRODUCED, None, "has_diverse_confirmation, общий"),
     "below_threshold": (REPRODUCED, None, "total < min(THRESHOLDS)=5 == SCORE_JOURNAL_MIN"),
     "dead_zone": (REPRODUCED, None, "vetoes.dead_zone, общий"),
@@ -340,7 +340,7 @@ def backtest_equiv_decision(profile_name: str, seed: int, drift: float,
     direction, total, scores = ("long", lt, ls) if lt > st else ("short", st, ss)
     out["direction"], out["total"] = direction, total
 
-    if bt.filter_by_htf(direction, htf_bias) is None:
+    if bt.apply_htf_policy(direction, htf_bias, profile) is None:
         out["outcome"] = "skip:htf_filter"
         return out
     if not bt.has_diverse_confirmation(scores, bt.config.MIN_DIVERSE_CATEGORIES):

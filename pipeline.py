@@ -38,7 +38,7 @@ from signal_engine.confluence import (calculate_confluence_score,
 from signal_engine.conflict_resolver import resolve_conflicts
 from signal_engine.cooldown import should_send_signal
 from signal_engine.daily_limiter import within_daily_limit
-from signal_engine.htf_filter import filter_by_htf, get_htf_bias
+from signal_engine.htf_filter import apply_htf_policy, get_htf_bias
 from signal_engine.mtf_confidence import mtf_confidence_factor, trend_label
 from signal_engine.no_trade_gate import (bad_risk_reward,
                                          effective_expected_move,
@@ -651,8 +651,8 @@ async def run_cascade(ctx: dict[str, Any], delivered_today: list[dict[str, Any]]
         counter_reasons = long_reasons
     counter_total = min(long_total, short_total)
 
-    # Level 1 (blocking): drop counter-trend signals.
-    allowed = filter_by_htf(direction, htf_bias)
+    # Level 1 (blocking): drop counter-trend signals, per the profile's policy.
+    allowed = apply_htf_policy(direction, htf_bias, profile, ctx)
     if allowed is None:
         return blocked("htf_filter", direction=direction, score=total, **diag)
 

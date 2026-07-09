@@ -1,11 +1,14 @@
 """Core signal-engine invariants: the money-critical logic."""
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from signal_engine.confluence import (calculate_confluence_score,
                                       has_diverse_confirmation)
 from signal_engine.cooldown import should_send_signal
 from signal_engine.daily_limiter import within_daily_limit
-from signal_engine.htf_filter import filter_by_htf, get_htf_bias
+from signal_engine.htf_filter import (DEFAULT_HTF_POLICY, apply_htf_policy,
+                                      filter_by_htf, get_htf_bias)
 from signal_engine.mtf_confidence import mtf_confidence_factor
 from signal_engine.profiles import PROFILES, get_profile
 from risk.position_sizing import calculate_position
@@ -24,6 +27,63 @@ def test_htf_filter_blocks_counter_trend():
     assert filter_by_htf("long", "bearish") is None
     assert filter_by_htf("long", "bullish") == "long"
     assert filter_by_htf("short", "neutral") == "short"
+
+
+# --- HTF policy (level 1, profile-declared) ---------------------------------
+# Every shipped profile is trend-following: the counter-trend gate must stay
+# absolute. These pin Stage A's contract — the policy indirection changed the
+# call site, never the decision.
+
+TREND_PROFILES = ("intraday", "swing", "position")
+
+
+@pytest.mark.parametrize("name", TREND_PROFILES)
+def test_trend_profiles_declare_block_counter_trend(name):
+    assert PROFILES[name]["htf_policy"] == DEFAULT_HTF_POLICY
+
+
+@pytest.mark.parametrize("name", TREND_PROFILES)
+def test_trend_profiles_block_counter_trend_directions(name):
+    profile = get_profile(name)
+    assert apply_htf_policy("long", "bearish", profile) is None
+    assert apply_htf_policy("short", "bullish", profile) is None
+
+
+@pytest.mark.parametrize("name", TREND_PROFILES)
+def test_trend_profiles_allow_with_trend_directions(name):
+    profile = get_profile(name)
+    assert apply_htf_policy("long", "bullish", profile) == "long"
+    assert apply_htf_policy("short", "bearish", profile) == "short"
+
+
+@pytest.mark.parametrize("profile", [None, {}, {"htf_policy": None},
+                                     {"htf_policy": "no_such_policy"}])
+def test_missing_or_unknown_policy_falls_back_to_blocking(profile):
+    """A profile without a usable policy must not silently open the gate."""
+    assert apply_htf_policy("long", "bearish", profile) is None
+    assert apply_htf_policy("short", "bullish", profile) is None
+    assert apply_htf_policy("long", "bullish", profile) == "long"
+    assert apply_htf_policy("short", "bearish", profile) == "short"
+
+
+def test_policy_matches_legacy_filter_over_full_input_space():
+    """Golden equivalence: for every shipped profile and every (direction,
+    bias) pair, the new policy returns exactly what filter_by_htf returned."""
+    biases = ("bullish", "bearish", "neutral", "unknown")
+    directions = ("long", "short", None)
+    for name in TREND_PROFILES:
+        profile = get_profile(name)
+        for bias in biases:
+            for direction in directions:
+                assert (apply_htf_policy(direction, bias, profile, ctx=None)
+                        == filter_by_htf(direction, bias)), (name, bias, direction)
+
+
+def test_policy_ignores_ctx_for_trend_profiles():
+    """ctx is accepted for future policies; it must not alter today's gate."""
+    profile = get_profile("swing")
+    ctx = {"rsi": 5, "bullish_reversal": True, "price": 1}
+    assert apply_htf_policy("long", "bearish", profile, ctx) is None
 
 
 # --- Confluence (levels 2-3) ------------------------------------------------

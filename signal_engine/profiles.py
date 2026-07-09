@@ -40,6 +40,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "analysis_type": "SWING",
         "entry": "4h",
         "htf": "1d",
+        "htf_policy": "block_counter_trend",
         "mtf": ["1h", "4h", "12h", "1d"],  # confirm / setup / structure / regime
         "zone_tfs": ["12h", "6h"],         # key zones: 12H regime + 6H structure
         "structural_stop": True,
@@ -66,6 +67,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "analysis_type": "POSITIONAL",
         "entry": "4h",
         "htf": "1d",
+        "htf_policy": "block_counter_trend",
         "mtf": ["4h", "12h", "1d"],
         "zone_tfs": ["1d", "12h"],
         "structural_stop": True,
@@ -90,6 +92,7 @@ PROFILES: dict[str, dict[str, Any]] = {
         "analysis_type": "INTRADAY",
         "entry": "15m",
         "htf": "4h",                 # direction from the 4H context (was 1H)
+        "htf_policy": "block_counter_trend",
         "mtf": ["15m", "1h", "4h"],  # confirm / setup / context
         "zone_tfs": ["4h", "2h", "1h"],  # context+setup zones
         "stop_tf": "1h",             # 15m-ATR stops are eaten by fees
