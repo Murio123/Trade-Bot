@@ -118,6 +118,15 @@ FUNDING_Z_SIGNAL = _get_float("FUNDING_Z_SIGNAL", 1.5)
 MIN_RISK_REWARD = _get_float("MIN_RISK_REWARD", 1.5)   # to TP2
 MIN_CONFIDENCE = _get_float("MIN_CONFIDENCE", 0.3)
 
+# --- Counter-trend exhaustion (require_exhaustion HTF policy) --------------
+# Bars a counter-trend (bounce) setup must clear before the HTF gate admits
+# it. Used only by signal_engine/exhaustion.py; no shipped profile declares
+# the require_exhaustion policy yet.
+# Timeframes that must confirm the reversal (multi-TF exhaustion).
+BOUNCE_MIN_REVERSAL_TFS = _get_int("BOUNCE_MIN_REVERSAL_TFS", 2)
+# Corroborating factors required on top of the mandatory conditions.
+BOUNCE_MIN_OPTIONAL_CONFIRMATIONS = _get_int("BOUNCE_MIN_OPTIONAL_CONFIRMATIONS", 1)
+
 # Score thresholds (see ТЗ "Финальная классификация").
 SCORE_ALERT_MIN = _get_int("SCORE_ALERT_MIN", 8)     # 8-10 -> push to Telegram
 SCORE_JOURNAL_MIN = _get_int("SCORE_JOURNAL_MIN", 5)  # 5-7 -> store, available via /signal

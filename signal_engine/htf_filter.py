@@ -4,15 +4,22 @@ Signals against the daily trend are blocked entirely — not sent, not recorded
 as "weak". This is the protection against entering against the higher trend.
 
 The filter is applied through a POLICY declared by the trade-style profile
-(``htf_policy``) rather than hard-wired into the cascade. Today the only
-policy is ``block_counter_trend`` — the historical behaviour — so every
-existing profile keeps its exact semantics. A profile that omits the key, or
-names a policy that does not exist, falls back to that same behaviour: the
-gate can only ever be made stricter by accident, never looser.
+(``htf_policy``) rather than hard-wired into the cascade:
+
+- ``block_counter_trend`` — the historical behaviour and the DEFAULT. Every
+  shipped profile is trend-following and declares it, so their semantics are
+  unchanged. A profile that omits the key, or names a policy that does not
+  exist, falls back to it: the gate can only ever be made stricter by
+  accident, never looser.
+- ``require_exhaustion`` — admits a counter-trend direction only when the
+  context shows exhaustion (see :mod:`signal_engine.exhaustion`). Intended for
+  a future bounce / mean-reversion profile; no profile declares it today.
 """
 from __future__ import annotations
 
 from typing import Any, Optional
+
+from signal_engine.exhaustion import bearish_exhaustion, bullish_exhaustion
 
 
 def get_htf_bias(data_1d: dict[str, Any]) -> str:
@@ -47,8 +54,28 @@ def _block_counter_trend(direction: Optional[str], htf_bias: str,
     return filter_by_htf(direction, htf_bias)
 
 
+def _require_exhaustion(direction: Optional[str], htf_bias: str,
+                        ctx: dict[str, Any] | None) -> Optional[str]:
+    """Admit a counter-trend direction only on confirmed exhaustion.
+
+    With-trend and neutral-regime directions pass through untouched — they are
+    not counter-trend and this policy has nothing to say about them. A missing
+    or malformed ctx fails closed (the exhaustion predicates return False), so
+    a caller that cannot supply the context gets ``block_counter_trend``
+    semantics rather than an open gate.
+    """
+    if direction is None:
+        return None
+    if htf_bias == "bearish" and direction == "long":
+        return direction if bullish_exhaustion(ctx)[0] else None
+    if htf_bias == "bullish" and direction == "short":
+        return direction if bearish_exhaustion(ctx)[0] else None
+    return direction
+
+
 HTF_POLICIES = {
     DEFAULT_HTF_POLICY: _block_counter_trend,
+    "require_exhaustion": _require_exhaustion,
 }
 
 
