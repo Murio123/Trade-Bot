@@ -1,7 +1,7 @@
 """Render signals and analysis into the Telegram message format from the ТЗ."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 import config
@@ -32,6 +32,20 @@ def _fmt_duration(hours: Any) -> str:
     return f"{round(hours / 24, 1)} дн"
 
 
+def to_display_tz(dt: datetime) -> datetime:
+    """Convert a stored UTC timestamp to the user's display timezone.
+
+    Naive datetimes are treated as UTC (how the DB stores them).
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(config.DISPLAY_TZ)
+
+
+def fmt_display_time(dt: datetime, fmt: str = "%Y-%m-%d %H:%M") -> str:
+    return f"{to_display_tz(dt):{fmt}} {config.DISPLAY_TZ_LABEL}"
+
+
 def format_risk_cap_note() -> str:
     """Warning appended to an alert delivered over the open-positions cap."""
     return (f"⚠️ Лимит одновременных позиций ({config.MAX_OPEN_TRADES}) исчерпан — "
@@ -41,7 +55,7 @@ def format_risk_cap_note() -> str:
 def format_signal(signal: dict[str, Any]) -> str:
     ts = signal.get("timestamp")
     if isinstance(ts, datetime):
-        ts_str = ts.strftime("%Y-%m-%d %H:%M UTC")
+        ts_str = fmt_display_time(ts)
     else:
         ts_str = str(ts or "")
 

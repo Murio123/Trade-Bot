@@ -213,13 +213,26 @@ async def _run_signal(update: Update, context: ContextTypes.DEFAULT_TYPE,
 
     # Persist what the user saw, so /signal has memory: cooldown works against
     # it and the setup can be shown later instead of "нет позиций".
+    # Same guard as the scheduled stream: while a trade of this profile is
+    # unresolved, the row is stored UNDELIVERED (it must not feed the cooldown
+    # or daily limit), no journal trade is opened, and the reply is rendered
+    # as an analysis update — never as a new actionable alert.
     risk_capped = False
+    duplicate_suppressed = False
     if result.get("status") in ("alert", "journal"):
-        record = {**result, "delivered": result["status"] == "alert"}
+        if result["status"] == "alert":
+            duplicate_suppressed = await journal.has_active_trade(
+                config.SYMBOL, result.get("analysis_type"),
+                result.get("timeframe"))
+        record = {**result,
+                  "delivered": result["status"] == "alert" and not duplicate_suppressed}
         signal_id = await db.insert_signal(record)
         if result["status"] == "alert":
+            if duplicate_suppressed:
+                log.info("signal alert suppressed: active signal already open "
+                         "(manual /signal — informational reply only)")
             # Same aggregate risk cap as the scheduled stream.
-            if await journal.can_open_new_trade(config.SYMBOL):
+            elif await journal.can_open_new_trade(config.SYMBOL):
                 await journal.record_signal_as_trade(signal_id, result)
             else:
                 risk_capped = True
@@ -230,6 +243,10 @@ async def _run_signal(update: Update, context: ContextTypes.DEFAULT_TYPE,
         else result.get("executable_price_at_decision")
     )
     text = formatting.format_signal(display_result)
+    if duplicate_suppressed:
+        text = ("⚠️ Активный сигнал уже открыт. Новый сигнал не отправлен "
+                "и не добавлен в журнал.\n"
+                "Только обновление анализа, не новая торговая идея.\n\n" + text)
     if risk_capped:
         text += "\n\n" + formatting.format_risk_cap_note()
     if result.get("status") == "cooldown":
@@ -337,8 +354,8 @@ def _forecast_line(sig: dict[str, Any]) -> str:
     when = ""
     if created is not None:
         try:
-            when = f" · {created:%d.%m %H:%M} UTC"
-        except (TypeError, ValueError):
+            when = f" · {formatting.fmt_display_time(created, '%d.%m %H:%M')}"
+        except (TypeError, ValueError, AttributeError):
             pass
     def p(v: Any) -> str:
         return f"{v:,.0f}".replace(",", " ") if v else "—"

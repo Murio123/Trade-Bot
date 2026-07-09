@@ -42,7 +42,43 @@ async def can_open_new_trade(symbol: str) -> bool:
     return len(same) < config.MAX_OPEN_TRADES
 
 
+async def has_active_trade(symbol: str, analysis_type: str | None,
+                           timeframe: str | None = None) -> bool:
+    """Delivery guard: an unresolved journal trade for the same symbol and
+    profile means the setup is already taken — a new alert would only add a
+    duplicate manual trade idea before the first resolves.
+
+    Pre-migration rows with analysis_type NULL are matched by timeframe
+    instead. Fail-open: a DB error must never silence real alerts.
+    """
+    try:
+        open_now = await db.open_trades()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("has_active_trade failed (%s) — not suppressing", exc)
+        return False
+    for t in open_now:
+        if t.get("symbol") not in (None, symbol):
+            continue
+        t_type = t.get("analysis_type")
+        if t_type is not None:
+            if t_type == analysis_type:
+                return True
+        elif timeframe is not None and t.get("timeframe") == timeframe:
+            return True
+    return False
+
+
 async def record_signal_as_trade(signal_id: int, signal: dict[str, Any]) -> int | None:
+    # Re-check right before the insert: the scheduler and manual /signal run
+    # their guards independently, and both could observe "no active trade"
+    # before either records one. Not fully atomic, but it shrinks the race
+    # window to this single call without a schema migration.
+    if await has_active_trade(signal.get("symbol") or config.SYMBOL,
+                              signal.get("analysis_type"),
+                              signal.get("timeframe")):
+        log.info("signal alert suppressed: active signal already open "
+                 "(journal insert skipped for signal #%s)", signal_id)
+        return None
     try:
         return await db.insert_trade({
             "signal_id": signal_id,

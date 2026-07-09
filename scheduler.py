@@ -133,6 +133,15 @@ async def analysis_job(application, profile_name: str = "swing") -> None:
                 log.exception("forecast->signal link failed")
 
         if status == "alert":
+            # Delivery guard, not a decision change: while a journal trade for
+            # this symbol+profile is still open, the forecast and signal rows
+            # above are kept, but no Telegram alert, no mark_delivered and no
+            # second journal trade.
+            if await journal.has_active_trade(config.SYMBOL, analysis_type,
+                                              timeframe):
+                log.info("signal alert suppressed: active signal already open "
+                         "(signal #%s, %s)", signal_id, profile_name)
+                return
             # Aggregate risk cap across profiles: over the cap the alert is
             # still sent (with a warning) but no journal trade is opened.
             can_open = await journal.can_open_new_trade(config.SYMBOL)

@@ -78,6 +78,8 @@ async def _run_scheduler_alert(monkeypatch, send_result: bool) -> FakeDb:
                         lambda *args, **kwargs: _result(result))
     monkeypatch.setattr(scheduler.formatting, "format_signal", lambda r: "signal body")
     monkeypatch.setattr(scheduler.formatting, "format_risk_cap_note", lambda: "risk cap")
+    monkeypatch.setattr(scheduler.journal, "has_active_trade",
+                        lambda *args, **kwargs: _result(False))
     monkeypatch.setattr(scheduler.journal, "can_open_new_trade",
                         lambda symbol: _result(True))
     monkeypatch.setattr(scheduler.journal, "record_signal_as_trade",

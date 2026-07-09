@@ -5,6 +5,7 @@ Nothing here is hard-coded except sane defaults that are safe to expose.
 from __future__ import annotations
 
 import os
+from datetime import timedelta, timezone
 
 
 def _get(name: str, default: str | None = None) -> str | None:
@@ -74,6 +75,17 @@ DATABASE_URL = _get("DATABASE_URL")
 # --- Trading instrument ---------------------------------------------------
 SYMBOL = _get("SYMBOL", "BTCUSDT")
 SYMBOL_DISPLAY = _get("SYMBOL_DISPLAY", "BTC")
+
+# --- Display timezone -------------------------------------------------------
+# Telegram messages show times in this fixed offset (the user's phone TZ).
+# Storage, scheduling and all internal arithmetic stay UTC.
+# timezone() only accepts offsets strictly inside ±24h; anything outside the
+# sane range falls back to the default instead of crashing config import.
+DISPLAY_TZ_OFFSET_HOURS = _get_int("DISPLAY_TZ_OFFSET_HOURS", 3)
+if not -23 <= DISPLAY_TZ_OFFSET_HOURS <= 23:
+    DISPLAY_TZ_OFFSET_HOURS = 3
+DISPLAY_TZ = timezone(timedelta(hours=DISPLAY_TZ_OFFSET_HOURS))
+DISPLAY_TZ_LABEL = _get("DISPLAY_TZ_LABEL", f"UTC+{DISPLAY_TZ_OFFSET_HOURS}")
 
 # --- Exchange selection ---------------------------------------------------
 # Which market-data backend to prefer: "binance", "bybit", or "auto".
