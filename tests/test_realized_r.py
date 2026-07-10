@@ -279,3 +279,190 @@ def test_running_does_not_touch_golden():
     rr.realized_r_summary(*[rr.fm.load_json(str(FIXTURE))[k]
                             for k in ("forecasts", "outcomes")])
     assert _golden_digest() == before
+
+
+# --- Stage B3a.2: analysis_type filter + grouping ---------------------------
+
+def _typed(fid: int, analysis_type, **over) -> dict:
+    """An ENTER long that resolves to +2R (tp2), tagged with an analysis_type."""
+    f = {**_enter("long", 100.0, 90.0, [110.0, 120.0]), "id": fid,
+         "analysis_type": analysis_type}
+    f.update(over)
+    return f
+
+
+def _mixed() -> tuple[list[dict], list[dict]]:
+    """One ENTER per mode, all +2R, plus one row with no analysis_type."""
+    forecasts = [_typed(1, "SWING"), _typed(2, "INTRADAY"),
+                 _typed(3, "POSITION"), _typed(4, "BOUNCE"), _typed(5, None)]
+    outcomes = [_out(forecast_id=i, tp1_hit=True, tp2_hit=True)
+                for i in range(1, 6)]
+    return forecasts, outcomes
+
+
+def test_no_filter_keeps_existing_global_behaviour():
+    forecasts, outcomes = _mixed()
+    s = rr.realized_r_summary(forecasts, outcomes)
+    assert s["total_forecasts"] == 5 and s["computed"] == 5
+    # unchanged: the unfiltered list is the whole population
+    assert rr.filter_by_analysis_type(forecasts, None) == forecasts
+    assert rr.filter_by_analysis_type(forecasts, "") == forecasts
+    assert rr.filter_by_analysis_type(forecasts, "   ") == forecasts
+
+
+@pytest.mark.parametrize("wanted,fid", [
+    ("SWING", 1), ("INTRADAY", 2), ("POSITION", 3), ("BOUNCE", 4)])
+def test_filter_selects_exactly_one_mode(wanted, fid):
+    forecasts, _ = _mixed()
+    rows = rr.filter_by_analysis_type(forecasts, wanted)
+    assert [r["id"] for r in rows] == [fid]
+
+
+@pytest.mark.parametrize("spelling", ["swing", "SWING", "Swing", "  swing  "])
+def test_filter_is_case_and_whitespace_insensitive(spelling):
+    forecasts, _ = _mixed()
+    assert [r["id"] for r in rr.filter_by_analysis_type(forecasts, spelling)] == [1]
+
+
+def test_filter_never_matches_rows_without_analysis_type():
+    forecasts, _ = _mixed()
+    for wanted in ("SWING", "BOUNCE", "unknown", "UNKNOWN", "None"):
+        assert 5 not in [r["id"] for r in rr.filter_by_analysis_type(forecasts, wanted)]
+
+
+def test_filter_on_unknown_mode_returns_nothing():
+    forecasts, outcomes = _mixed()
+    rows = rr.filter_by_analysis_type(forecasts, "NOPE")
+    assert rows == []
+    s = rr.realized_r_summary(rows, outcomes)
+    assert s["computed"] == 0 and s["average_realized_r"] is None
+
+
+def test_grouping_buckets_every_row_exactly_once():
+    forecasts, outcomes = _mixed()
+    groups = rr.summarize_by_analysis_type(forecasts, outcomes)
+    assert set(groups) == {"SWING", "INTRADAY", "POSITION", "BOUNCE", "unknown"}
+    assert sum(g["total_forecasts"] for g in groups.values()) == len(forecasts)
+    for name, g in groups.items():
+        assert g["computed"] == 1 and g["average_realized_r"] == 2.0
+
+
+def test_missing_analysis_type_lands_in_the_unknown_bucket():
+    forecasts, outcomes = _mixed()
+    groups = rr.summarize_by_analysis_type(forecasts, outcomes)
+    assert groups["unknown"]["total_forecasts"] == 1
+    for name in ("SWING", "INTRADAY", "POSITION", "BOUNCE"):
+        assert groups[name]["total_forecasts"] == 1
+
+
+def test_bounce_does_not_blend_into_trend_modes():
+    """The reason this stage exists: an observation-only BOUNCE row must never
+    contribute R to a trend mode's pool."""
+    forecasts = [_typed(1, "SWING"), _typed(2, "INTRADAY"), _typed(3, "POSITION"),
+                 # a catastrophic bounce loss that would drag any shared pool down
+                 {**_typed(4, "BOUNCE"), "stop_loss": 90.0}]
+    outcomes = [_out(forecast_id=i, tp1_hit=True, tp2_hit=True) for i in (1, 2, 3)]
+    outcomes.append(_out(forecast_id=4, stop_hit=True))
+
+    groups = rr.summarize_by_analysis_type(forecasts, outcomes)
+    assert groups["BOUNCE"]["average_realized_r"] == -1.0
+    for name in ("SWING", "INTRADAY", "POSITION"):
+        assert groups[name]["average_realized_r"] == 2.0
+        assert groups[name]["computed"] == 1
+
+    # ...while the global pool DOES mix them — that is exactly what the
+    # grouped view exists to separate.
+    assert rr.realized_r_summary(forecasts, outcomes)["computed"] == 4
+
+
+def test_grouping_is_empty_for_no_forecasts():
+    assert rr.summarize_by_analysis_type([], []) == {}
+
+
+# --- Stage B3a.2: report / CLI ----------------------------------------------
+
+def test_report_without_filter_shows_no_filtered_banner():
+    forecasts, outcomes = _mixed()
+    text = rr.format_report(rr.realized_r_summary(forecasts, outcomes),
+                            rr.summarize_by_analysis_type(forecasts, outcomes))
+    assert "[FILTERED]" not in text
+    assert "by_analysis_type" in text
+
+
+def test_report_with_filter_says_it_is_filtered():
+    forecasts, outcomes = _mixed()
+    rows = rr.filter_by_analysis_type(forecasts, "bounce")
+    text = rr.format_report(rr.realized_r_summary(rows, outcomes),
+                            rr.summarize_by_analysis_type(rows, outcomes),
+                            "bounce")
+    assert "[FILTERED]" in text
+    assert "analysis_type == BOUNCE" in text      # normalised in the banner
+
+
+def test_format_report_still_accepts_a_lone_summary():
+    """Back-compat: the old single-argument call renders without the section."""
+    text = rr.format_report(rr.realized_r_summary(*_mixed()))
+    assert "per-forecast realized R" in text
+    assert "  by_analysis_type:" not in text   # section omitted; the note stays
+
+
+def test_cli_filter_narrows_the_population(capsys):
+    """The fixture holds 7 SWING + 1 INTRADAY, so the filter must really bite."""
+    rr.main(["--input", str(FIXTURE), "--json"])
+    everything = json.loads(capsys.readouterr().out)
+    assert set(everything["by_analysis_type"]) == {"SWING", "INTRADAY"}
+    assert everything["total_forecasts"] == 8
+
+    code = rr.main(["--input", str(FIXTURE), "--analysis-type", "SWING", "--json"])
+    parsed = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert parsed["analysis_type_filter"] == "SWING"
+    assert set(parsed["by_analysis_type"]) == {"SWING"}
+    assert parsed["total_forecasts"] == 7          # the INTRADAY row is gone
+
+
+def test_cli_filter_on_intraday_excludes_the_swing_rows(capsys):
+    rr.main(["--input", str(FIXTURE), "--analysis-type", "intraday", "--json"])
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["total_forecasts"] == 1
+    assert set(parsed["by_analysis_type"]) == {"INTRADAY"}
+
+
+def test_cli_json_keeps_the_global_summary_at_top_level(capsys):
+    """Old consumers read parsed["computed"]; that contract must not break."""
+    rr.main(["--input", str(FIXTURE), "--json"])
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["computed"] == 4                 # same as before this stage
+    assert parsed["analysis_type_filter"] is None
+    assert "by_analysis_type" in parsed
+
+
+def test_cli_text_output_lists_the_groups(capsys):
+    rr.main(["--input", str(FIXTURE)])
+    out = capsys.readouterr().out
+    assert "by_analysis_type:" in out
+    assert "[FILTERED]" not in out
+
+
+def test_cli_filter_is_case_insensitive(capsys):
+    rr.main(["--input", str(FIXTURE), "--analysis-type", "swing"])
+    out = capsys.readouterr().out
+    assert "[FILTERED]" in out and "analysis_type == SWING" in out
+
+
+# --- Stage B3a.2: the formula is untouched ----------------------------------
+
+def test_filtering_does_not_touch_the_formula():
+    """classify/realized_r stay the analyzer leaf objects, re-exported as-is."""
+    import analyzer.realized_r as core
+    assert rr.realized_r is core.realized_r
+    assert rr.classify is core.classify
+
+
+def test_filter_and_grouping_do_not_recompute_r():
+    """A grouped summary equals the summary of that group's rows alone."""
+    forecasts, outcomes = _mixed()
+    groups = rr.summarize_by_analysis_type(forecasts, outcomes)
+    for name in ("SWING", "BOUNCE"):
+        rows = rr.filter_by_analysis_type(forecasts, name)
+        assert groups[name] == rr.realized_r_summary(rows, outcomes)

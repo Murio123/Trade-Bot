@@ -32,10 +32,18 @@ lookahead — использует только то же 72h-окно, что �
 Округление: pure `realized_r` возвращает ПОЛНУЮ точность float (кроме точных
 -1.0 / 0.0); округление применяется только на публичном summary/CLI-выводе.
 
+Группировка по analysis_type (Stage B3a.2): один общий пул смешивал бы режимы —
+наблюдательный BOUNCE растворился бы в SWING/INTRADAY/POSITION. Отчёт по-прежнему
+печатает глобальный summary (старое поведение), но добавляет разбивку по
+analysis_type, а `--analysis-type TYPE` сужает популяцию до одного режима.
+Фильтрация и группировка НЕ трогают формулу — только выборку строк.
+
 Запуск:
 
     .venv/bin/python -m tools.realized_r --input tests/fixtures/forecast_metrics_sample.json
     .venv/bin/python -m tools.realized_r --database-url "$DATABASE_URL"
+    .venv/bin/python -m tools.realized_r --input export.json --analysis-type SWING
+    .venv/bin/python -m tools.realized_r --input export.json --analysis-type BOUNCE
 """
 from __future__ import annotations
 
@@ -49,7 +57,14 @@ from typing import Any
 import tools.forecast_metrics as fm
 from analyzer.realized_r import ENTER, classify, realized_r  # единый источник формулы
 
-__all__ = ["classify", "realized_r", "realized_r_summary", "format_report", "main"]
+__all__ = ["classify", "realized_r", "realized_r_summary",
+           "filter_by_analysis_type", "summarize_by_analysis_type",
+           "format_report", "main"]
+
+# Прогноз без analysis_type (исторические строки) попадает в эту корзину, а не
+# в чужой режим. `--analysis-type` его никогда не матчит: сентинел в нижнем
+# регистре, а реальные типы нормализуются в верхний.
+UNKNOWN_TYPE = "unknown"
 
 # TP1 mid-case: цена достигла TP1, но не TP2 и не исходного стопа. Флаги
 # outcome не фиксируют касание безубытка (entry) после TP1, поэтому точная
@@ -135,11 +150,57 @@ def realized_r_summary(forecasts: list[dict[str, Any]],
 
 
 # ---------------------------------------------------------------------------
+# analysis_type: фильтр и группировка (Stage B3a.2)
+# ---------------------------------------------------------------------------
+
+def _norm_type(value: Any) -> str:
+    """analysis_type -> канонический верхний регистр, либо сентинел UNKNOWN_TYPE."""
+    if isinstance(value, str) and value.strip():
+        return value.strip().upper()
+    return UNKNOWN_TYPE
+
+
+def filter_by_analysis_type(forecasts: list[dict[str, Any]],
+                            analysis_type: str | None) -> list[dict[str, Any]]:
+    """Сузить популяцию до одного режима. None/'' — вернуть всё (старое поведение).
+
+    Матчинг регистронезависимый: в БД типы хранятся в верхнем регистре
+    (SWING / INTRADAY / POSITION / BOUNCE), но CLI не должен об этом знать.
+    Строки без analysis_type не матчатся никогда — они не принадлежат режиму.
+    """
+    if not analysis_type or not analysis_type.strip():
+        return list(forecasts)
+    want = analysis_type.strip().upper()
+    return [f for f in forecasts if _norm_type(f.get("analysis_type")) == want]
+
+
+def summarize_by_analysis_type(forecasts: list[dict[str, Any]],
+                               outcomes: list[dict[str, Any]]
+                               ) -> dict[str, dict[str, Any]]:
+    """Тот же realized_r_summary, посчитанный отдельно по каждому режиму.
+
+    Ни одна строка не попадает в два бакета, и BOUNCE не смешивается с
+    трендовыми режимами. Формула не трогается — меняется только выборка.
+    """
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for f in forecasts:
+        buckets.setdefault(_norm_type(f.get("analysis_type")), []).append(f)
+    return {name: realized_r_summary(rows, outcomes)
+            for name, rows in sorted(buckets.items())}
+
+
+# ---------------------------------------------------------------------------
 # Report / CLI
 # ---------------------------------------------------------------------------
 
-def format_report(summary: dict[str, Any]) -> str:
+def format_report(summary: dict[str, Any],
+                  by_analysis_type: dict[str, dict[str, Any]] | None = None,
+                  analysis_type: str | None = None) -> str:
     lines = ["=== per-forecast realized R (Stage 10, offline read-only) ==="]
+    if analysis_type:
+        lines.append(f"  [FILTERED] analysis_type == {analysis_type.strip().upper()} "
+                     f"— популяция сужена, глобальные числа ниже относятся "
+                     f"только к этому режиму")
     for key in ("total_forecasts", "eligible_forecasts", "computed",
                 "none_unavailable", "none_within_eligible",
                 "average_realized_r", "median_realized_r",
@@ -154,10 +215,24 @@ def format_report(summary: dict[str, Any]) -> str:
     lines.append("  distribution:")
     for k, v in (summary["distribution"] or {"(none)": ""}).items():
         lines.append(f"    {k}: {v}")
+
+    if by_analysis_type is not None:
+        lines.append("  by_analysis_type:")
+        if not by_analysis_type:
+            lines.append("    (none)")
+        for name, s in by_analysis_type.items():
+            lines.append(
+                f"    {name}: total={s['total_forecasts']} "
+                f"eligible={s['eligible_forecasts']} computed={s['computed']} "
+                f"avg={s['average_realized_r']} sum={s['sum_realized_r']}")
+
     lines.append("")
     lines.append("[LIMITATIONS]")
     lines.append(f"  - {MID_CASE_NOTE}")
     lines.append(f"  - {REF_NOTE}")
+    lines.append("  - by_analysis_type группирует по полю forecasts.analysis_type; "
+                 "строки без него попадают в бакет 'unknown' и никогда не "
+                 "приписываются чужому режиму.")
     lines.append("  - Offline analytics metric; НЕ участвует в торговых решениях, "
                  "scoring или risk. Schema-колонка forecast_outcomes.realized_r "
                  "отложена до Stage 11 (см. docs/realized_r_stage10.md).")
@@ -178,16 +253,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input", help="JSON export {forecasts, outcomes, trades}")
     parser.add_argument("--database-url", help="Postgres DSN (только SELECT)")
     parser.add_argument("--symbol", default="BTCUSDT")
+    parser.add_argument("--analysis-type", dest="analysis_type",
+                        help="сузить отчёт до одного режима "
+                             "(SWING / INTRADAY / POSITION / BOUNCE; "
+                             "регистр не важен)")
     parser.add_argument("--json", action="store_true", help="вывести summary как JSON")
     args = parser.parse_args(argv)
 
     data = _load(args)
-    summary = realized_r_summary(data.get("forecasts", []) or [],
-                                 data.get("outcomes", []) or [])
+    outcomes = data.get("outcomes", []) or []
+    forecasts = filter_by_analysis_type(data.get("forecasts", []) or [],
+                                        args.analysis_type)
+
+    summary = realized_r_summary(forecasts, outcomes)
+    by_type = summarize_by_analysis_type(forecasts, outcomes)
     if args.json:
-        print(json.dumps(summary, ensure_ascii=False, indent=2, default=str))
+        # Глобальный summary остаётся на верхнем уровне: старые потребители
+        # JSON (parsed["computed"]) продолжают работать без изменений.
+        payload = {**summary,
+                   "analysis_type_filter": (args.analysis_type or None),
+                   "by_analysis_type": by_type}
+        print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     else:
-        print(format_report(summary))
+        print(format_report(summary, by_type, args.analysis_type))
     return 0
 
 
