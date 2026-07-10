@@ -839,10 +839,18 @@ class WFConfig:
         if holdout_bars is None:
             holdout_bars = int(round(walked_bars * (holdout_frac or 0.0)))
         region = max(0, walked_bars - holdout_bars)
+        # Дефолтные val/train ДОЛЖНЫ гарантировать min_folds. Геометрия
+        # fold_windows требует train + gap + min_folds*val <= region, где
+        # gap = purge + embargo, а train = train_ratio*val. Отсюда
+        # val <= (region - gap) / (train_ratio + min_folds). Прежняя формула
+        # делила region на (min_folds + 2), игнорируя gap, и стабильно давала
+        # min_folds - 1 фолдов — дефолтный --walk-forward всегда падал fail-closed.
+        gap = purge + embargo
+        train_ratio = 2
         if val_bars is None:
-            val_bars = max(1, region // (min_folds + 2))
+            val_bars = max(1, (region - gap) // (train_ratio + min_folds))
         if train_bars is None:
-            train_bars = max(1, 2 * val_bars)
+            train_bars = max(1, train_ratio * val_bars)
         if step_bars is None:
             step_bars = val_bars
         return cls(train_bars=train_bars, val_bars=val_bars, purge_bars=purge,

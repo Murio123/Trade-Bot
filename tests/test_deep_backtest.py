@@ -1361,6 +1361,42 @@ def test_wfconfig_for_profile_purge_floor_and_embargo():
     assert wf.step_bars == wf.val_bars                     # step по умолчанию = val
 
 
+@pytest.mark.parametrize("profile_name,walked", [
+    ("swing", 8760), ("position", 8760),
+    ("intraday", 70080), ("bounce", 35040),
+])
+@pytest.mark.parametrize("holdout_frac", [0.0, 0.15])
+def test_for_profile_default_sizing_fits_min_folds(profile_name, walked,
+                                                   holdout_frac):
+    # Регрессия C1.3d.1: дефолтный авто-сайзер (без train/val overrides) обязан
+    # давать >= min_folds фолдов. Прежняя формула val = region // (min_folds+2)
+    # игнорировала gap = purge + embargo и стабильно давала min_folds - 1, так
+    # что дефолтный --walk-forward всегда падал fail-closed на всех профилях.
+    profile = get_profile(profile_name)
+    wf = deep_backtest.WFConfig.for_profile(
+        profile, walked_bars=walked, holdout_frac=holdout_frac, min_folds=3)
+    assert wf.val_bars > 0 and wf.train_bars > 0
+    assert wf.step_bars >= wf.val_bars                     # непересекающиеся окна
+    assert wf.purge_bars >= deep_backtest.max_hold_bars(profile)
+    # span_lo=0, span_hi=walked -> usable region = walked - holdout, как в run().
+    folds = deep_backtest.fold_windows(0, walked, wf)
+    assert len(folds) >= wf.min_folds
+
+
+def test_default_walk_forward_auto_sizes_without_override(tmp_path):
+    # C1.3d.1: дефолтный --walk-forward (без явных train/val) авто-подбирает
+    # геометрию и НЕ падает fail-closed — раньше run() поднимал DeepBacktestError.
+    outdir = _build_random_walk_dataset(tmp_path / "autowf", depths=WF_DEPTHS)
+    report = deep_backtest.run(
+        str(outdir), "binance", "BTCUSDT", "intraday", WF_BARS,
+        wf_overrides=dict(min_folds=3))
+    wf = report["walk_forward"]
+    assert len(wf["folds"]) >= 3
+    cfg = wf["config"]
+    assert cfg["train_bars"] > 0 and cfg["val_bars"] > 0
+    assert cfg["step_bars"] >= cfg["val_bars"]
+
+
 # --- partition / purge ------------------------------------------------------
 
 def test_partition_purges_train_horizon_leak():
