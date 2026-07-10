@@ -466,3 +466,49 @@ def test_filter_and_grouping_do_not_recompute_r():
     for name in ("SWING", "BOUNCE"):
         rows = rr.filter_by_analysis_type(forecasts, name)
         assert groups[name] == rr.realized_r_summary(rows, outcomes)
+
+
+# --- Stage B3a.2 follow-up: the banner must not lie about the selection -----
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t", "\n  "])
+def test_blank_filter_reports_unfiltered_in_text(capsys, blank):
+    """A whitespace-only filter narrows nothing, so it must not claim to.
+
+    The banner and the actual population are two views of one decision; if they
+    disagree, the report misrepresents its own sample.
+    """
+    rr.main(["--input", str(FIXTURE), "--analysis-type", blank])
+    out = capsys.readouterr().out
+    assert "[FILTERED]" not in out
+    assert "total_forecasts: 8" in out           # the whole fixture population
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_blank_filter_reports_none_in_json(capsys, blank):
+    rr.main(["--input", str(FIXTURE), "--analysis-type", blank, "--json"])
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["analysis_type_filter"] is None
+    assert parsed["total_forecasts"] == 8
+    assert set(parsed["by_analysis_type"]) == {"SWING", "INTRADAY"}
+
+
+def test_padded_real_filter_still_filters_and_says_so(capsys):
+    """Padding around a REAL type is stripped, not treated as blank."""
+    rr.main(["--input", str(FIXTURE), "--analysis-type", "  swing  ", "--json"])
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["analysis_type_filter"] == "swing"   # normalised, not blank
+    assert parsed["total_forecasts"] == 7
+
+    rr.main(["--input", str(FIXTURE), "--analysis-type", "  swing  "])
+    out = capsys.readouterr().out
+    assert "[FILTERED]" in out and "analysis_type == SWING" in out
+
+
+def test_banner_presence_always_matches_the_population(capsys):
+    """Invariant: [FILTERED] appears iff the population was actually narrowed."""
+    for arg, narrowed in (("SWING", True), ("intraday", True),
+                          ("   ", False), ("", False)):
+        rr.main(["--input", str(FIXTURE), "--analysis-type", arg])
+        out = capsys.readouterr().out
+        assert ("[FILTERED]" in out) is narrowed, arg
+        assert ("total_forecasts: 8" in out) is (not narrowed), arg

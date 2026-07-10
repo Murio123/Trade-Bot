@@ -260,10 +260,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true", help="вывести summary как JSON")
     args = parser.parse_args(argv)
 
+    # Нормализуем ОДИН раз: пустая/пробельная строка — это «фильтра нет».
+    # Иначе filter_by_analysis_type ничего не сузит, а баннер и JSON-поле всё
+    # равно отрапортуют фильтрацию — отчёт солгал бы о собственной выборке.
+    analysis_type = (args.analysis_type or "").strip() or None
+
     data = _load(args)
     outcomes = data.get("outcomes", []) or []
     forecasts = filter_by_analysis_type(data.get("forecasts", []) or [],
-                                        args.analysis_type)
+                                        analysis_type)
 
     summary = realized_r_summary(forecasts, outcomes)
     by_type = summarize_by_analysis_type(forecasts, outcomes)
@@ -271,11 +276,11 @@ def main(argv: list[str] | None = None) -> int:
         # Глобальный summary остаётся на верхнем уровне: старые потребители
         # JSON (parsed["computed"]) продолжают работать без изменений.
         payload = {**summary,
-                   "analysis_type_filter": (args.analysis_type or None),
+                   "analysis_type_filter": analysis_type,
                    "by_analysis_type": by_type}
         print(json.dumps(payload, ensure_ascii=False, indent=2, default=str))
     else:
-        print(format_report(summary, by_type, args.analysis_type))
+        print(format_report(summary, by_type, analysis_type))
     return 0
 
 
