@@ -1,6 +1,6 @@
 """Stage 5: offline backtest/live drift parity (Option B).
 
-Доказывает: runner фиксирует backtest/live drift inventory (D1..D12),
+Доказывает: runner фиксирует backtest/live drift inventory (D1..D15),
 reproduced-гейты реально делят один helper с pipeline, каждый гейт каскада
 классифицирован, любой НОВЫЙ drift ломает тест, а golden-снапшоты и
 production-код Stage 5 не трогает. Runner read-only и в runtime не
@@ -9,12 +9,18 @@ production-код Stage 5 не трогает. Runner read-only и в runtime н
 from __future__ import annotations
 
 import hashlib
+import inspect
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 import tools.backtest_parity as bp
+from analyzer.bybit import BybitClient
+from analyzer.cvd import compute_cvd_from_klines
 from contracts.final_gate import GATE_REGISTRY
+from signal_engine.profiles import get_profile
+from signal_engine.vetoes import TF_HOURS
 from tests.test_golden_contexts import SCENARIOS
 
 REPO = Path(__file__).resolve().parent.parent
@@ -34,6 +40,17 @@ EXPECTED_DRIFT_CLASSIFICATION = {
     "D10": bp.DIVERGES,
     "D11": bp.DIVERGES,
     "D12": bp.DIVERGES,
+    "D13": bp.DIVERGES,
+    "D14": bp.DIVERGES,
+    "D15": bp.DIVERGES,
+}
+
+# D13..D15 добавлены на C1-precheck: каждая точка не просто описана, а
+# демонстрируется offline-тестом ниже.
+NEW_DRIFT_CATEGORIES = {
+    "D13": "regime",
+    "D14": "data_depth",
+    "D15": "data_source",
 }
 
 
@@ -102,6 +119,81 @@ def test_observable_drift_demonstrated_per_scenario():
         assert "D8" in r.observed_drift, f"{r.name}: zone_tfs drift не виден"
         # backtest использует именно zone_tfs целиком, live — отфильтрованный набор.
         assert set(r.backtest["zone_tfs_used"]) != set(r.live["zone_tfs_used"])
+
+
+# --- C1-precheck: D13..D15 зарегистрированы и наблюдаемы ---------------------
+
+def test_new_drift_points_registered_observable_and_categorised():
+    for did, category in NEW_DRIFT_CATEGORIES.items():
+        spec = bp.EXPECTED_DRIFT[did]
+        assert spec.observable is True, f"{did}: должен быть observable"
+        assert spec.category == category, f"{did}: категория изменилась"
+
+
+def test_d13_description_preserves_empirical_precheck():
+    """Эмпирика C1-precheck зафиксирована в описании, а не только в чате."""
+    summary = bp.EXPECTED_DRIFT["D13"].summary
+    for token in ("1199/1199", "56.2%", "trend_down"):
+        assert token in summary, f"D13: потеряно из описания: {token}"
+
+
+def test_d13_intraday_regime_is_always_range():
+    """D13 наблюдаем: у intraday htf != '1d' -> detect_regime(None) -> range.
+
+    Прогоняем backtest-equivalent по ВСЕМ golden-сценариям (включая downtrend и
+    high_vol) с профилем intraday: режим обязан быть 'range' на каждом.
+    """
+    assert get_profile("intraday")["htf"] != "1d"
+    assert bp.bt.detect_regime(None) == "range"
+
+    regimes = {name: bp.backtest_equiv_decision("intraday", **params)["regime"]
+               for name, params in SCENARIOS.items()}
+    assert set(regimes.values()) == {"range"}, (
+        f"ожидался константный range на intraday, получено: {regimes}")
+
+    # Контроль: у swing htf='1d', режим берётся с 1D и НЕ обязан быть range.
+    assert get_profile("swing")["htf"] == "1d"
+
+
+def test_d14_aux_frame_depth_cannot_cover_the_walk():
+    """D14 наблюдаем: zone-фрейм на limit=500 короче окна, которое walk проходит.
+
+    Чистая арифметика по константам backtest — сети не требует.
+    """
+    profile = get_profile("swing")
+    entry_hours = TF_HOURS[profile["entry"]]
+    walk_hours = bp.bt.MAX_BARS * entry_hours
+
+    shallow = {tf: bp.AUX_KLINES_LIMIT * TF_HOURS[tf] for tf in profile["zone_tfs"]}
+    deficient = {tf: h for tf, h in shallow.items() if h < walk_hours}
+    assert "6h" in deficient, (
+        f"ожидалось, что 6h-зона не покрывает {walk_hours}ч прогона; "
+        f"покрытие: {shallow}")
+
+    # Бары старше покрытия теряют этот zone-ТФ: len(slice) < 30 -> tf не в zdfs.
+    uncovered_hours = walk_hours - shallow["6h"]
+    assert uncovered_hours > 0
+    assert uncovered_hours / walk_hours > 0.3, (
+        "доля непокрытых баров должна быть материальной, а не краевой")
+
+
+def test_d15_cvd_method_depends_on_taker_buy_base_column():
+    """D15 наблюдаем: наличие taker_buy_base переключает метод CVD."""
+    n = 60
+    base = {"open": [100.0] * n, "high": [101.0] * n,
+            "low": [99.0] * n, "close": [100.5] * n, "volume": [10.0] * n}
+    bybit_shaped = pd.DataFrame(base)                                  # без колонки
+    binance_shaped = pd.DataFrame({**base, "taker_buy_base": [7.0] * n})
+
+    assert compute_cvd_from_klines(bybit_shaped)["method"] == "estimate"
+    assert compute_cvd_from_klines(binance_shaped)["method"] == "exact"
+    # Разные методы дают разный CVD на одних и тех же свечах.
+    assert (compute_cvd_from_klines(bybit_shaped)["cvd"]
+            != compute_cvd_from_klines(binance_shaped)["cvd"])
+
+    # Колонки Bybit действительно не содержат taker_buy_base (источник drift).
+    src = inspect.getsource(BybitClient.klines)
+    assert "taker_buy_base" not in src
 
 
 # --- unexpected mismatch ломает прогон --------------------------------------

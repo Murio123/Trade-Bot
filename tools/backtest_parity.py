@@ -9,7 +9,7 @@ production-поток и НЕ импортируется runtime-кодом. Е�
     helper-функции (identity), плюс сравнением решений на одном синтетическом
     рынке;
   * какие расходятся и почему (diverges_expected / missing_in_backtest_expected
-    / not_applicable) — зафиксировано в EXPECTED_DRIFT (D1..D12);
+    / not_applicable) — зафиксировано в EXPECTED_DRIFT (D1..D15);
   * любой НОВЫЙ, не описанный drift классифицируется как
     ``unexpected_mismatch`` и обязан ломать тесты / давать exit-code != 0.
 
@@ -160,8 +160,15 @@ class GateParity:
 
 
 # ---------------------------------------------------------------------------
-# 3. Expected drift inventory (D1..D12) — зафиксировано из аудита Stage 5
+# 3. Expected drift inventory (D1..D15) — D1..D12 из аудита Stage 5,
+#    D13..D15 добавлены на C1-precheck (регистрация, не починка)
 # ---------------------------------------------------------------------------
+
+# Лимит, с которым backtest забирает вспомогательные (htf/zone) фреймы —
+# в отличие от entry-ТФ, который пагинируется до ENTRY_HISTORY. Зафиксирован
+# здесь, потому что на нём держится D14 (см. ниже).
+AUX_KLINES_LIMIT = 500
+
 
 @dataclass(frozen=True)
 class DriftSpec:
@@ -171,6 +178,7 @@ class DriftSpec:
     classification: str
     summary: str
     observable: bool  # можно ли продемонстрировать на синтетике
+    category: str = ""  # regime / data_depth / data_source / ...
 
 
 EXPECTED_DRIFT: dict[str, DriftSpec] = {
@@ -210,6 +218,38 @@ EXPECTED_DRIFT: dict[str, DriftSpec] = {
     "D12": DriftSpec("D12", "equilibrium_window", DIVERGES,
                      "equilibrium на разных окнах HTF (backtest 250 vs live 300)",
                      observable=True),
+    # --- C1-precheck: подтверждено эмпирически (Stage C1.1) ------------------
+    "D13": DriftSpec("D13", "intraday_regime_constant_range", DIVERGES,
+                     "backtest вызывает detect_regime(ind_htf if htf == \"1d\" else None); "
+                     "у intraday htf=\"4h\", поэтому на КАЖДОМ баре передаётся None и "
+                     "detect_regime возвращает range. Live всегда берёт режим с 1D "
+                     "(ind_1d + volatility_1d). Эмпирика на реальном окне _walk "
+                     "(1200 баров 15m): current = range 1199/1199 = 100%; live-parity = "
+                     "trend_down 674/1199 = 56.2%, range 525/1199 = 43.8%; "
+                     "disagreement rate 56.2%. Следствие: intraday-бары взвешиваются "
+                     "range-весами (trend x0.5) там, где live взвесил бы trend-весами "
+                     "(trend x1.5) — меняются и score, и argmax-направление. "
+                     "Затрагивает ТОЛЬКО intraday: у swing/position/bounce htf=\"1d\".",
+                     observable=True, category="regime"),
+    "D14": DriftSpec("D14", "auxiliary_frame_depth", DIVERGES,
+                     "entry-ТФ пагинируется (_fetch_history -> ENTRY_HISTORY), а "
+                     f"вспомогательные htf/zone фреймы берутся одним запросом "
+                     f"limit={AUX_KLINES_LIMIT}. Поэтому доступность зон и "
+                     "eligibility htf зависят от ВОЗРАСТА бара: для баров старше "
+                     "покрытия фрейма zone-ТФ выпадает из zdfs (len(s) < 30), а htf "
+                     "даёт len(htf_slice) < 210 -> continue. Поднятие MAX_BARS в "
+                     "одиночку не углубляет прогон, а молча увеличивает число "
+                     "пропущенных баров; при этом _report получает bars = n - start "
+                     "и _monthly_projection делит на завышенный период.",
+                     observable=True, category="data_depth"),
+    "D15": DriftSpec("D15", "cvd_source_dependence", DIVERGES,
+                     "klines Bybit не содержат taker_buy_base, klines Binance — "
+                     "содержат. compute_cvd_from_klines ветвится ровно по наличию "
+                     "этой колонки: exact (2*taker_buy - volume) против estimate. "
+                     "MarketClient делает failover между биржами по 429/451, поэтому "
+                     "источник CVD (а с ним cvd_bullish/cvd_bearish и confluence-score) "
+                     "может смениться посреди прогона.",
+                     observable=True, category="data_source"),
 }
 
 
