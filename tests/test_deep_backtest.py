@@ -126,8 +126,9 @@ def _random_walk_frame(timeframe: str, n: int, seed: int, *, drift: float = 0.3,
 OUTCOME_SEED = 6
 
 
-def _build_random_walk_dataset(outdir, seed: int = OUTCOME_SEED) -> str:
-    for tf, n in DEPTHS.items():
+def _build_random_walk_dataset(outdir, seed: int = OUTCOME_SEED,
+                               depths: dict[str, int] | None = None) -> str:
+    for tf, n in (depths or DEPTHS).items():
         kline_cache.write_dataset(_random_walk_frame(tf, n, seed), str(outdir),
                                   exchange="binance", symbol="BTCUSDT",
                                   timeframe=tf, requested_bars=n,
@@ -665,7 +666,11 @@ def test_cli_text_output_and_failure_exit_code(tmp_path, capsys, monkeypatch):
 def test_deep_walk_gate_order_matches_backtest_walk():
     """Порядок гейтов — контракт C1.3b: deep_backtest ИЗМЕРЯЕТ backtest, не чинит.
 
-    Сравниваются позиции опорных вызовов в исходниках обоих модулей.
+    Сравниваются позиции опорных вызовов в исходниках обоих модулей. Это
+    структурная растяжка, а НЕ доказательство эквивалентности: она не увидит
+    изменённый аргумент, предикат, порог или новый гейт вне списка. Настоящую
+    эквивалентность проверяют behavioural-тесты ниже; этот оставлен как дешёвый
+    ранний сигнал о переставленном/удалённом гейте.
     """
     bt = (ROOT / "backtest.py").read_text()
     gates = ["compute_indicators", "get_htf_bias", "_build_htf_zones",
@@ -707,3 +712,298 @@ def test_deep_walk_resolution_matches_backtest_resolve_when_horizon_is_long():
         else:
             assert deep["outcome"] == legacy["outcome"]
             assert deep["r"] == pytest.approx(legacy["r"])
+
+
+# ---------------------------------------------------------------------------
+# Behavioural parity: обе воронки реально ПРОГОНЯЮТСЯ на одних и тех же свечах
+# ---------------------------------------------------------------------------
+#
+# Почему это отдельно от source-order теста: тот сравнивает позиции вызовов в
+# тексте и слеп к изменённому аргументу, предикату, порогу или новому гейту.
+# Здесь backtest._walk и deep_backtest.deep_walk исполняются на ОДНИХ фреймах,
+# и сравниваются их решения.
+#
+# Выравнивание (иначе тест сравнивал бы разные окна):
+#   * n_entry = 342, PARITY_BARS = 42  -> deep.start = max(300, 342-42) = 300
+#   * backtest.MAX_BARS = 1200 > 342   -> bt.start   = max(warmup, <0) = 300
+#   * warmup=300 == deep_backtest.ENTRY_WARMUP
+#   * общий датасет -> общие costs, thresholds и exact-CVD (есть taker_buy_base)
+#
+# Ограничение, зафиксированное явно: backtest._resolve не имеет горизонта и
+# возвращает None для незакрытых сделок (бар молча выпадает из setups), а deep
+# различает timeout/unresolved. Поэтому:
+#   * гейты и сайзинг сравниваются при ЗАГЛУШЕННОМ resolve (тест A) — так
+#     сравнение не зависит от разной семантики разрешения;
+#   * R сравнивается на СОПОСТАВИМОМ подмножестве (тест B) — сделки, которые
+#     deep закрыл штатно (win/loss/breakeven) внутри горизонта.
+
+PARITY_BARS = 42
+
+# Вспомогательные ТФ намеренно ГЛУБЖЕ минимума aux_depth: при 40-45 барах окна
+# HTF_WINDOW=250 и ZONE_WINDOW=160 никогда не «кусаются» (срез и так короче
+# окна), и паритетный тест оказался бы слеп к их изменению. Проверено
+# мутацией: на мелких фреймах подмена ZONE_WINDOW=100 проходила незамеченной,
+# на этих — падает. Длина обхода (PARITY_BARS) при этом не растёт, поэтому
+# тест остаётся быстрым.
+PARITY_DEPTHS = {"15m": 342, "4h": 300, "2h": 300, "1h": 400, "1d": 220}
+
+
+def _parity_fixture(tmp_path_factory, name: str, depths: dict[str, int]):
+    outdir = tmp_path_factory.mktemp(name)
+    with _csv_writer():
+        _build_random_walk_dataset(outdir, depths=depths)
+        frames, profile, _table, cvd_method = deep_backtest.prepare(
+            str(outdir), "binance", "BTCUSDT", "intraday", PARITY_BARS,
+            max_gap_ratio=0.001, allow_estimated_cvd=False)
+    assert cvd_method == "exact"
+    dfs = {tf: f.df for tf, f in frames.items()}
+    return frames, dfs, profile
+
+
+@pytest.fixture(scope="module")
+def parity_inputs(tmp_path_factory):
+    """Глубокие aux-фреймы: окна HTF_WINDOW/ZONE_WINDOW реально усекают срез."""
+    return _parity_fixture(tmp_path_factory, "parity", PARITY_DEPTHS)
+
+
+@pytest.fixture(scope="module")
+def parity_resolved_inputs(tmp_path_factory):
+    """Мелкие aux-фреймы (DEPTHS): на них воронка даёт ЗАКРЫТЫЕ сделки.
+
+    Нужна отдельная фикстура: на PARITY_DEPTHS структурный стоп уезжает дальше
+    от входа, и внутри 41-барового хвоста истории ни одна сделка не успевает
+    закрыться — сравнивать R было бы не на чем. Гейты/срезы это не проверяет
+    (для них есть тесты A и C), здесь важен только штатный исход.
+    """
+    return _parity_fixture(tmp_path_factory, "parity_resolved", DEPTHS)
+
+
+def test_parity_walk_windows_are_aligned(parity_inputs):
+    """Сам тест паритета бессмыслен, если воронки идут по разным барам."""
+    import backtest
+
+    _frames, dfs, _profile = parity_inputs
+    n = len(dfs["15m"])
+    assert n == PARITY_DEPTHS["15m"]
+    assert n - PARITY_BARS == deep_backtest.ENTRY_WARMUP        # deep.start
+    assert max(deep_backtest.ENTRY_WARMUP, n - backtest.MAX_BARS) == \
+        deep_backtest.ENTRY_WARMUP                              # backtest.start
+    assert deep_backtest.THRESHOLDS == backtest.THRESHOLDS
+
+
+def _run_backtest_walk(monkeypatch, dfs, profile, resolve_stub=None):
+    """backtest._walk возвращает форматированный текст; перехватываем setups."""
+    import backtest
+
+    monkeypatch.setattr(backtest, "_report",
+                        lambda setups, *args, **kwargs: setups)
+    if resolve_stub is not None:
+        monkeypatch.setattr(backtest, "_resolve", resolve_stub)
+    return backtest._walk(dfs, profile, warmup=deep_backtest.ENTRY_WARMUP)
+
+
+def test_deep_walk_gate_decisions_match_backtest_walk(parity_inputs, monkeypatch):
+    """ТЕСТ A: одни свечи -> одни и те же бары проходят все гейты.
+
+    resolve заглушён в ОБОИХ путях, поэтому разная семантика разрешения не
+    маскирует расхождение гейтов. Сравниваются: индексы прошедших баров,
+    направление, счёт и ПОЛНЫЙ dict позиции (entry/stop/TP1/TP2 + сайзинг).
+    """
+    frames, dfs, profile = parity_inputs
+
+    bt_calls: list[tuple] = []
+    dp_calls: list[tuple] = []
+
+    def bt_resolve(df, idx, direction, pos):
+        bt_calls.append((idx, direction, dict(pos)))
+        return {"outcome": "win", "r": 1.0}
+
+    def dp_resolve(df, idx, direction, pos, hold_bars):
+        dp_calls.append((idx, direction, dict(pos)))
+        return {"outcome": "win", "r": 1.0, "hit_tp1": False, "exit_idx": idx + 1}
+
+    monkeypatch.setattr(deep_backtest, "resolve", dp_resolve)
+    bt_setups = _run_backtest_walk(monkeypatch, dfs, profile, bt_resolve)
+    deep = deep_backtest.deep_walk(frames, profile, PARITY_BARS)
+
+    assert bt_calls, "ни один бар не прошёл гейты — тест был бы вакуумным"
+
+    # Гейты: тот же набор баров, то же направление, тот же сайзинг/уровни.
+    # Проверено мутацией: HTF_WINDOW 250->200 и ZONE_WINDOW 160->100 роняют
+    # это сравнение (на мелких aux-фреймах ZONE_WINDOW проходил незамеченным —
+    # отсюда PARITY_DEPTHS).
+    assert dp_calls == bt_calls
+
+    # Счёт (weighted_total) и итоговый R (значит, и cost-модель) совпадают.
+    bt_rows = [(s["idx"], s["direction"], s["score"], s["r"]) for s in bt_setups]
+    dp_rows = [(s["idx"], s["direction"], s["score"], s["r"])
+               for s in deep["setups"]]
+    assert dp_rows == bt_rows
+
+
+def test_deep_walk_skips_exactly_the_bars_backtest_skips(parity_inputs, monkeypatch):
+    """ТЕСТ A2: знаменатель. Пройдено баров == сетапы + пропуски, и множество
+    сетапов совпадает с backtest — то есть ledger не «съел» ни одного бара,
+    который backtest бы отторгoвал, и не пропустил ни одного лишнего."""
+    frames, dfs, profile = parity_inputs
+
+    def bt_resolve(df, idx, direction, pos):
+        return {"outcome": "win", "r": 1.0}
+
+    def dp_resolve(df, idx, direction, pos, hold_bars):
+        return {"outcome": "win", "r": 1.0, "hit_tp1": False, "exit_idx": idx + 1}
+
+    monkeypatch.setattr(deep_backtest, "resolve", dp_resolve)
+    bt_setups = _run_backtest_walk(monkeypatch, dfs, profile, bt_resolve)
+    deep = deep_backtest.deep_walk(frames, profile, PARITY_BARS)
+
+    n = len(dfs["15m"])
+    walked = n - 1 - deep_backtest.ENTRY_WARMUP
+    assert deep["bars_walked"] == walked
+    assert deep["bars_evaluated"] == len(bt_setups)
+    assert deep["bars_walked"] == deep["bars_evaluated"] + deep["ledger"].total
+
+
+def test_deep_walk_resolved_outcomes_match_backtest_on_comparable_subset(
+        parity_resolved_inputs, monkeypatch):
+    """ТЕСТ B: настоящий resolve в обоих путях.
+
+    Сопоставимое подмножество — сделки, закрытые deep штатно (win/loss/
+    breakeven) внутри max_hold_bars. Такая сделка закрылась раньше горизонта,
+    значит backtest._resolve (без горизонта) обязан дать ТОТ ЖЕ исход и тот же R.
+
+    Обратное неверно и не проверяется: backtest мог закрыть сделку далеко за
+    горизонтом — у deep это timeout, а у баров в хвосте истории — unresolved.
+    Это задокументированное расхождение C1.3b, а не дефект.
+    """
+    frames, dfs, profile = parity_resolved_inputs
+
+    bt_setups = _run_backtest_walk(monkeypatch, dfs, profile)
+    deep = deep_backtest.deep_walk(frames, profile, PARITY_BARS)
+
+    bt_by_idx = {s["idx"]: s for s in bt_setups}
+    comparable = [s for s in deep["setups"]
+                  if s["outcome"] in ("win", "loss", "breakeven")]
+    assert comparable, "нет штатно закрытых сделок — сравнивать нечего"
+
+    for s in comparable:
+        legacy = bt_by_idx.get(s["idx"])
+        assert legacy is not None, (
+            f"deep закрыл сетап на баре {s['idx']}, а backtest его потерял")
+        assert s["direction"] == legacy["direction"]
+        assert s["score"] == legacy["score"]
+        assert s["outcome"] == legacy["outcome"]
+        assert s["r"] == pytest.approx(legacy["r"])
+
+    # Каждый бар, прошедший гейты у backtest, известен deep — либо как сделка,
+    # либо как timeout/unresolved. Потерянных баров нет.
+    deep_idx = {s["idx"] for s in deep["setups"]}
+    assert set(bt_by_idx) <= deep_idx
+
+
+def _indicator_input(df) -> tuple[int, int, int]:
+    """Отпечаток среза, поданного в compute_indicators: (шаг ТФ, конец, длина).
+
+    Шаг определяется по самим данным, поэтому entry/htf/zone различимы без
+    знания, какой модуль их звал.
+    """
+    open_time = df["open_time"]
+    step = int((open_time.iloc[1] - open_time.iloc[0]).total_seconds() * 1000)
+    return step, int(open_time.iloc[-1].value), len(df)
+
+
+def test_deep_walk_feeds_indicators_the_same_slices_as_backtest(parity_inputs,
+                                                                monkeypatch):
+    """ТЕСТ C: одинаковые ВХОДЫ индикаторов, а не только одинаковые решения.
+
+    Тесты A/B сравнивают решения и могут промолчать, когда изменённая константа
+    окна не меняет исход на этой фикстуре (проверено мутацией: ENTRY_WARMUP
+    250 vs 300 не сдвинул ни одного сетапа). Здесь сравниваются сами срезы,
+    поэтому дрейф ENTRY_WARMUP / HTF_WINDOW / ZONE_WINDOW падает немедленно.
+
+    Сравнение множеств, а не последовательностей: deep кэширует индикаторы
+    старших ТФ (_IndicatorCache), поэтому зовёт compute_indicators реже. Срезы
+    entry-ТФ не кэшируются никогда, их сравниваем по порядку.
+    1D-срезы deep (теневой режим) в backtest отсутствуют и отфильтрованы.
+
+    Проверено мутацией (ENTRY_WARMUP 300->250, HTF_WINDOW 250->200,
+    ZONE_WINDOW 160->100 — каждая роняет этот тест).
+
+    Чего он НЕ ловит и почему: HTF_WARMUP (210) и ZONE_MIN_BARS (30) — это
+    guard'ы «истории не хватает». На датасете, прошедшем aux_depth, срез старшего
+    ТФ гарантированно >= 210 баров даже на первом баре обхода, поэтому подмена
+    этих констант не меняет НИ ОДНОГО решения — она недостижима поведенчески.
+    Их защищают отдельные тесты: test_refuses_insufficient_aux_depth и счётчик
+    htf_insufficient_history в ledger.
+    """
+    import backtest
+
+    frames, dfs, profile = parity_inputs
+    entry_step = MS[profile["entry"]]
+
+    def spy(module, sink):
+        real = module.compute_indicators
+
+        def wrapper(df, *args, **kwargs):
+            sink.append(_indicator_input(df))
+            return real(df, *args, **kwargs)
+
+        monkeypatch.setattr(module, "compute_indicators", wrapper)
+
+    bt_seen: list[tuple] = []
+    dp_seen: list[tuple] = []
+    spy(backtest, bt_seen)
+    spy(deep_backtest, dp_seen)
+
+    def noop_bt(df, idx, direction, pos):
+        return {"outcome": "win", "r": 1.0}
+
+    def noop_dp(df, idx, direction, pos, hold_bars):
+        return {"outcome": "win", "r": 1.0, "hit_tp1": False, "exit_idx": idx + 1}
+
+    monkeypatch.setattr(deep_backtest, "resolve", noop_dp)
+    _run_backtest_walk(monkeypatch, dfs, profile, noop_bt)
+    deep_backtest.deep_walk(frames, profile, PARITY_BARS)
+
+    assert bt_seen and dp_seen
+
+    # Entry-ТФ: точная последовательность срезов (300-баровое окно live-паритета).
+    bt_entry = [rec for rec in bt_seen if rec[0] == entry_step]
+    dp_entry = [rec for rec in dp_seen if rec[0] == entry_step]
+    assert dp_entry == bt_entry
+    assert {rec[2] for rec in bt_entry} == {deep_backtest.ENTRY_WARMUP}
+
+    # Старшие ТФ: множества срезов (deep кэширует, backtest пересчитывает).
+    bt_steps = {rec[0] for rec in bt_seen}
+    bt_aux = {rec for rec in bt_seen if rec[0] != entry_step}
+    dp_aux = {rec for rec in dp_seen if rec[0] != entry_step and rec[0] in bt_steps}
+    assert dp_aux == bt_aux
+    # 1D-срез deep существует и в backtest его нет — это теневой режим.
+    assert any(rec[0] == MS["1d"] for rec in dp_seen)
+    assert not any(rec[0] == MS["1d"] for rec in bt_seen)
+
+
+def test_deep_walk_parity_survives_a_changed_predicate(parity_inputs, monkeypatch):
+    """Мета-тест: паритетная проверка ДЕЙСТВИТЕЛЬНО ловит расхождение.
+
+    Source-order тест слеп к смене порога. Здесь мы меняем порог, который читает
+    deep_walk, и требуем, чтобы behavioural-паритет упал. Без этого «зелёный»
+    паритет ничего не доказывал бы.
+    """
+    frames, dfs, profile = parity_inputs
+
+    def bt_resolve(df, idx, direction, pos):
+        return {"outcome": "win", "r": 1.0}
+
+    def dp_resolve(df, idx, direction, pos, hold_bars):
+        return {"outcome": "win", "r": 1.0, "hit_tp1": False, "exit_idx": idx + 1}
+
+    monkeypatch.setattr(deep_backtest, "resolve", dp_resolve)
+    # Порог min(THRESHOLDS) = 5 -> 999: ни один сетап не должен пройти.
+    monkeypatch.setattr(deep_backtest, "THRESHOLDS", [999])
+    bt_setups = _run_backtest_walk(monkeypatch, dfs, profile, bt_resolve)
+    deep = deep_backtest.deep_walk(frames, profile, PARITY_BARS)
+
+    assert bt_setups, "фикстура обязана давать сетапы у backtest"
+    assert deep["setups"] == [], "изменённый порог не повлиял — тест слеп"
+    assert deep["ledger"].counts["below_min_threshold"] > 0
