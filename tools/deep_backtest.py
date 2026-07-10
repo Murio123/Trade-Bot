@@ -1,4 +1,4 @@
-"""Stage C1.3c: offline deep-backtest core на строгом датасете kline_dataset.
+"""Stage C1.3d: offline deep-backtest core на строгом датасете kline_dataset.
 
 Read-only измерительный инструмент. НЕ торгует, НЕ отправляет ордера, НЕ ходит в
 сеть, НЕ пишет в БД, НЕ меняет схему, scoring, thresholds, pipeline, scheduler,
@@ -31,12 +31,18 @@ backtest.py или live runtime. НЕ импортируется runtime-код�
 
     * dual regime tags — см. ниже.
 
-Что этот модуль НЕ ЕСТЬ (сознательно, стадия C1.3c):
+Что этот модуль НЕ ЕСТЬ (сознательно, стадия C1.3d):
 
-  Здесь нет walk-forward и нет рекомендации порога. Отчёт НЕ содержит поля
-  recommended_threshold: сквозной прогон по одной истории — это in-sample
-  подгонка, и называть её рекомендацией было бы враньём. Пороговая таблица
-  приводится как измерение, а не как совет.
+  Здесь нет рекомендации порога. Отчёт НЕ содержит поля с советом по порогу:
+  сквозной прогон по одной истории — это in-sample подгонка, и называть её
+  рекомендацией было бы враньём. Пороговая таблица приводится как измерение, а
+  не как совет.
+
+  Walk-forward добавлен в C1.3d как ОПЦИОНАЛЬНЫЙ режим (--walk-forward): он режет
+  историю на train/validation фолды с purge+embargo и меряет out-of-sample
+  стабильность порогов. Это тоже ТОЛЬКО измерение — режим ничего не рекомендует,
+  не выбирает порог и не трогает SCORE_ALERT_MIN. Без флага поведение single-run
+  не меняется и ключа walk_forward в отчёте нет.
 
 Dual regime tags (D13)
 ----------------------
@@ -49,7 +55,7 @@ backtest._walk считает режим так::
 есть drift point D13: интрадей-бэктест взвешивает скоры range-весами всегда,
 а live-конвейер (pipeline.run_cascade) считает режим по ind_1d + volatility_1d.
 
-C1.3c ИЗМЕРЯЕТ этот дрейф, а не чинит его:
+C1.3d ИЗМЕРЯЕТ этот дрейф, а не чинит его:
 
   * ``regime_current``     — ровно текущая семантика backtest. ТОЛЬКО он
                              попадает в weighted_total и влияет на скоринг.
@@ -150,8 +156,9 @@ RESOLVED_OUTCOMES = ("win", "loss", "breakeven", "timeout")
 OUTCOMES = RESOLVED_OUTCOMES + ("unresolved",)
 
 LIMITATIONS = [
-    "C1.3c has no walk-forward: every number below is in-sample over one "
-    "contiguous history.",
+    "The default single run has no walk-forward folds: every number below is "
+    "in-sample over one contiguous history (pass --walk-forward for "
+    "out-of-sample validation).",
     "No recommended threshold is produced. The threshold table is a "
     "measurement, not advice.",
     "regime_live_parity is shadow metadata only: scoring and every gate use "
@@ -236,6 +243,17 @@ def max_hold_bars(profile: dict[str, Any]) -> int:
     tf_hours = TF_HOURS.get(profile["entry"], 1.0)
     horizon = float(profile.get("forecast_horizon_hours", 24.0))
     return max(1, math.ceil(horizon / tf_hours))
+
+
+def cooldown_bars(profile: dict[str, Any]) -> int:
+    """Сколько entry-баров занимает кулдаун профиля (как в backtest._aggregate).
+
+    Вынесено из deep_walk, чтобы WFConfig.for_profile брал ровно тот же кулдаун,
+    что применяет пороговая агрегация: embargo между фолдами по умолчанию равен
+    ему, иначе валидация и обход считали бы «занятый слот» по-разному.
+    """
+    entry_tf = profile["entry"]
+    return max(1, int(round(profile["cooldown_hours"] / TF_HOURS.get(entry_tf, 1))))
 
 
 def resolve(df: pd.DataFrame, entry_idx: int, direction: str,
@@ -626,8 +644,7 @@ def deep_walk(frames: dict[str, LoadedFrame], profile: dict[str, Any],
         "setups": qualified,
         "ledger": ledger,
         "regime_pairs": regime_pairs,
-        "cooldown_bars": max(
-            1, int(round(profile["cooldown_hours"] / TF_HOURS.get(entry_tf, 1)))),
+        "cooldown_bars": cooldown_bars(profile),
     }
 
 
@@ -687,6 +704,23 @@ def _stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _apply_cooldown(setups: list[dict[str, Any]], threshold: float,
+                    cooldown_bars: int) -> list[dict[str, Any]]:
+    """Сетапы >= порога, прореженные кулдауном. Единственная точка правды.
+
+    Общая для threshold_stats и walk-forward: пороговая таблица single-run и
+    per-fold статистика обязаны прореживать поток одинаково, иначе цифры фолдов
+    молча разошлись бы с общей таблицей.
+    """
+    taken, last_idx = [], -10 ** 9
+    for s in setups:
+        if s["score"] < threshold or s["idx"] - last_idx < cooldown_bars:
+            continue
+        taken.append(s)
+        last_idx = s["idx"]
+    return taken
+
+
 def threshold_stats(setups: list[dict[str, Any]], threshold: float,
                     cooldown_bars: int) -> dict[str, Any]:
     """Статистика одного порога с тем же кулдауном, что и в backtest._aggregate.
@@ -695,12 +729,7 @@ def threshold_stats(setups: list[dict[str, Any]], threshold: float,
     такой сетап тоже занял бы слот и заблокировал следующий. Но в агрегаты
     производительности unresolved не попадает — исход неизвестен, а не нулевой.
     """
-    taken, last_idx = [], -10 ** 9
-    for s in setups:
-        if s["score"] < threshold or s["idx"] - last_idx < cooldown_bars:
-            continue
-        taken.append(s)
-        last_idx = s["idx"]
+    taken = _apply_cooldown(setups, threshold, cooldown_bars)
 
     unresolved = [s for s in taken if s["outcome"] == "unresolved"]
     resolved = [s for s in taken if s["outcome"] != "unresolved"]
@@ -716,6 +745,402 @@ def threshold_stats(setups: list[dict[str, Any]], threshold: float,
         "timeout_share": round(len(timeouts) / len(resolved), 4) if resolved else 0.0,
         "including_timeouts": _stats(resolved),
         "excluding_timeouts": _stats(no_timeout),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Walk-forward (C1.3d) — ОПЦИОНАЛЬНЫЙ измерительный слой над deep_walk
+# ---------------------------------------------------------------------------
+#
+# Walk-forward НЕ перегоняет воронку заново на каждом фолде: deep_walk считается
+# ОДИН раз по всей истории, а его setups нарезаются по entry-индексу idx на
+# train/validation окна. Так утечка становится чистой функцией геометрии
+# индексов (её видно и её тестируют), а не побочным эффектом пересчёта.
+#
+# Ничего не выбирается и не рекомендуется. Пороговая таблица считается per-fold
+# как ИЗМЕРЕНИЕ out-of-sample стабильности; совета по порогу здесь нет и быть
+# не должно, SCORE_ALERT_MIN не читается и не трогается.
+
+# Доли, выше которых фолд помечается ненадёжным. Пороги описательные, не
+# управляющие: они только рисуют флаг в отчёте, никакой гейт от них не зависит.
+HIGH_UNRESOLVED_SHARE = 0.5
+HIGH_TIMEOUT_SHARE = 0.5
+
+WF_LIMITATIONS = [
+    "No recommended threshold is emitted; walk-forward is measurement only.",
+    "Validation windows are out-of-sample, but trades inside one fold have "
+    "overlapping forward horizons (serial correlation): no statistical "
+    "significance is claimed.",
+    "Holdout is sealed — its geometry and setup count are reported, but no "
+    "performance stats are computed until a real candidate is tested (C1.4+).",
+    "stability_score is descriptive (mean minus std of validation expectancy "
+    "over confident folds); it ranks nothing and recommends nothing.",
+    "Every single-run limitation still applies (D13 regime, funding/on-chain "
+    "absence, single-source CVD, stop-first, in-sample cost model).",
+]
+
+
+@dataclass
+class WFConfig:
+    """Геометрия walk-forward в entry-барах. Все окна — по оси idx.
+
+    train/val — размеры окон, purge — карантин на границе (форвардный горизонт
+    сделки), embargo — дополнительный зазор после purge. holdout — запечатанный
+    хвост. Значения задаёт CLI или WFConfig.for_profile; purge не может быть
+    ниже max_hold_bars(profile) — иначе горизонт train-сделки залез бы в val.
+    """
+    train_bars: int
+    val_bars: int
+    purge_bars: int
+    embargo_bars: int
+    holdout_bars: int
+    step_bars: int = 0
+    window_mode: str = "rolling"
+    min_trades_per_fold: int = 20
+    min_folds: int = 3
+
+    def __post_init__(self) -> None:
+        if self.step_bars <= 0:
+            self.step_bars = self.val_bars
+        if self.window_mode not in ("rolling", "expanding"):
+            raise DeepBacktestError(f"unknown wf window_mode: {self.window_mode!r}")
+        if self.train_bars <= 0 or self.val_bars <= 0:
+            raise DeepBacktestError("wf train_bars and val_bars must be positive")
+        for name in ("purge_bars", "embargo_bars", "holdout_bars"):
+            if getattr(self, name) < 0:
+                raise DeepBacktestError(f"wf {name} must be non-negative")
+        # step < val сдвигал бы validation-окна с перекрытием, и один сетап попал
+        # бы в агрегаты двух фолдов. Инвариант «окна дизъюнктны» держим на входе,
+        # а не надеждой на дефолт step == val (Codex Medium).
+        if self.step_bars < self.val_bars:
+            raise DeepBacktestError(
+                "wf step_bars must be >= val_bars (a smaller step overlaps "
+                "validation windows and double-counts setups across folds)")
+
+    @classmethod
+    def for_profile(cls, profile: dict[str, Any], walked_bars: int, *,
+                    window_mode: str = "rolling",
+                    train_bars: int | None = None, val_bars: int | None = None,
+                    step_bars: int | None = None, purge_bars: int | None = None,
+                    embargo_bars: int | None = None, holdout_bars: int | None = None,
+                    holdout_frac: float | None = None,
+                    min_trades_per_fold: int = 20,
+                    min_folds: int = 3) -> "WFConfig":
+        """Разрешить конфиг с дефолтами, привязанными к профилю, а не к магии.
+
+        purge = max_hold_bars(profile) и не ниже; embargo = cooldown_bars(profile);
+        holdout берётся из holdout_bars или из holdout_frac от walked_bars. Если
+        train/val не заданы — грубые дефолты от размера walked-региона (fail-closed
+        в fold_windows поймает неудачную геометрию).
+        """
+        floor = max_hold_bars(profile)
+        purge = floor if purge_bars is None else max(purge_bars, floor)
+        embargo = cooldown_bars(profile) if embargo_bars is None else embargo_bars
+        if holdout_bars is None:
+            holdout_bars = int(round(walked_bars * (holdout_frac or 0.0)))
+        region = max(0, walked_bars - holdout_bars)
+        if val_bars is None:
+            val_bars = max(1, region // (min_folds + 2))
+        if train_bars is None:
+            train_bars = max(1, 2 * val_bars)
+        if step_bars is None:
+            step_bars = val_bars
+        return cls(train_bars=train_bars, val_bars=val_bars, purge_bars=purge,
+                   embargo_bars=embargo, holdout_bars=holdout_bars,
+                   step_bars=step_bars, window_mode=window_mode,
+                   min_trades_per_fold=min_trades_per_fold, min_folds=min_folds)
+
+
+@dataclass
+class Fold:
+    """Одно train/validation окно по оси entry-idx (полуоткрытые интервалы)."""
+    index: int
+    train_lo: int
+    train_hi: int
+    val_lo: int
+    val_hi: int
+    purge_bars: int
+    embargo_bars: int
+
+
+def fold_windows(span_lo: int, span_hi: int, wf: WFConfig) -> list[Fold]:
+    """Нарезать пройденный диапазон [span_lo, span_hi) на фолды.
+
+    Сначала отрезается запечатанный holdout-хвост, фолды тайлятся по остатку.
+    val_lo = train_hi + purge + embargo, поэтому форвардный горизонт train-сделки
+    (<= purge) не дотягивается до val. step == val_bars по умолчанию делает
+    validation-окна непересекающимися. Fail-closed: меньше min_folds — отказ.
+    """
+    region_hi = span_hi - wf.holdout_bars
+    gap = wf.purge_bars + wf.embargo_bars
+    folds: list[Fold] = []
+
+    if wf.window_mode == "rolling":
+        tr_lo = span_lo
+        while True:
+            tr_hi = tr_lo + wf.train_bars
+            val_lo = tr_hi + gap
+            val_hi = val_lo + wf.val_bars
+            if val_hi > region_hi:
+                break
+            folds.append(Fold(len(folds), tr_lo, tr_hi, val_lo, val_hi,
+                              wf.purge_bars, wf.embargo_bars))
+            tr_lo += wf.step_bars
+    else:  # expanding — train_lo зафиксирован в начале истории
+        tr_hi = span_lo + wf.train_bars
+        while True:
+            val_lo = tr_hi + gap
+            val_hi = val_lo + wf.val_bars
+            if val_hi > region_hi:
+                break
+            folds.append(Fold(len(folds), span_lo, tr_hi, val_lo, val_hi,
+                              wf.purge_bars, wf.embargo_bars))
+            tr_hi += wf.step_bars
+
+    if len(folds) < wf.min_folds:
+        raise DeepBacktestError(
+            f"walk-forward needs >= {wf.min_folds} folds but only {len(folds)} fit "
+            f"in {max(0, region_hi - span_lo)} walked bars "
+            f"(train={wf.train_bars}, val={wf.val_bars}, purge={wf.purge_bars}, "
+            f"embargo={wf.embargo_bars}, holdout={wf.holdout_bars}); increase "
+            f"--bars or shrink the windows")
+    return folds
+
+
+def partition_setups(setups: list[dict[str, Any]], fold: Fold,
+                     hold_bars: int) -> tuple[list[dict[str, Any]],
+                                              list[dict[str, Any]]]:
+    """Разложить setups по idx в train/val фолда, вычистив утечку из train.
+
+    Purge: train-сетап, чей форвардный горизонт (idx + hold_bars) дотягивается
+    до val_lo, размечен будущими барами validation — он ИСКЛЮЧАЕТСЯ из train.
+    train и val дизъюнктны по построению (train_hi <= val_lo).
+    """
+    train: list[dict[str, Any]] = []
+    val: list[dict[str, Any]] = []
+    for s in setups:
+        idx = s["idx"]
+        if fold.train_lo <= idx < fold.train_hi:
+            if idx + hold_bars >= fold.val_lo:
+                continue  # purge: горизонт залезает в validation
+            train.append(s)
+        elif fold.val_lo <= idx < fold.val_hi:
+            val.append(s)
+    return train, val
+
+
+def _max_drawdown_r(rs: list[float]) -> float:
+    """Максимальная просадка кумулятивного R (пик-к-минимуму), >= 0."""
+    cum = peak = mdd = 0.0
+    for r in rs:
+        cum += r
+        peak = max(peak, cum)
+        mdd = max(mdd, peak - cum)
+    return round(mdd, 4)
+
+
+def _profit_factor(rs: list[float]) -> float | None:
+    """Сумма плюсовых R / модуль суммы минусовых. None, если убытков нет."""
+    gains = sum(r for r in rs if r > 0)
+    losses = -sum(r for r in rs if r < 0)
+    if losses <= 0:
+        return None
+    return round(gains / losses, 4)
+
+
+def _confidence_flags(row: dict[str, Any], wf: WFConfig) -> dict[str, bool]:
+    return {
+        "low_trades": row["trades"] < wf.min_trades_per_fold,
+        "high_unresolved": row["unresolved_share"] > HIGH_UNRESOLVED_SHARE,
+        "high_timeout": row["timeout_share"] > HIGH_TIMEOUT_SHARE,
+    }
+
+
+def fold_threshold_stats(setups: list[dict[str, Any]], threshold: float,
+                         cooldown: int, wf: WFConfig) -> dict[str, Any]:
+    """threshold_stats фолда + median_r / max_drawdown_r / profit_factor / флаги.
+
+    Семантика threshold_stats не меняется — расширенные метрики считаются поверх
+    того же прореженного кулдауном множества (_apply_cooldown), что и внутри неё.
+    """
+    row = threshold_stats(setups, threshold, cooldown)
+    taken = _apply_cooldown(setups, threshold, cooldown)
+    resolved = [s for s in taken if s["outcome"] != "unresolved"]
+    rs = [s["r"] for s in resolved]
+    row["median_r"] = round(float(np.median(rs)), 4) if rs else None
+    row["max_drawdown_r"] = _max_drawdown_r(rs)
+    row["profit_factor"] = _profit_factor(rs)
+    row["confidence_flags"] = _confidence_flags(row, wf)
+    return row
+
+
+def fold_stats(fold: Fold, train_setups: list[dict[str, Any]],
+               val_setups: list[dict[str, Any]], cooldown: int,
+               wf: WFConfig) -> dict[str, Any]:
+    """Per-fold статистика: пороговые ряды train/val + покрытие и режимный дрейф."""
+    def per_threshold(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [fold_threshold_stats(rows, t, cooldown, wf) for t in THRESHOLDS]
+
+    val_pairs = [(s["regime_current"], s["regime_live_parity"]) for s in val_setups]
+    coverage = fold.val_hi - fold.val_lo
+    return {
+        "fold": fold.index,
+        "train": {
+            "n_setups": len(train_setups),
+            "thresholds": per_threshold(train_setups),
+        },
+        "validation": {
+            "n_setups": len(val_setups),
+            "coverage_bars": coverage,
+            "trades_per_bar": round(len(val_setups) / coverage, 6) if coverage else 0.0,
+            "regime_disagreement_rate": disagreement_rate(val_pairs),
+            "thresholds": per_threshold(val_setups),
+        },
+    }
+
+
+def _aggregate_validation(rows: list[dict[str, Any]], wf: WFConfig) -> dict[str, Any]:
+    """Свести validation-ряды одного порога по фолдам. ТОЛЬКО по confident-фолдам.
+
+    Confident = не помечен low_trades. Возвращает описательные метрики; ничего
+    не выбирает. stability_score = mean - std ожидания (описательный, не совет).
+    """
+    confident = [r for r in rows
+                 if not r["validation"]["confidence_flags"]["low_trades"]]
+
+    def _val_exp(r: dict[str, Any]) -> float | None:
+        return r["validation"]["including_timeouts"]["expectancy_r"]
+
+    def _train_exp(r: dict[str, Any]) -> float | None:
+        return r["train"]["including_timeouts"]["expectancy_r"]
+
+    exps = [_val_exp(r) for r in confident if _val_exp(r) is not None]
+    degr = [_train_exp(r) - _val_exp(r) for r in confident
+            if _train_exp(r) is not None and _val_exp(r) is not None]
+
+    if exps:
+        mean = round(float(np.mean(exps)), 4)
+        std = round(float(np.std(exps)), 4)
+        agg = {
+            "mean_expectancy_r": mean,
+            "std_expectancy_r": std,
+            "min_expectancy_r": round(float(min(exps)), 4),
+            "sign_consistency": round(sum(1 for e in exps if e > 0) / len(exps), 4),
+            "stability_score": round(mean - std, 4),
+        }
+    else:
+        agg = {"mean_expectancy_r": None, "std_expectancy_r": None,
+               "min_expectancy_r": None, "sign_consistency": None,
+               "stability_score": None}
+    agg["train_vs_val_degradation"] = (
+        round(float(np.mean(degr)), 4) if degr else None)
+    agg["confident_folds"] = len(confident)
+    agg["note"] = "descriptive only; not a recommendation"
+    return agg
+
+
+def _wf_warnings(folds: list[Fold], validation_aggregate: dict[str, Any],
+                 wf: WFConfig) -> list[str]:
+    warnings: list[str] = []
+    if len(folds) < 5:
+        warnings.append(
+            f"only {len(folds)} folds — cross-fold stability is noisy (5+ preferred)")
+    for t, agg in validation_aggregate.items():
+        if agg["confident_folds"] < wf.min_folds:
+            warnings.append(
+                f"threshold {t}: only {agg['confident_folds']} confident folds "
+                f"(< min_folds={wf.min_folds}); aggregate is low-confidence")
+    return warnings
+
+
+def walk_forward(frames: dict[str, LoadedFrame], profile: dict[str, Any],
+                 bars: int, wf: WFConfig,
+                 walk: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Собрать walk_forward-секцию: один deep_walk, нарезка по фолдам, агрегаты.
+
+    ``walk`` можно передать заранее посчитанным (run() так и делает), чтобы
+    deep_walk не гонялся дважды. Возвращает секцию отчёта; совета по порогу
+    в ней нет.
+    """
+    entry_df = frames[profile["entry"]].df
+    n = len(entry_df)
+    if walk is None:
+        walk = deep_walk(frames, profile, bars)
+    setups = walk["setups"]
+    cooldown = walk["cooldown_bars"]
+    hold_bars = walk["max_hold_bars"]
+
+    span_lo = walk_start(n, bars)
+    span_hi = n - 1
+    folds = fold_windows(span_lo, span_hi, wf)
+
+    def _iso_at(idx: int) -> str | None:
+        if 0 <= idx < n:
+            return _iso(entry_df["open_time"].iloc[idx])
+        return None
+
+    fold_reports: list[dict[str, Any]] = []
+    fold_meta: list[dict[str, Any]] = []
+    for f in folds:
+        train, val = partition_setups(setups, f, hold_bars)
+        fr = fold_stats(f, train, val, cooldown, wf)
+        fold_reports.append(fr)
+        val_block = fr["validation"]
+        fold_meta.append({
+            "fold": f.index,
+            "train_lo": f.train_lo, "train_hi": f.train_hi,
+            "val_lo": f.val_lo, "val_hi": f.val_hi,
+            "purge_bars": f.purge_bars, "embargo_bars": f.embargo_bars,
+            "train_lo_iso": _iso_at(f.train_lo), "train_hi_iso": _iso_at(f.train_hi),
+            "val_lo_iso": _iso_at(f.val_lo), "val_hi_iso": _iso_at(f.val_hi),
+            "n_train_setups": len(train), "n_val_setups": len(val),
+            # per-fold validation coverage, вычисленное в fold_stats, но раньше
+            # терявшееся: в отчёт попадали только пороговые ряды (Codex Medium).
+            "val_coverage_bars": val_block["coverage_bars"],
+            "val_trades_per_bar": val_block["trades_per_bar"],
+            "val_regime_disagreement_rate": val_block["regime_disagreement_rate"],
+        })
+
+    per_threshold_folds: dict[str, list[dict[str, Any]]] = {}
+    validation_aggregate: dict[str, Any] = {}
+    for ti, t in enumerate(THRESHOLDS):
+        rows = [{"fold": fr["fold"],
+                 "train": fr["train"]["thresholds"][ti],
+                 "validation": fr["validation"]["thresholds"][ti]}
+                for fr in fold_reports]
+        per_threshold_folds[str(t)] = rows
+        validation_aggregate[str(t)] = _aggregate_validation(rows, wf)
+
+    holdout_lo = span_hi - wf.holdout_bars
+    holdout_setups = [s for s in setups if holdout_lo <= s["idx"] < span_hi]
+
+    return {
+        "config": {
+            "window_mode": wf.window_mode,
+            "train_bars": wf.train_bars,
+            "val_bars": wf.val_bars,
+            "step_bars": wf.step_bars,
+            "purge_bars": wf.purge_bars,
+            "embargo_bars": wf.embargo_bars,
+            "holdout_bars": wf.holdout_bars,
+            "min_trades_per_fold": wf.min_trades_per_fold,
+            "min_folds": wf.min_folds,
+        },
+        "folds": fold_meta,
+        "per_threshold_folds": per_threshold_folds,
+        "validation_aggregate": validation_aggregate,
+        "holdout": {
+            "idx_lo": holdout_lo,
+            "idx_hi": span_hi,
+            "iso_lo": _iso_at(holdout_lo),
+            "iso_hi": _iso_at(span_hi),
+            "n_setups": len(holdout_setups),
+            "sealed": True,
+            "note": ("geometry and setup count only; no performance stats "
+                     "computed (sealed until C1.4)"),
+        },
+        "warnings": _wf_warnings(folds, validation_aggregate, wf),
+        "limitations": list(WF_LIMITATIONS),
     }
 
 
@@ -915,11 +1340,11 @@ def build_report(frames: dict[str, LoadedFrame], profile: dict[str, Any],
                  bars_requested: int, table: dict[str, Any],
                  alignment: dict[str, Any], cvd_method: str,
                  walk: dict[str, Any]) -> dict[str, Any]:
-    """Отчёт C1.3c. Поля recommended_threshold здесь нет и быть не должно."""
+    """Отчёт C1.3d. Поля с советом по порогу здесь нет и быть не должно."""
     setups = walk["setups"]
     pairs = walk["regime_pairs"]
     return {
-        "stage": "C1.3c",
+        "stage": "C1.3d",
         "profile": profile_name,
         "symbol": symbol,
         "exchange": exchange,
@@ -947,14 +1372,23 @@ def build_report(frames: dict[str, LoadedFrame], profile: dict[str, Any],
 
 def run(dataset: str, exchange: str, symbol: str, profile_name: str, bars: int,
         max_gap_ratio: float = 0.001,
-        allow_estimated_cvd: bool = False) -> dict[str, Any]:
+        allow_estimated_cvd: bool = False,
+        wf_overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     frames, profile, table, cvd_method = prepare(
         dataset, exchange, symbol, profile_name, bars, max_gap_ratio,
         allow_estimated_cvd)
     alignment = aux_alignment(frames, profile, bars)
     walk = deep_walk(frames, profile, bars)
-    return build_report(frames, profile, profile_name, exchange, symbol, bars,
-                        table, alignment, cvd_method, walk)
+    report = build_report(frames, profile, profile_name, exchange, symbol, bars,
+                          table, alignment, cvd_method, walk)
+    if wf_overrides is not None:
+        # WF-режим: тот же single-run отчёт ПЛЮС ключ walk_forward. Конфиг
+        # разрешается здесь, где известна длина entry-фрейма (walked-бары).
+        n = len(frames[profile["entry"]].df)
+        walked = max(0, (n - 1) - walk_start(n, bars))
+        wf = WFConfig.for_profile(profile, walked, **wf_overrides)
+        report["walk_forward"] = walk_forward(frames, profile, bars, wf, walk=walk)
+    return report
 
 
 # ---------------------------------------------------------------------------
@@ -1023,13 +1457,63 @@ def format_report(report: dict[str, Any]) -> str:
 
     lines += ["", "limitations:"]
     lines += [f"  - {item}" for item in report["limitations"]]
+    text = "\n".join(lines)
+    if "walk_forward" in report:
+        text += "\n" + format_walk_forward(report["walk_forward"])
+    return text
+
+
+def format_walk_forward(wf: dict[str, Any]) -> str:
+    cfg = wf["config"]
+
+    def _num(x: Any) -> str:
+        return "  —  " if x is None else f"{x:>+.2f}"
+
+    lines = [
+        "",
+        "walk-forward (out-of-sample folds):",
+        f"  mode={cfg['window_mode']} train={cfg['train_bars']} "
+        f"val={cfg['val_bars']} step={cfg['step_bars']} purge={cfg['purge_bars']} "
+        f"embargo={cfg['embargo_bars']} holdout={cfg['holdout_bars']} "
+        f"(folds={len(wf['folds'])})",
+        "",
+        "folds (entry-bar index):",
+        f"  {'#':>2} {'train':>17} {'val':>17} {'n_tr':>5} {'n_val':>6}",
+    ]
+    for f in wf["folds"]:
+        train_win = f"{f['train_lo']}..{f['train_hi']}"
+        val_win = f"{f['val_lo']}..{f['val_hi']}"
+        lines.append(
+            f"  {f['fold']:>2} {train_win:>17} {val_win:>17} "
+            f"{f['n_train_setups']:>5} {f['n_val_setups']:>6}")
+
+    lines += ["", "validation stability (over confident folds):",
+              f"  {'thr':>3} {'conf':>4} {'meanE':>7} {'stdE':>7} {'minE':>7} "
+              f"{'sign':>5} {'degrad':>7} {'stab':>7}"]
+    for t in sorted(wf["validation_aggregate"], key=int):
+        a = wf["validation_aggregate"][t]
+        sign = "  — " if a["sign_consistency"] is None else f"{a['sign_consistency']:>4.2f}"
+        lines.append(
+            f"  {t:>3} {a['confident_folds']:>4} {_num(a['mean_expectancy_r'])} "
+            f"{_num(a['std_expectancy_r'])} {_num(a['min_expectancy_r'])} {sign} "
+            f"{_num(a['train_vs_val_degradation'])} {_num(a['stability_score'])}")
+
+    h = wf["holdout"]
+    lines += ["",
+              f"holdout (sealed): idx {h['idx_lo']}..{h['idx_hi']} "
+              f"setups={h['n_setups']} — no performance stats computed"]
+    if wf["warnings"]:
+        lines += ["", "walk-forward warnings:"]
+        lines += [f"  - {w}" for w in wf["warnings"]]
+    lines += ["", "walk-forward limitations:"]
+    lines += [f"  - {item}" for item in wf["limitations"]]
     return "\n".join(lines)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Offline deep backtest core on a pinned kline dataset "
-                    "(Stage C1.3c). Reads cached files only; never touches the "
+                    "(Stage C1.3d). Reads cached files only; never touches the "
                     "network, the database, or an exchange.")
     parser.add_argument("--dataset", required=True,
                         help="directory written by tools.kline_cache")
@@ -1043,14 +1527,40 @@ def main(argv: list[str] | None = None) -> int:
                         help="accept a dataset without taker_buy_base (D15): CVD "
                              "will be estimated from candle close position")
     parser.add_argument("--json", action="store_true")
+
+    wf = parser.add_argument_group("walk-forward (C1.3d, measurement only)")
+    wf.add_argument("--walk-forward", action="store_true",
+                    help="add an out-of-sample walk_forward section; without it "
+                         "the report is the single in-sample run (no walk_forward key)")
+    wf.add_argument("--wf-window-mode", choices=["rolling", "expanding"],
+                    default="rolling")
+    wf.add_argument("--wf-train-bars", type=int, default=None)
+    wf.add_argument("--wf-val-bars", type=int, default=None)
+    wf.add_argument("--wf-holdout-frac", type=float, default=0.0)
+    wf.add_argument("--wf-embargo-bars", type=int, default=None)
+    wf.add_argument("--wf-min-trades-per-fold", type=int, default=20)
+    wf.add_argument("--wf-min-folds", type=int, default=3)
     args = parser.parse_args(argv)
 
     if args.bars <= 0:
         parser.error("--bars must be positive")
 
+    wf_overrides = None
+    if args.walk_forward:
+        wf_overrides = {
+            "window_mode": args.wf_window_mode,
+            "train_bars": args.wf_train_bars,
+            "val_bars": args.wf_val_bars,
+            "holdout_frac": args.wf_holdout_frac,
+            "embargo_bars": args.wf_embargo_bars,
+            "min_trades_per_fold": args.wf_min_trades_per_fold,
+            "min_folds": args.wf_min_folds,
+        }
+
     try:
         report = run(args.dataset, args.exchange, args.symbol, args.profile,
-                     args.bars, args.max_gap_ratio, args.allow_estimated_cvd)
+                     args.bars, args.max_gap_ratio, args.allow_estimated_cvd,
+                     wf_overrides=wf_overrides)
     except (DeepBacktestError, DatasetError) as exc:
         print(f"deep_backtest: {exc}", file=sys.stderr)
         return 2

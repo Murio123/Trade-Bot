@@ -564,9 +564,9 @@ def test_scoring_uses_regime_current_not_live_parity(tmp_path, monkeypatch):
 def test_report_has_no_recommended_threshold(walk_report):
     assert "recommended_threshold" not in walk_report
     assert "recommended_threshold" not in json.dumps(walk_report, default=str)
-    # Ключа нет и в исходнике: единственное вхождение слова — в docstring и в
-    # limitations, где оно объясняет, почему рекомендации НЕТ.
-    assert not re.search(r'"recommended_threshold"', SOURCE)
+    # Токена нет в исходнике вообще — ни как JSON-ключа, ни в прозе комментариев
+    # (Codex Low: убрано и из docstring). Прозу пишем как «совет по порогу».
+    assert "recommended_threshold" not in SOURCE
 
 
 def test_report_contains_required_fields(walk_report):
@@ -636,6 +636,7 @@ def test_cli_json_output(tmp_path, capsys, monkeypatch):
     assert payload["bars_walked"] == payload["bars_evaluated"] + \
         payload["skip_ledger"]["total"]
     assert "recommended_threshold" not in payload
+    assert "walk_forward" not in payload      # single-run: WF key must be absent
 
 
 def test_cli_text_output_and_failure_exit_code(tmp_path, capsys, monkeypatch):
@@ -645,7 +646,7 @@ def test_cli_text_output_and_failure_exit_code(tmp_path, capsys, monkeypatch):
         "--dataset", outdir, "--exchange", "binance", "--profile", "intraday",
         "--bars", str(WALK_BARS)]) == 0
     out = capsys.readouterr().out
-    assert "deep backtest (C1.3c)" in out
+    assert "deep backtest (C1.3d)" in out
     assert "skip ledger:" in out
     assert "limitations:" in out
     # Слово встречается только в отрицающей формулировке блока limitations.
@@ -1155,8 +1156,8 @@ def test_report_contains_aux_alignment(walk_report):
         assert row["error"] is None
 
 
-def test_stage_label_is_c13c(walk_report):
-    assert walk_report["stage"] == "C1.3c"
+def test_stage_label_is_c13d(walk_report):
+    assert walk_report["stage"] == "C1.3d"
     assert "recommended_threshold" not in walk_report
 
 
@@ -1249,3 +1250,265 @@ def test_cli_exits_2_on_missing_close_time(tmp_path, capsys, monkeypatch):
     err = capsys.readouterr().err
     assert "deep_backtest:" in err
     assert "close_time" in err
+
+
+# ---------------------------------------------------------------------------
+# C1.3d: walk-forward validation (measurement only, opt-in via --walk-forward)
+# ---------------------------------------------------------------------------
+#
+# Геометрия/purge/embargo проверяются как чистые функции (быстро и точно); один
+# настоящий WF-прогон подтверждает end-to-end форму отчёта. purge_bars привязан
+# к max_hold_bars(intraday)=96, поэтому для >=3 фолдов нужен более глубокий
+# entry-фрейм, чем в single-run тестах.
+
+WF_N15 = 640
+WF_BARS = WF_N15 - deep_backtest.ENTRY_WARMUP          # 340; walk_start -> 300
+WF_DEPTHS = {"15m": WF_N15, "4h": 240, "2h": 90, "1h": 130, "1d": 220}
+
+
+def _wf_setups(idxs, *, outcome="win", r=1.0, score=9):
+    return [{"idx": i, "score": score, "outcome": outcome, "r": r,
+             "regime_current": "range", "regime_live_parity": "range"}
+            for i in idxs]
+
+
+@pytest.fixture(scope="module")
+def wf_report(tmp_path_factory):
+    """Один настоящий walk-forward прогон по random-walk истории."""
+    outdir = tmp_path_factory.mktemp("ds_wf")
+    with _csv_writer():
+        _build_random_walk_dataset(outdir, depths=WF_DEPTHS)
+        return deep_backtest.run(
+            str(outdir), "binance", "BTCUSDT", "intraday", WF_BARS,
+            wf_overrides=dict(train_bars=80, val_bars=30, embargo_bars=10,
+                              holdout_frac=0.08, min_folds=3,
+                              min_trades_per_fold=1))
+
+
+# --- fold geometry (pure functions) ----------------------------------------
+
+def test_fold_windows_rolling_boundaries():
+    wf = deep_backtest.WFConfig(train_bars=100, val_bars=50, purge_bars=10,
+                                embargo_bars=5, holdout_bars=0, min_folds=1)
+    folds = deep_backtest.fold_windows(0, 400, wf)          # gap=15, step=50
+    assert [f.index for f in folds] == [0, 1, 2, 3, 4]
+    assert (folds[0].train_lo, folds[0].train_hi,
+            folds[0].val_lo, folds[0].val_hi) == (0, 100, 115, 165)
+    assert (folds[1].train_lo, folds[1].train_hi,
+            folds[1].val_lo, folds[1].val_hi) == (50, 150, 165, 215)
+    for a, b in zip(folds, folds[1:]):                     # disjoint & adjacent
+        assert a.val_hi <= b.val_lo
+
+
+def test_fold_windows_expanding_boundaries():
+    wf = deep_backtest.WFConfig(train_bars=100, val_bars=50, purge_bars=10,
+                                embargo_bars=5, holdout_bars=0, min_folds=1,
+                                window_mode="expanding")
+    folds = deep_backtest.fold_windows(0, 400, wf)
+    assert all(f.train_lo == 0 for f in folds)             # train_lo pinned
+    assert [f.train_hi for f in folds] == [100, 150, 200, 250, 300]
+    assert (folds[0].val_lo, folds[0].val_hi) == (115, 165)
+
+
+def test_fold_windows_fails_closed_below_min_folds():
+    wf = deep_backtest.WFConfig(train_bars=100, val_bars=50, purge_bars=10,
+                                embargo_bars=5, holdout_bars=0, min_folds=99)
+    with pytest.raises(DeepBacktestError, match="needs >= 99 folds"):
+        deep_backtest.fold_windows(0, 400, wf)
+
+
+def test_fold_windows_holdout_shrinks_region():
+    base = deep_backtest.WFConfig(train_bars=60, val_bars=20, purge_bars=10,
+                                  embargo_bars=5, holdout_bars=0, min_folds=1)
+    held = deep_backtest.WFConfig(train_bars=60, val_bars=20, purge_bars=10,
+                                  embargo_bars=5, holdout_bars=120, min_folds=1)
+    assert len(deep_backtest.fold_windows(0, 400, held)) < \
+        len(deep_backtest.fold_windows(0, 400, base))
+
+
+def test_embargo_gap_is_respected():
+    wf = deep_backtest.WFConfig(train_bars=100, val_bars=50, purge_bars=12,
+                                embargo_bars=7, holdout_bars=0, min_folds=1)
+    for f in deep_backtest.fold_windows(0, 500, wf):
+        assert f.val_lo - f.train_hi == 12 + 7
+
+
+def test_validation_windows_pairwise_disjoint():
+    wf = deep_backtest.WFConfig(train_bars=60, val_bars=20, purge_bars=10,
+                                embargo_bars=5, holdout_bars=0, min_folds=2)
+    spans = [(f.val_lo, f.val_hi) for f in deep_backtest.fold_windows(0, 400, wf)]
+    for i in range(len(spans)):
+        for j in range(i + 1, len(spans)):
+            (lo1, hi1), (lo2, hi2) = spans[i], spans[j]
+            assert hi1 <= lo2 or hi2 <= lo1
+
+
+def test_wfconfig_rejects_step_below_val():
+    # step < val сдвигал бы validation-окна с перекрытием и двойным счётом.
+    with pytest.raises(DeepBacktestError, match="step_bars must be >= val_bars"):
+        deep_backtest.WFConfig(train_bars=60, val_bars=20, purge_bars=10,
+                               embargo_bars=5, holdout_bars=0, step_bars=10,
+                               min_folds=1)
+
+
+def test_wfconfig_for_profile_purge_floor_and_embargo():
+    profile = get_profile("intraday")
+    wf = deep_backtest.WFConfig.for_profile(
+        profile, walked_bars=1000, train_bars=100, val_bars=50, purge_bars=1)
+    # purge не может опуститься ниже max_hold_bars профиля
+    assert wf.purge_bars == deep_backtest.max_hold_bars(profile)
+    assert wf.embargo_bars == deep_backtest.cooldown_bars(profile)
+    assert wf.step_bars == wf.val_bars                     # step по умолчанию = val
+
+
+# --- partition / purge ------------------------------------------------------
+
+def test_partition_purges_train_horizon_leak():
+    fold = deep_backtest.Fold(0, train_lo=0, train_hi=200, val_lo=250,
+                              val_hi=300, purge_bars=40, embargo_bars=10)
+    hold = 60
+    setups = _wf_setups([100, 190, 199, 260, 305])
+    train, val = deep_backtest.partition_setups(setups, fold, hold)
+    # 190+60=250>=250 и 199+60>=250 -> покидают train (горизонт залезает в val)
+    assert [s["idx"] for s in train] == [100]
+    assert [s["idx"] for s in val] == [260]
+    assert not ({s["idx"] for s in train} & {s["idx"] for s in val})
+
+
+# --- per-fold stats / aggregate --------------------------------------------
+
+def test_fold_threshold_stats_unresolved_counted_timeout_included():
+    wf = deep_backtest.WFConfig(train_bars=1, val_bars=1, purge_bars=1,
+                                embargo_bars=0, holdout_bars=0, min_folds=1,
+                                min_trades_per_fold=1)
+    setups = [
+        {"idx": 0, "score": 9, "outcome": "win", "r": 2.0},
+        {"idx": 10, "score": 9, "outcome": "timeout", "r": 0.3},
+        {"idx": 20, "score": 9, "outcome": "unresolved", "r": None},
+    ]
+    row = deep_backtest.fold_threshold_stats(setups, 5, 1, wf)
+    assert row["qualified"] == 3
+    assert row["trades"] == 2                              # unresolved вне знаменателя
+    assert row["unresolved"] == 1
+    assert row["including_timeouts"]["trades"] == 2        # timeout включён
+    assert row["including_timeouts"]["sum_r"] == pytest.approx(2.3)
+    assert row["excluding_timeouts"]["trades"] == 1
+    assert row["median_r"] == pytest.approx(1.15)          # median([2.0, 0.3])
+    assert row["profit_factor"] is None                    # убытков нет
+    assert row["max_drawdown_r"] == 0.0
+    assert set(row["confidence_flags"]) == {"low_trades", "high_unresolved",
+                                            "high_timeout"}
+
+
+def test_validation_aggregate_uses_only_confident_folds():
+    wf = deep_backtest.WFConfig(train_bars=1, val_bars=1, purge_bars=1,
+                                embargo_bars=0, holdout_bars=0, min_folds=1,
+                                min_trades_per_fold=2)
+    confident = _wf_setups([0, 10, 20], r=1.0)             # 3 трейда -> confident
+    sparse = _wf_setups([0], outcome="loss", r=-1.0)       # 1 трейд -> low_trades
+
+    def frow(setups):
+        return deep_backtest.fold_threshold_stats(setups, 5, 1, wf)
+
+    rows = [
+        {"fold": 0, "train": frow(confident), "validation": frow(confident)},
+        {"fold": 1, "train": frow(sparse), "validation": frow(sparse)},
+    ]
+    agg = deep_backtest._aggregate_validation(rows, wf)
+    assert agg["confident_folds"] == 1                     # sparse отброшен
+    assert agg["mean_expectancy_r"] == pytest.approx(1.0)
+    assert agg["min_expectancy_r"] == pytest.approx(1.0)
+    assert agg["sign_consistency"] == pytest.approx(1.0)
+    assert "recommended_threshold" not in agg
+
+
+def test_max_drawdown_and_profit_factor_helpers():
+    assert deep_backtest._max_drawdown_r([1.0, -2.0, 0.5]) == pytest.approx(2.0)
+    assert deep_backtest._profit_factor([2.0, -1.0, -1.0]) == pytest.approx(1.0)
+    assert deep_backtest._profit_factor([1.0, 2.0]) is None   # убытков нет
+    assert deep_backtest._max_drawdown_r([]) == 0.0
+
+
+# --- end-to-end report shape -----------------------------------------------
+
+def test_single_run_has_no_walk_forward(walk_report):
+    assert "walk_forward" not in walk_report
+
+
+def test_walk_forward_key_present_and_stage_is_c13d(wf_report):
+    assert wf_report["stage"] == "C1.3d"
+    assert "walk_forward" in wf_report
+    wf = wf_report["walk_forward"]
+    assert set(wf) >= {"config", "folds", "per_threshold_folds",
+                       "validation_aggregate", "holdout", "warnings", "limitations"}
+    assert len(wf["folds"]) >= 3
+
+
+def test_walk_forward_all_thresholds_per_fold(wf_report):
+    wf = wf_report["walk_forward"]
+    thr_keys = {str(t) for t in deep_backtest.THRESHOLDS}
+    assert set(wf["per_threshold_folds"]) == thr_keys
+    assert set(wf["validation_aggregate"]) == thr_keys
+    n_folds = len(wf["folds"])
+    for rows in wf["per_threshold_folds"].values():
+        assert len(rows) == n_folds
+        for r in rows:
+            assert set(r["validation"]) >= {"trades", "including_timeouts",
+                                            "median_r", "max_drawdown_r",
+                                            "profit_factor", "confidence_flags"}
+
+
+def test_walk_forward_folds_are_purged_and_disjoint(wf_report):
+    for f in wf_report["walk_forward"]["folds"]:
+        assert f["val_lo"] - f["train_hi"] == f["purge_bars"] + f["embargo_bars"]
+        assert f["train_hi"] <= f["val_lo"]
+
+
+def test_walk_forward_folds_expose_validation_coverage(wf_report):
+    # coverage/trades_per_bar/regime_disagreement считаются в fold_stats и ОБЯЗАНЫ
+    # попасть в отчёт, а не теряться (Codex Medium).
+    for f in wf_report["walk_forward"]["folds"]:
+        assert set(f) >= {"val_coverage_bars", "val_trades_per_bar",
+                          "val_regime_disagreement_rate"}
+        assert f["val_coverage_bars"] == f["val_hi"] - f["val_lo"]
+        assert 0.0 <= f["val_regime_disagreement_rate"] <= 1.0
+
+
+def test_walk_forward_holdout_is_sealed(wf_report):
+    h = wf_report["walk_forward"]["holdout"]
+    assert h["sealed"] is True
+    assert set(h) >= {"idx_lo", "idx_hi", "n_setups"}
+    forbidden = {"win_rate", "expectancy_r", "sum_r", "thresholds",
+                 "including_timeouts", "profit_factor", "median_r"}
+    assert not (forbidden & set(h))
+
+
+def test_walk_forward_emits_no_recommended_threshold(wf_report):
+    blob = json.dumps(wf_report, default=str)
+    assert "recommended_threshold" not in blob
+    assert "recommended_threshold" not in deep_backtest.format_report(wf_report)
+    assert "recommended_threshold" not in wf_report["walk_forward"]
+
+
+def test_walk_forward_text_report_has_sections(wf_report):
+    text = deep_backtest.format_report(wf_report)
+    for marker in ("walk-forward (out-of-sample folds):", "folds (entry-bar index):",
+                   "validation stability", "holdout (sealed):",
+                   "walk-forward limitations:"):
+        assert marker in text, marker
+
+
+def test_cli_walk_forward_adds_section(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(kline_cache, "parquet_available", lambda: False)
+    outdir = _build_random_walk_dataset(tmp_path / "cliwf", depths=WF_DEPTHS)
+    rc = deep_backtest.main([
+        "--dataset", outdir, "--exchange", "binance", "--profile", "intraday",
+        "--bars", str(WF_BARS), "--walk-forward", "--wf-train-bars", "80",
+        "--wf-val-bars", "30", "--wf-embargo-bars", "10", "--wf-min-folds", "3",
+        "--wf-min-trades-per-fold", "1", "--json"])
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert "walk_forward" in payload
+    assert payload["stage"] == "C1.3d"
+    assert len(payload["walk_forward"]["folds"]) >= 3
+    assert "recommended_threshold" not in json.dumps(payload, default=str)
