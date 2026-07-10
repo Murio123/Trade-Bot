@@ -70,6 +70,11 @@ REGIME_TF = "1d"
 # Колонки, которые обязаны стать tz-aware UTC datetime после загрузки.
 TIME_COLUMNS = ("open_time", "close_time")
 
+# Минимум баров, при котором проверки вообще что-то значат: на 0 и 1 баре
+# сверка границ и отчёт о пропусках вырождаются в тавтологию (нечего сравнивать
+# и не с чем), и датасет «проходит» валидацию, ничего не доказав.
+MIN_BARS = 2
+
 
 class DatasetError(Exception):
     """Датасет не соответствует своему манифесту или запросу."""
@@ -220,6 +225,16 @@ def _validate_frame(df: pd.DataFrame, m: Mapping[str, Any],
             f"{data_path}: manifest actual_bars={m.get('actual_bars')} != "
             f"len(df)={len(df)}")
 
+    # Пустой (и однобаровый) датасет раньше проходил валидацию ВАКУУМНО:
+    # сверка границ спрятана за `if len(df)`, а gap_report на len < 2 возвращает
+    # нули. Bybit-образный пустой фрейм вдобавок сходился с CVD-инвариантом
+    # (False == False) и грузился молча. Отказ здесь, без allow_empty: ниже по
+    # стеку нулевой датасет всё равно означает прогон по нулю баров.
+    if len(df) < MIN_BARS:
+        raise DatasetError(
+            f"{data_path}: dataset has too few bars ({len(df)} < {MIN_BARS}) — "
+            "проверки границ и интервалов на таком фрейме ничего не доказывают")
+
     if "open_time" not in df.columns:
         raise DatasetError(f"{data_path}: missing open_time column")
 
@@ -257,6 +272,45 @@ def _validate_frame(df: pd.DataFrame, m: Mapping[str, Any],
             f"{data_path}: has_taker_buy_base={m.get('has_taker_buy_base')} in "
             f"manifest but data says {data_has_taker} — CVD метод сменился бы "
             "молча (D15)")
+
+
+def _validate_grid_alignment(df: pd.DataFrame, expected_interval_ms: int,
+                             *, data_path: str) -> None:
+    """Каждый шаг open_time обязан быть ЦЕЛЫМ кратным шага таймфрейма.
+
+    gap_report считает пропуски как ``delta // expected - 1``, то есть дрейф
+    меньше одного интервала обнуляется делением. Свеча 15m, открытая в 7.5
+    минут от сетки, давала missing_bars=0 и проезжала даже max_gap_ratio=0.0.
+    Смещение по сетке — это не пропуск, а испорченные данные: индикаторы на
+    неравномерных барах неверны, и никакой счётчик пропусков этого не покажет.
+
+    Честная дыра (delta = 2x, 3x ... интервала) остаётся допустимой и
+    контролируется max_gap_ratio, а не этой проверкой.
+    """
+    if expected_interval_ms <= 0:
+        raise DatasetError(f"{data_path}: expected_interval_ms must be positive")
+
+    times_ms = df["open_time"].astype("int64").to_numpy() // 1_000_000
+    deltas = times_ms[1:] - times_ms[:-1]
+
+    # delta <= 0 недостижимо после проверок уникальности и монотонности;
+    # оставлено как defense-in-depth на случай их перестановки.
+    nonpositive = (deltas <= 0).nonzero()[0]
+    if len(nonpositive):
+        i = int(nonpositive[0])
+        raise DatasetError(
+            f"{data_path}: non-positive open_time delta {int(deltas[i])}ms at "
+            f"row {i + 1}")
+
+    misaligned = (deltas % expected_interval_ms != 0).nonzero()[0]
+    if len(misaligned):
+        i = int(misaligned[0])
+        raise DatasetError(
+            f"{data_path}: off-grid open_time at row {i + 1} "
+            f"({df['open_time'].iloc[i + 1]}): delta {int(deltas[i])}ms is not a "
+            f"multiple of expected_interval_ms={expected_interval_ms} "
+            f"({len(misaligned)} misaligned bar(s) total) — это смещение сетки, "
+            "а не пропуск")
 
 
 def _validate_gaps(gaps: Mapping[str, Any], m: Mapping[str, Any],
@@ -302,6 +356,10 @@ def load_frame(outdir: str, exchange: str, symbol: str, timeframe: str,
     df = _coerce_times(_read_data(data_path, manifest.get("file_format", "")),
                        data_path)
     _validate_frame(df, manifest, data_path=data_path)
+
+    # Сетка проверяется ДО пересчёта пропусков: off-grid бар не должен даже
+    # рассматриваться как «пропуск», который потом простит max_gap_ratio.
+    _validate_grid_alignment(df, INTERVAL_MS[timeframe], data_path=data_path)
 
     # Пропуски считаются ПО ДАННЫМ, затем манифест сверяется с ними. Порог
     # применяется к пересчитанному значению — иначе враньё в манифесте

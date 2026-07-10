@@ -320,6 +320,91 @@ def test_loaded_frame_gaps_are_recomputed_from_data(tmp_path):
     assert frame.manifest["gap_examples"] == []
 
 
+# --- пустые и off-grid датасеты (Codex Medium x2, cca618c) ------------------
+
+def _empty_bybit_shaped() -> pd.DataFrame:
+    """Пустой фрейм БЕЗ taker_buy_base: CVD-инвариант сходится (False == False),
+    поэтому раньше такой датасет проезжал валидацию молча."""
+    cols = ["open", "high", "low", "close", "volume", "quote_volume"]
+    df = pd.DataFrame({c: pd.Series(dtype="float64") for c in cols})
+    df["open_time"] = pd.Series(dtype="datetime64[ns, UTC]")
+    df["close_time"] = pd.Series(dtype="datetime64[ns, UTC]")
+    return df
+
+
+def test_empty_bybit_shaped_dataset_raises(tmp_path):
+    _write(tmp_path, _empty_bybit_shaped(), exchange="bybit")
+    with pytest.raises(DatasetError, match="too few bars"):
+        kline_dataset.load_frame(str(tmp_path), "bybit", "BTCUSDT", "15m",
+                                 max_gap_ratio=0.0)
+
+
+def test_single_row_dataset_raises(tmp_path):
+    _write(tmp_path, _df(1))
+    with pytest.raises(DatasetError, match="too few bars"):
+        kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m")
+
+
+def _off_grid(n: int = 10, row: int = 5, shift_ms: int = 450_000) -> pd.DataFrame:
+    """Сдвинуть одну свечу с сетки на пол-интервала (7.5 мин для 15m)."""
+    times = [BASE_MS + i * INTERVAL for i in range(n)]
+    times[row] += shift_ms
+    df = pd.DataFrame({
+        "open_time": pd.to_datetime(times, unit="ms", utc=True),
+        "open": [100.0] * n, "high": [101.0] * n, "low": [99.0] * n,
+        "close": [100.5] * n, "volume": [10.0] * n,
+        "quote_volume": [1000.0] * n, "taker_buy_base": [5.0] * n,
+    })
+    df["close_time"] = df["open_time"] + pd.to_timedelta(INTERVAL, unit="ms")
+    return df
+
+
+def test_off_grid_timestamp_raises(tmp_path):
+    _write(tmp_path, _off_grid())
+    with pytest.raises(DatasetError, match="off-grid"):
+        kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m")
+
+
+def test_off_grid_rejected_even_when_manifest_reports_no_gaps(tmp_path):
+    """Ровно старый эксплойт: floor-деление в gap_report давало missing_bars=0."""
+    _, _, manifest = _write(tmp_path, _off_grid())
+    assert manifest["gap_count"] == 0 and manifest["missing_bars"] == 0
+
+    with pytest.raises(DatasetError, match="off-grid"):
+        kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m",
+                                 max_gap_ratio=0.0)
+
+
+def test_off_grid_is_not_forgiven_by_generous_gap_ratio(tmp_path):
+    _write(tmp_path, _off_grid())
+    with pytest.raises(DatasetError, match="off-grid"):
+        kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m",
+                                 max_gap_ratio=1.0)
+
+
+def test_integer_multiple_gap_below_threshold_still_loads(tmp_path):
+    """Честная дыра (кратная интервалу) — не off-grid, её судит max_gap_ratio."""
+    _write(tmp_path, _df(2000, skip_after=100, skip_len=1))
+    frame = kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m",
+                                     max_gap_ratio=0.001)
+    assert frame.gaps["missing_bars"] == 1
+    assert frame.bars == 2000
+
+
+def test_integer_multiple_gap_above_threshold_raises_gap_ratio(tmp_path):
+    _write(tmp_path, _df(200, skip_after=50, skip_len=5))
+    with pytest.raises(GapRatioExceeded):
+        kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m",
+                                 max_gap_ratio=0.001)
+
+
+def test_two_bar_dataset_is_the_minimum_that_loads(tmp_path):
+    _write(tmp_path, _df(2))
+    frame = kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m",
+                                     max_gap_ratio=0.0)
+    assert frame.bars == 2
+
+
 def test_valid_cache_output_still_loads(tmp_path):
     """Честный, свежий вывод kline_cache грузится без единой правки."""
     _write(tmp_path, _df(50))
@@ -334,7 +419,10 @@ def test_valid_cache_output_still_loads(tmp_path):
 # --- 13..14: смешение источников (D15) --------------------------------------
 
 def _loaded(tmp_path, exchange, symbol, timeframe):
-    _write(tmp_path, _df(5), exchange=exchange, symbol=symbol, timeframe=timeframe)
+    # Шаг свечей обязан соответствовать заявленному ТФ, иначе валидатор — верно —
+    # отвергнет фрейм как off-grid раньше, чем тест доберётся до своей проверки.
+    _write(tmp_path, _df(5, interval_ms=kline_cache.INTERVAL_MS[timeframe]),
+           exchange=exchange, symbol=symbol, timeframe=timeframe)
     return kline_dataset.load_frame(str(tmp_path), exchange, symbol, timeframe)
 
 
