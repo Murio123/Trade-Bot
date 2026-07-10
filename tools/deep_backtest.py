@@ -1,4 +1,4 @@
-"""Stage C1.3b: offline deep-backtest core на строгом датасете kline_dataset.
+"""Stage C1.3c: offline deep-backtest core на строгом датасете kline_dataset.
 
 Read-only измерительный инструмент. НЕ торгует, НЕ отправляет ордера, НЕ ходит в
 сеть, НЕ пишет в БД, НЕ меняет схему, scoring, thresholds, pipeline, scheduler,
@@ -31,7 +31,7 @@ backtest.py или live runtime. НЕ импортируется runtime-код�
 
     * dual regime tags — см. ниже.
 
-Что этот модуль НЕ ЕСТЬ (сознательно, стадия C1.3b):
+Что этот модуль НЕ ЕСТЬ (сознательно, стадия C1.3c):
 
   Здесь нет walk-forward и нет рекомендации порога. Отчёт НЕ содержит поля
   recommended_threshold: сквозной прогон по одной истории — это in-sample
@@ -49,7 +49,7 @@ backtest._walk считает режим так::
 есть drift point D13: интрадей-бэктест взвешивает скоры range-весами всегда,
 а live-конвейер (pipeline.run_cascade) считает режим по ind_1d + volatility_1d.
 
-C1.3b ИЗМЕРЯЕТ этот дрейф, а не чинит его:
+C1.3c ИЗМЕРЯЕТ этот дрейф, а не чинит его:
 
   * ``regime_current``     — ровно текущая семантика backtest. ТОЛЬКО он
                              попадает в weighted_total и влияет на скоринг.
@@ -150,7 +150,7 @@ RESOLVED_OUTCOMES = ("win", "loss", "breakeven", "timeout")
 OUTCOMES = RESOLVED_OUTCOMES + ("unresolved",)
 
 LIMITATIONS = [
-    "C1.3b has no walk-forward: every number below is in-sample over one "
+    "C1.3c has no walk-forward: every number below is in-sample over one "
     "contiguous history.",
     "No recommended threshold is produced. The threshold table is a "
     "measurement, not advice.",
@@ -385,6 +385,17 @@ class _IndicatorCache:
 # Deep walk
 # ---------------------------------------------------------------------------
 
+def walk_start(n: int, bars: int) -> int:
+    """Индекс первого обходимого entry-бара: warmup или хвост длиной bars.
+
+    Ровно тот старт, что и в backtest._walk. Вынесен, чтобы обход (deep_walk) и
+    проверка as-of выравнивания (aux_alignment) не разошлись: обе обязаны
+    считать «первый пройденный бар» одинаково, иначе валидация проверяла бы не
+    тот бар, с которого начнётся прогон.
+    """
+    return max(ENTRY_WARMUP, n - bars)
+
+
 def deep_walk(frames: dict[str, LoadedFrame], profile: dict[str, Any],
               bars: int) -> dict[str, Any]:
     """Копия воронки backtest._walk с skip-ledger и двойным тегом режима.
@@ -412,7 +423,7 @@ def deep_walk(frames: dict[str, LoadedFrame], profile: dict[str, Any],
 
     # Тот же старт, что и в backtest._walk: warmup или хвост длиной bars.
     # Последний бар не обходится — у него нет ни одного будущего бара.
-    start = max(ENTRY_WARMUP, n - bars)
+    start = walk_start(n, bars)
     bars_walked = 0
 
     for i in range(start, n - 1):
@@ -709,6 +720,112 @@ def threshold_stats(setups: list[dict[str, Any]], threshold: float,
 
 
 # ---------------------------------------------------------------------------
+# Aux as-of alignment (D14, C1.3c)
+# ---------------------------------------------------------------------------
+#
+# aux_depth (kline_dataset) доказывает КОЛИЧЕСТВО баров, но не то, что эти бары
+# лежат ДО первого пройденного entry-бара по времени. Датасет с верным счётом,
+# но сдвинутым вперёд aux-фреймом (частый след старого limit=500: старшие ТФ
+# покрывают меньше истории, чем entry) проходил бы aux_depth и затем тихо
+# осыпался бы в skip-ledger (htf_insufficient_history), а для 1d — молча
+# сползал бы в regime "unavailable", искажая знаменатель матрицы режимов.
+#
+# aux_alignment проверяет ровно то же условие, что и deep_walk: сколько баров
+# каждого aux-ТФ имеют close_time <= t0, где t0 — close_time первого пройденного
+# entry-бара (walk_start). Требуемая глубина = warmup роли (тот же guard, что и
+# в обходе). entry-ТФ исключён: его warmup позиционный (iloc-срез) и уже покрыт
+# aux_depth. Функция НЕ падает — возвращает таблицу; решение принимает prepare.
+
+# required as-of по ролям — те же guard'ы, что применяет deep_walk на каждом баре.
+_ASOF_REQUIRED = {"htf": HTF_WARMUP, "zone": ZONE_MIN_BARS,
+                  "regime_1d": REGIME_1D_WARMUP}
+
+
+def _aux_roles(profile: dict[str, Any]) -> dict[str, set[str]]:
+    """tf -> роли. Один ТФ может играть несколько ролей (у swing htf == 1d)."""
+    roles: dict[str, set[str]] = {}
+    roles.setdefault(profile["entry"], set()).add("entry")
+    roles.setdefault(profile["htf"], set()).add("htf")
+    for tf in profile.get("zone_tfs", []):
+        roles.setdefault(tf, set()).add("zone")
+    roles.setdefault(REGIME_TF, set()).add("regime_1d")
+    return roles
+
+
+def aux_alignment(frames: dict[str, LoadedFrame], profile: dict[str, Any],
+                  bars: int) -> dict[str, dict[str, Any]]:
+    """As-of покрытие каждого aux-ТФ на первом пройденном entry-баре.
+
+    Использует те же примитивы, что и обход (_close_ms, _asof_end, walk_start) и
+    то же условие close_time <= t0. entry-ТФ пропускается (роль warmup у него
+    позиционная). Возвращает по строке на aux-ТФ и НЕ бросает исключений.
+
+    Недоступность close_time (колонки нет или в ней NaT — _close_ms поднимает
+    DatasetError) НЕ прерывает валидацию стеком: такой ТФ становится дефицитной
+    строкой с полем ``error``, и prepare() отказывает штатным путём выравнивания.
+    Отсутствие entry close_time делает as-of невычислимым для ВСЕХ aux-ТФ — тогда
+    каждая строка несёт эту ошибку. Каждая строка имеет ключ ``error`` (None у
+    выровненных), чтобы форма таблицы не зависела от исхода.
+    """
+    entry_tf = profile["entry"]
+    entry_df = frames[entry_tf].df
+    n = len(entry_df)
+
+    table: dict[str, dict[str, Any]] = {}
+    i0 = walk_start(n, bars)
+    if i0 >= n - 1:
+        # Обходить нечего (aux_depth по entry уже отсёк бы такой датасет).
+        return table
+
+    first_open = entry_df["open_time"].iloc[i0]
+    first_open_ms = int(pd.Timestamp(first_open).value // 1_000_000)
+    first_open_iso = _iso(first_open)
+
+    # entry close_time — общий якорь t0. Его недоступность = as-of невычислим для
+    # всех aux; представляем дефицитом, а не исключением из aux_alignment.
+    t0: int | None = None
+    entry_error: str | None = None
+    try:
+        t0 = int(_close_ms(frames[entry_tf])[i0])
+    except DatasetError as exc:
+        entry_error = f"entry {entry_tf} close_time: {exc}"
+
+    for tf, roles in _aux_roles(profile).items():
+        aux_roles = roles - {"entry"}
+        if not aux_roles:  # чистый entry-ТФ — не проверяем
+            continue
+        required = max(_ASOF_REQUIRED[r] for r in aux_roles)
+        available = 0
+        error = entry_error
+        if t0 is not None:
+            if tf not in frames:
+                error = f"{tf} frame is missing"
+            else:
+                try:
+                    available = _asof_end(_close_ms(frames[tf]), t0)
+                    error = None
+                except DatasetError as exc:
+                    available, error = 0, str(exc)
+        deficit = max(0, required - available)
+        table[tf] = {
+            "roles": sorted(roles),
+            "required_asof": required,
+            "available_asof": available,
+            "first_walked_open_time": first_open_ms,
+            "first_walked_open_time_iso": first_open_iso,
+            "deficit": deficit,
+            "error": error,
+            "ok": deficit == 0 and error is None,
+        }
+    return table
+
+
+def aux_alignment_deficits(table: dict[str, dict[str, Any]]) -> dict[str, int]:
+    """Не-ok ТФ -> дефицит. Строка с error (close_time недоступен) тоже дефицит."""
+    return {tf: row["deficit"] for tf, row in table.items() if not row["ok"]}
+
+
+# ---------------------------------------------------------------------------
 # Датасет
 # ---------------------------------------------------------------------------
 
@@ -758,6 +875,29 @@ def prepare(dataset: str, exchange: str, symbol: str, profile_name: str,
             f"insufficient dataset depth for {bars} entry bars (D14) — {detail}; "
             f"re-run tools.kline_cache with a larger --bars for those timeframes")
 
+    # As-of выравнивание: счёт может быть верным, а aux-фрейм — сдвинут вперёд.
+    # Проверяем ПЕРЕД обходом, иначе дефицит превратился бы в тихий mass-skip.
+    alignment = aux_alignment(frames, profile, bars)
+    misaligned = aux_alignment_deficits(alignment)
+    if misaligned:
+        first_iso = next(iter(alignment.values()))["first_walked_open_time_iso"]
+
+        def _detail(tf: str) -> str:
+            row = alignment[tf]
+            base = (f"{tf}: needs {row['required_asof']} as-of bars "
+                    f"(close_time<=t0) but only {row['available_asof']} precede "
+                    f"the first walked bar ({row['deficit']} short)")
+            if row.get("error"):
+                base += f" [{row['error']}]"
+            return base
+
+        detail = ", ".join(_detail(tf) for tf in sorted(misaligned))
+        raise DeepBacktestError(
+            f"aux frame time-misaligned for {bars} entry bars (D14/as-of): first "
+            f"walked bar {first_iso} — {detail}; increase kline_cache --bars for "
+            f"that timeframe, and if the deficit persists, re-fetch all timeframes "
+            f"together so their endpoints align")
+
     entry = frames[profile["entry"]]
     cvd_method = entry.cvd_method
     if cvd_method != "exact" and not allow_estimated_cvd:
@@ -772,13 +912,14 @@ def prepare(dataset: str, exchange: str, symbol: str, profile_name: str,
 
 def build_report(frames: dict[str, LoadedFrame], profile: dict[str, Any],
                  profile_name: str, exchange: str, symbol: str,
-                 bars_requested: int, table: dict[str, Any], cvd_method: str,
+                 bars_requested: int, table: dict[str, Any],
+                 alignment: dict[str, Any], cvd_method: str,
                  walk: dict[str, Any]) -> dict[str, Any]:
-    """Отчёт C1.3b. Поля recommended_threshold здесь нет и быть не должно."""
+    """Отчёт C1.3c. Поля recommended_threshold здесь нет и быть не должно."""
     setups = walk["setups"]
     pairs = walk["regime_pairs"]
     return {
-        "stage": "C1.3b",
+        "stage": "C1.3c",
         "profile": profile_name,
         "symbol": symbol,
         "exchange": exchange,
@@ -791,6 +932,7 @@ def build_report(frames: dict[str, LoadedFrame], profile: dict[str, Any],
         "cooldown_bars": walk["cooldown_bars"],
         "dataset": provenance(frames),
         "aux_depth": table,
+        "aux_alignment": alignment,
         "skip_ledger": walk["ledger"].as_dict(),
         "regime_confusion_matrix": confusion_matrix(pairs),
         "regime_disagreement_rate": disagreement_rate(pairs),
@@ -809,9 +951,10 @@ def run(dataset: str, exchange: str, symbol: str, profile_name: str, bars: int,
     frames, profile, table, cvd_method = prepare(
         dataset, exchange, symbol, profile_name, bars, max_gap_ratio,
         allow_estimated_cvd)
+    alignment = aux_alignment(frames, profile, bars)
     walk = deep_walk(frames, profile, bars)
     return build_report(frames, profile, profile_name, exchange, symbol, bars,
-                        table, cvd_method, walk)
+                        table, alignment, cvd_method, walk)
 
 
 # ---------------------------------------------------------------------------
@@ -820,15 +963,40 @@ def run(dataset: str, exchange: str, symbol: str, profile_name: str, bars: int,
 
 def format_report(report: dict[str, Any]) -> str:
     lines = [
-        f"deep backtest (C1.3b) — {report['exchange']} {report['symbol']} "
-        f"{report['profile']} (entry {report['entry_timeframe']})",
+        f"deep backtest ({report['stage']}) — {report['exchange']} "
+        f"{report['symbol']} {report['profile']} (entry {report['entry_timeframe']})",
         f"  bars           : requested {report['bars_requested']}, "
         f"walked {report['bars_walked']}, evaluated {report['bars_evaluated']}",
         f"  cvd_method     : {report['cvd_method']}",
         f"  max_hold_bars  : {report['max_hold_bars']}",
         "",
-        "skip ledger:",
+        "dataset provenance:",
+        f"  {'tf':<4} {'bars':>6} {'gaps':>5} {'missing':>7} {'taker':>6}  "
+        f"first_open .. last_open",
     ]
+    for tf, row in report["dataset"].items():
+        lines.append(
+            f"  {tf:<4} {row['actual_bars']:>6} {row['gap_count']:>5} "
+            f"{row['missing_bars']:>7} {str(row['has_taker_buy_base']):>6}  "
+            f"{row['first_open_time']} .. {row['last_open_time']}")
+
+    lines += ["", "aux depth (count):",
+              f"  {'tf':<4} {'roles':<18} {'required':>8} {'available':>9} "
+              f"{'deficit':>7} ok"]
+    for tf, row in report["aux_depth"].items():
+        lines.append(
+            f"  {tf:<4} {','.join(row['roles']):<18} {row['required']:>8} "
+            f"{row['available']:>9} {row['deficit']:>7} {row['ok']}")
+
+    lines += ["", "aux as-of alignment (at first walked bar):",
+              f"  {'tf':<4} {'roles':<18} {'req_asof':>8} {'avail_asof':>10} "
+              f"{'deficit':>7} ok"]
+    for tf, row in report["aux_alignment"].items():
+        lines.append(
+            f"  {tf:<4} {','.join(row['roles']):<18} {row['required_asof']:>8} "
+            f"{row['available_asof']:>10} {row['deficit']:>7} {row['ok']}")
+
+    lines += ["", "skip ledger:"]
     for reason, count in report["skip_ledger"]["counts"].items():
         lines.append(f"  {reason:<32} {count:>7}")
     lines += [
@@ -861,7 +1029,7 @@ def format_report(report: dict[str, Any]) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Offline deep backtest core on a pinned kline dataset "
-                    "(Stage C1.3b). Reads cached files only; never touches the "
+                    "(Stage C1.3c). Reads cached files only; never touches the "
                     "network, the database, or an exchange.")
     parser.add_argument("--dataset", required=True,
                         help="directory written by tools.kline_cache")

@@ -645,7 +645,7 @@ def test_cli_text_output_and_failure_exit_code(tmp_path, capsys, monkeypatch):
         "--dataset", outdir, "--exchange", "binance", "--profile", "intraday",
         "--bars", str(WALK_BARS)]) == 0
     out = capsys.readouterr().out
-    assert "deep backtest (C1.3b)" in out
+    assert "deep backtest (C1.3c)" in out
     assert "skip ledger:" in out
     assert "limitations:" in out
     # Слово встречается только в отрицающей формулировке блока limitations.
@@ -1007,3 +1007,245 @@ def test_deep_walk_parity_survives_a_changed_predicate(parity_inputs, monkeypatc
     assert bt_setups, "фикстура обязана давать сетапы у backtest"
     assert deep["setups"] == [], "изменённый порог не повлиял — тест слеп"
     assert deep["ledger"].counts["below_min_threshold"] > 0
+
+
+# ---------------------------------------------------------------------------
+# C1.3c: as-of выравнивание aux-фреймов
+# ---------------------------------------------------------------------------
+#
+# aux_depth доказывает счёт, но не то, что бары старших ТФ лежат ДО первого
+# пройденного entry-бара. Здесь строим датасет с ВЕРНЫМ счётом, но одним aux-ТФ,
+# сдвинутым вперёд по времени: aux_depth его пропускает, а aux_alignment ловит.
+
+# spec идентичен _build_dataset — цены для as-of тестов роли не играют, важны
+# только временные метки.
+_SHIFT_SPEC = {
+    "15m": dict(start=30_000.0, step=0.4, wobble=25.0),
+    "1h": dict(start=29_000.0, step=1.5, wobble=30.0),
+    "2h": dict(start=28_500.0, step=3.0, wobble=40.0),
+    "4h": dict(start=20_000.0, step=25.0, wobble=60.0),
+    "1d": dict(start=5_000.0, step=95.0, wobble=120.0),
+}
+
+
+def _build_shifted_dataset(outdir, shift_tf: str, delta_ms: int,
+                           depths: dict[str, int] | None = None) -> str:
+    """Стандартный intraday-датасет, но shift_tf сдвинут вперёд на delta_ms.
+
+    Сдвиг вперёд означает «этот ТФ покрывает меньше истории, чем entry» — ровно
+    старый след limit=500. Счёт баров сохраняется, поэтому aux_depth проходит,
+    а as-of покрытие на первом пройденном баре — нет.
+    """
+    depths = depths or DEPTHS
+    for tf, n in depths.items():
+        df = _frame(tf, n, taker=True, **_SHIFT_SPEC[tf])
+        if tf == shift_tf:
+            shift = pd.to_timedelta(delta_ms, unit="ms")
+            df["open_time"] = df["open_time"] + shift
+            df["close_time"] = df["close_time"] + shift
+        kline_cache.write_dataset(df, str(outdir), exchange="binance",
+                                  symbol="BTCUSDT", timeframe=tf,
+                                  requested_bars=n, duplicate_count_removed=0)
+    return str(outdir)
+
+
+def _loaded_intraday(outdir):
+    profile = get_profile("intraday")
+    frames = deep_backtest.load_frames(
+        outdir, "binance", "BTCUSDT",
+        deep_backtest.required_timeframes(profile))
+    return frames, profile
+
+
+def test_walk_start_extracts_backtest_start():
+    assert deep_backtest.walk_start(1000, 40) == 1000 - 40
+    # хвост короче warmup -> старт упирается в ENTRY_WARMUP
+    assert deep_backtest.walk_start(310, 40) == deep_backtest.ENTRY_WARMUP
+
+
+def test_walk_start_shared_between_walk_and_alignment(dataset):
+    """Обход и валидация обязаны считать «первый пройденный бар» одинаково."""
+    frames, profile = _loaded_intraday(dataset)
+    n = len(frames["15m"].df)
+    i0 = deep_backtest.walk_start(n, WALK_BARS)
+
+    align = deep_backtest.aux_alignment(frames, profile, WALK_BARS)
+    expected_iso = frames["15m"].df["open_time"].iloc[i0].isoformat()
+    assert align and all(
+        row["first_walked_open_time_iso"] == expected_iso
+        for row in align.values())
+
+    # deep_walk стартует с того же индекса (знаменатель = n-1-i0).
+    report = deep_backtest.run(dataset, "binance", "BTCUSDT", "intraday", WALK_BARS)
+    assert report["bars_walked"] == n - 1 - i0
+
+
+def test_aux_alignment_excludes_entry_and_passes_on_aligned_dataset(dataset):
+    frames, profile = _loaded_intraday(dataset)
+    align = deep_backtest.aux_alignment(frames, profile, WALK_BARS)
+    assert set(align) == {"4h", "2h", "1h", "1d"}   # entry 15m исключён
+    assert all(row["ok"] and row["deficit"] == 0 for row in align.values())
+
+
+def test_aligned_dataset_passes_prepare(dataset):
+    frames, profile, _table, cvd = deep_backtest.prepare(
+        dataset, "binance", "BTCUSDT", "intraday", WALK_BARS, 0.001, False)
+    assert cvd == "exact"
+    align = deep_backtest.aux_alignment(frames, profile, WALK_BARS)
+    assert all(row["ok"] for row in align.values())
+
+
+def test_time_shifted_htf_is_count_valid_but_fails_alignment(tmp_path):
+    """Счёт 4h верный (aux_depth проходит), но as-of покрытие — нет."""
+    outdir = _build_shifted_dataset(tmp_path / "htf", "4h", 6 * MS["4h"])
+    frames, profile = _loaded_intraday(outdir)
+
+    depth = deep_backtest.aux_depth(profile, WALK_BARS, frames)
+    assert depth["4h"]["deficit"] == 0, "счёт обязан быть валидным"
+
+    align = deep_backtest.aux_alignment(frames, profile, WALK_BARS)
+    row = align["4h"]
+    assert row["ok"] is False and row["deficit"] > 0
+
+    with pytest.raises(DeepBacktestError) as exc:
+        deep_backtest.prepare(outdir, "binance", "BTCUSDT", "intraday",
+                              WALK_BARS, 0.001, False)
+    msg = str(exc.value)
+    assert "4h" in msg
+    assert str(row["required_asof"]) in msg
+    assert str(row["available_asof"]) in msg
+    assert row["first_walked_open_time_iso"] in msg
+    assert "re-fetch all timeframes" in msg
+
+
+def test_time_shifted_zone_fails_alignment(tmp_path):
+    outdir = _build_shifted_dataset(tmp_path / "zone", "1h", 6 * MS["1h"])
+    frames, profile = _loaded_intraday(outdir)
+
+    align = deep_backtest.aux_alignment(frames, profile, WALK_BARS)
+    assert align["1h"]["ok"] is False
+    # сдвинут только 1h — остальные zone/htf-фреймы выровнены.
+    assert align["4h"]["ok"] is True and align["2h"]["ok"] is True
+
+    with pytest.raises(DeepBacktestError, match="1h"):
+        deep_backtest.prepare(outdir, "binance", "BTCUSDT", "intraday",
+                              WALK_BARS, 0.001, False)
+
+
+def test_time_shifted_1d_fails_alignment(tmp_path):
+    outdir = _build_shifted_dataset(tmp_path / "d1", "1d", 3 * MS["1d"])
+    frames, profile = _loaded_intraday(outdir)
+
+    align = deep_backtest.aux_alignment(frames, profile, WALK_BARS)
+    assert align["1d"]["ok"] is False
+
+    with pytest.raises(DeepBacktestError, match="1d"):
+        deep_backtest.prepare(outdir, "binance", "BTCUSDT", "intraday",
+                              WALK_BARS, 0.001, False)
+
+
+def test_report_contains_aux_alignment(walk_report):
+    align = walk_report["aux_alignment"]
+    assert set(align) == {"4h", "2h", "1h", "1d"}
+    for row in align.values():
+        assert set(row) >= {"roles", "required_asof", "available_asof",
+                            "first_walked_open_time", "first_walked_open_time_iso",
+                            "deficit", "ok", "error"}
+        assert row["ok"] is True and row["deficit"] == 0
+        assert row["error"] is None
+
+
+def test_stage_label_is_c13c(walk_report):
+    assert walk_report["stage"] == "C1.3c"
+    assert "recommended_threshold" not in walk_report
+
+
+def test_text_report_shows_all_sections(walk_report):
+    text = deep_backtest.format_report(walk_report)
+    for marker in ("dataset provenance:", "aux depth (count):",
+                   "aux as-of alignment", "skip ledger:",
+                   "regime disagreement rate", "limitations:"):
+        assert marker in text, marker
+    assert f"({walk_report['stage']})" in text
+    # provenance-строка выводит per-tf бары.
+    assert str(DEPTHS["4h"]) in text
+
+
+# ---------------------------------------------------------------------------
+# C1.3c: close_time недоступен -> дефицитная строка, а не исключение (Codex Medium)
+# ---------------------------------------------------------------------------
+#
+# kline_dataset грузит фрейм и БЕЗ close_time (колонка валидируется только если
+# присутствует). aux_alignment зовёт _close_ms, который на таком фрейме поднял бы
+# DatasetError. Контракт «возвращает таблицу и не бросает» обязан это пережить:
+# ТФ без close_time становится строкой ok=false с полем error, и prepare()
+# отказывает штатным путём выравнивания.
+
+def _strip_close_time(outdir, tf: str) -> None:
+    """Убрать close_time из уже записанного CSV одного ТФ (манифест остаётся
+    валидным: actual_bars и границы считаются по open_time)."""
+    stem = kline_cache.dataset_stem("binance", "BTCUSDT", tf)
+    path = pathlib.Path(outdir) / f"{stem}.csv"
+    raw = pd.read_csv(path)
+    raw.drop(columns=["close_time"]).to_csv(path, index=False)
+
+
+def test_aux_alignment_missing_aux_close_time_is_deficit_not_raise(tmp_path):
+    outdir = _build_dataset(tmp_path / "noclose")
+    _strip_close_time(outdir, "4h")
+    frames, profile = _loaded_intraday(outdir)   # грузится: close_time опционален
+
+    align = deep_backtest.aux_alignment(frames, profile, WALK_BARS)  # НЕ бросает
+    row = align["4h"]
+    assert row["ok"] is False
+    assert row["error"] and "close_time" in row["error"]
+    assert row["available_asof"] == 0
+    assert row["deficit"] == row["required_asof"]
+    # прочие aux-ТФ (с close_time) остаются выровненными
+    assert align["2h"]["ok"] and align["1h"]["ok"] and align["1d"]["ok"]
+    assert align["2h"]["error"] is None
+
+
+def test_prepare_rejects_missing_aux_close_time(tmp_path):
+    outdir = _build_dataset(tmp_path / "noclose2")
+    _strip_close_time(outdir, "4h")
+    frames, profile = _loaded_intraday(outdir)
+    expected_iso = deep_backtest.aux_alignment(
+        frames, profile, WALK_BARS)["4h"]["first_walked_open_time_iso"]
+
+    with pytest.raises(DeepBacktestError) as exc:
+        deep_backtest.prepare(outdir, "binance", "BTCUSDT", "intraday",
+                              WALK_BARS, 0.001, False)
+    msg = str(exc.value)
+    assert "4h" in msg
+    assert "close_time" in msg          # подлежащая ошибка вынесена в сообщение
+    assert "short" in msg               # required/deficit тоже
+    assert expected_iso in msg          # первый пройденный бар
+
+
+def test_aux_alignment_missing_entry_close_time_flags_all_aux(tmp_path):
+    outdir = _build_dataset(tmp_path / "noentryclose")
+    _strip_close_time(outdir, "15m")    # entry-якорь t0 становится невычислим
+    frames, profile = _loaded_intraday(outdir)
+
+    align = deep_backtest.aux_alignment(frames, profile, WALK_BARS)  # НЕ бросает
+    assert set(align) == {"4h", "2h", "1h", "1d"}
+    assert all(not row["ok"] and "close_time" in (row["error"] or "")
+               for row in align.values())
+
+    with pytest.raises(DeepBacktestError, match="close_time"):
+        deep_backtest.prepare(outdir, "binance", "BTCUSDT", "intraday",
+                              WALK_BARS, 0.001, False)
+
+
+def test_cli_exits_2_on_missing_close_time(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(kline_cache, "parquet_available", lambda: False)
+    outdir = _build_dataset(tmp_path / "cli_noclose")
+    _strip_close_time(outdir, "4h")
+    rc = deep_backtest.main([
+        "--dataset", outdir, "--exchange", "binance", "--profile", "intraday",
+        "--bars", str(WALK_BARS)])
+    assert rc == 2                       # штатный код, не traceback
+    err = capsys.readouterr().err
+    assert "deep_backtest:" in err
+    assert "close_time" in err
