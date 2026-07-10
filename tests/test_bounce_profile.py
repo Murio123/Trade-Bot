@@ -137,12 +137,19 @@ class _ObservationDb:
     async def link_forecast_signal(self, forecast_id: int, signal_id: int) -> None:
         pass
 
+    async def get_state(self, key: str):
+        return None
+
+    async def set_state(self, key: str, value: dict) -> None:
+        pass
+
 
 async def _async(value):
     return value
 
 
-def _run_observation_job(monkeypatch, profile_name: str) -> tuple[_ObservationDb, dict]:
+def _run_observation_job(monkeypatch, profile_name: str,
+                         dry_run: bool = True) -> tuple[_ObservationDb, dict]:
     """Drive analysis_job on a profile with a would-be ENTER signal."""
     db = _ObservationDb()
     called: dict[str, bool] = {}
@@ -151,6 +158,7 @@ def _run_observation_job(monkeypatch, profile_name: str) -> tuple[_ObservationDb
     result = {"status": "alert", "score": 9, "symbol": "BTCUSDT"}
 
     # Delivery must be blocked by the profile, not by DRY_RUN.
+    monkeypatch.setattr(scheduler.config, "DRY_RUN", dry_run)
     monkeypatch.setattr(scheduler.config, "SEND_DRY_RUN_ALERTS", True)
     monkeypatch.setattr(scheduler.config, "ENABLE_FORECAST_LEDGER", True)
     monkeypatch.setattr(scheduler, "db", db)
@@ -200,6 +208,88 @@ def test_non_observation_profile_still_delivers(monkeypatch):
     assert len(db.signals) == 1
     assert db.delivered == [1]
     assert called.get("telegram") and called.get("journal_trade")
+
+
+def test_observation_lock_holds_when_dry_run_is_false(monkeypatch):
+    """The lock is profile["observation_only"], NOT the dry-run flag.
+
+    With DRY_RUN=False every alert path is live. Bounce must still deliver
+    nothing — otherwise turning off dry-run would silently arm the stream.
+    """
+    db, called = _run_observation_job(monkeypatch, "bounce", dry_run=False)
+    assert scheduler.config.DRY_RUN is False   # the fixture really is live
+    assert len(db.forecasts) == 1
+    assert db.signals == []
+    assert db.delivered == []
+    assert called == {}
+
+
+def test_non_observation_profile_delivers_when_dry_run_is_false(monkeypatch):
+    """Control for the test above: live config does deliver for a trend stream."""
+    db, called = _run_observation_job(monkeypatch, "swing", dry_run=False)
+    assert db.delivered == [1]
+    assert called.get("telegram")
+
+
+# --- 4b. observation_only never broadcasts a reversal alert -----------------
+
+def _run_reversal_job(monkeypatch, profile_name: str) -> dict:
+    """Drive analysis_job with a fully confirmed multi-TF reversal in ctx.
+
+    _maybe_reversal_alert is NOT stubbed here: the real gate runs, and the spy
+    sits on alerts.broadcast. The bounce stream returns before the reversal
+    alert is even reached (scheduler.analysis_job), so it must broadcast
+    nothing while the swing stream broadcasts.
+    """
+    db = _ObservationDb()
+    called: dict[str, bool] = {}
+    app = type("App", (), {"bot": object(), "bot_data": {"binance": object()}})()
+    # A bullish 1D stack: price > ema20 > ema50 > ema200 -> htf_bias "bullish",
+    # so the bull reversal is trend-ALIGNED and clears the lower TF bar.
+    ctx = {
+        "price": 100.0,
+        "inds_by_tf": {"1d": {"price": 100.0, "ema20": 90.0,
+                              "ema50": 80.0, "ema200": 70.0}},
+        "reversal_mtf": {"combined_bullish": True, "combined_bearish": False,
+                         "bull_tfs": ["1h", "4h", "12h"],
+                         "bull_candle_confirm": True, "per_tf": {}},
+        "df_signal": None,   # no chart path
+    }
+    # Blocked: the run stops right after the reversal alert, isolating it.
+    result = {"status": "blocked", "blocked_at": "below_threshold"}
+
+    monkeypatch.setattr(scheduler.config, "ENABLE_REVERSAL_ALERTS", True)
+    monkeypatch.setattr(scheduler.config, "REVERSAL_ALERT_MIN_TFS", 2)
+    monkeypatch.setattr(scheduler.config, "REVERSAL_ALERT_COOLDOWN_HOURS", 6)
+    monkeypatch.setattr(scheduler.config, "ENABLE_FORECAST_LEDGER", True)
+    monkeypatch.setattr(scheduler, "db", db)
+    monkeypatch.setattr(scheduler, "_last_closed_candle_time",
+                        lambda *a, **k: _async(None))
+    monkeypatch.setattr(scheduler, "gather_market_context", lambda *a, **k: _async(ctx))
+    monkeypatch.setattr(scheduler, "run_cascade", lambda *a, **k: _async(result))
+    monkeypatch.setattr(scheduler, "enrich_forecast_with_lifecycle",
+                        lambda *a, **k: _async({}))
+    import signal_engine.forecast_record as fr
+    monkeypatch.setattr(fr, "build_forecast_record", lambda *a, **k: {})
+    monkeypatch.setattr(scheduler.formatting, "format_reversal_alert",
+                        lambda *a, **k: "reversal")
+
+    def _broadcast(*a, **k):
+        called["broadcast"] = True
+        return _async(True)
+
+    monkeypatch.setattr(scheduler.alerts, "broadcast", _broadcast)
+    asyncio.run(scheduler.analysis_job(app, profile_name))
+    return called
+
+
+def test_observation_only_never_broadcasts_a_reversal_alert(monkeypatch):
+    assert _run_reversal_job(monkeypatch, "bounce") == {}
+
+
+def test_trend_profile_does_broadcast_the_same_reversal(monkeypatch):
+    """Control: the ctx really would fire an alert on a delivering stream."""
+    assert _run_reversal_job(monkeypatch, "swing").get("broadcast")
 
 
 # --- 5. The backtest passes ctx into the policy -----------------------------
