@@ -31,7 +31,7 @@ from analyzer.liquidity import detect_liquidity
 from analyzer.reversal import detect_reversal
 from analyzer.volume_profile import compute_volume_profile
 from pipeline import (REVERSAL_TFS, _build_htf_zones, _near_key_level,
-                      _structural_stop, _structure_targets)
+                      _stop_atr, _structural_stop, _structure_targets)
 from risk.position_sizing import calculate_position
 from signal_engine.confluence import (calculate_confluence_score,
                                       has_diverse_confirmation)
@@ -155,11 +155,6 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
         ind_htf = compute_indicators(htf_slice)
         htf_bias = get_htf_bias(ind_htf)
 
-        # Stop ATR from the profile's stop timeframe (live parity).
-        stop_atr = atr
-        if profile.get("stop_tf") == htf and ind_htf.get("atr"):
-            stop_atr = ind_htf["atr"]
-
         # HTF zones (OB/FVG/levels) as-of this bar.
         zdfs, zinds = {}, {}
         for tf in zone_tfs:
@@ -171,6 +166,16 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
             continue
         zones = _build_htf_zones(zdfs, zinds, list(zdfs.keys()), price, entry_sub)
         ob, fvg, levels = zones["order_blocks"], zones["fvg"], zones["levels"]
+
+        # Stop ATR from the profile's stop timeframe, via the LIVE function.
+        # It must be resolved from any computed frame, not only the HTF: swing
+        # stops on 12H, intraday on 1H, bounce on 4H — none of which is their
+        # htf. Reading only ind_htf silently fell back to the entry ATR and
+        # made every such stop tighter than live. _stop_atr falls back to the
+        # entry ATR when the timeframe is unavailable. Assigned here, after the
+        # zone loop, because zinds is where those frames get computed.
+        stop_atr = _stop_atr(profile,
+                             {**zinds, entry_tf: ind, htf: ind_htf}, atr)
 
         eq = compute_equilibrium(htf_slice)
         liq = detect_liquidity(entry_sub, atr_value=atr)

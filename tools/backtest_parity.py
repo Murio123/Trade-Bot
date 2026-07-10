@@ -256,10 +256,6 @@ def backtest_equiv_decision(profile_name: str, seed: int, drift: float,
     htf_bias = bt.get_htf_bias(ind_htf)
     out["htf_bias"] = htf_bias
 
-    stop_atr = atr
-    if profile.get("stop_tf") == htf and ind_htf.get("atr"):
-        stop_atr = ind_htf["atr"]
-
     zdfs, zinds = {}, {}
     for tf in zone_tfs:
         s = dfs[tf][dfs[tf]["close_time"] <= t].iloc[-160:] if tf in dfs else None
@@ -272,6 +268,11 @@ def backtest_equiv_decision(profile_name: str, seed: int, drift: float,
     out["zone_tfs_used"] = list(zdfs.keys())
     zones = bt._build_htf_zones(zdfs, zinds, list(zdfs.keys()), price, entry_sub)
     ob, fvg, levels = zones["order_blocks"], zones["fvg"], zones["levels"]
+
+    # Same stop-ATR resolution as the walk and the live cascade: the declared
+    # stop_tf may be any computed frame, not just the HTF. Mirrors backtest._walk
+    # so the harness cannot certify a parity the walk does not actually have.
+    stop_atr = bt._stop_atr(profile, {**zinds, entry_tf: ind, htf: ind_htf}, atr)
 
     eq = compute_equilibrium(htf_slice)
     liq = detect_liquidity(entry_sub, atr_value=atr)
