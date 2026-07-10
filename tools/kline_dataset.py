@@ -38,7 +38,7 @@ from typing import Any, Iterable, Mapping
 
 import pandas as pd
 
-from tools.kline_cache import INTERVAL_MS, dataset_stem
+from tools.kline_cache import INTERVAL_MS, dataset_stem, gap_report
 
 # Часы на свечу — выводятся из общей таблицы интервалов, чтобы у загрузчика и
 # писателя не было двух независимых представлений о длине таймфрейма.
@@ -81,7 +81,11 @@ class GapRatioExceeded(DatasetError):
 
 @dataclass(frozen=True)
 class LoadedFrame:
-    """Провалидированный фрейм плюс его происхождение."""
+    """Провалидированный фрейм плюс его происхождение.
+
+    ``gaps`` — ПЕРЕСЧИТАННЫЕ по данным значения, а не копия полей манифеста.
+    Манифест здесь свидетель, а не источник истины.
+    """
     exchange: str
     symbol: str
     timeframe: str
@@ -89,6 +93,7 @@ class LoadedFrame:
     manifest: dict[str, Any]
     data_path: str
     manifest_path: str
+    gaps: dict[str, Any]
 
     @property
     def bars(self) -> int:
@@ -103,23 +108,28 @@ class LoadedFrame:
         """Как analyzer.cvd будет считать дельту на этом фрейме (D15)."""
         return "exact" if self.has_taker_buy_base else "estimate"
 
-    @property
-    def gaps(self) -> dict[str, Any]:
-        m = self.manifest
-        return {
-            "has_gaps": bool(m.get("has_gaps", False)),
-            "gap_count": int(m.get("gap_count", 0)),
-            "missing_bars": int(m.get("missing_bars", 0)),
-            "gap_ratio": gap_ratio(m),
-            "gap_examples": m.get("gap_examples", []),
-        }
+
+def gap_ratio(missing_bars: int, bars: int) -> float:
+    return (missing_bars / bars) if bars > 0 else 0.0
 
 
-def gap_ratio(manifest: Mapping[str, Any]) -> float:
-    bars = int(manifest.get("actual_bars", 0) or 0)
-    if bars <= 0:
-        return 0.0
-    return int(manifest.get("missing_bars", 0) or 0) / bars
+def _recompute_gaps(df: pd.DataFrame, timeframe: str) -> dict[str, Any]:
+    """Отчёт о пропусках, посчитанный по САМИМ данным.
+
+    Используется ровно та же функция, которой пользовался писатель
+    (kline_cache.gap_report), поэтому расхождение с манифестом означает дрейф
+    данных или подделанный манифест, а не две несогласованные реализации.
+    """
+    report = gap_report(df, timeframe)
+    missing = int(report["missing_bars"])
+    return {
+        "has_gaps": bool(report["has_gaps"]),
+        "gap_count": int(report["gap_count"]),
+        "missing_bars": missing,
+        "gap_ratio": gap_ratio(missing, len(df)),
+        "gap_examples": report["gap_examples"],
+        "expected_interval_ms": report["expected_interval_ms"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -155,10 +165,22 @@ def _read_data(data_path: str, file_format: str) -> pd.DataFrame:
     raise DatasetError(f"unsupported file_format: {file_format!r}")
 
 
-def _coerce_times(df: pd.DataFrame) -> pd.DataFrame:
+def _coerce_times(df: pd.DataFrame, data_path: str) -> pd.DataFrame:
+    """Привести временные колонки к tz-aware UTC.
+
+    Невалидные значения НЕ коэрсятся в NaT: чужой или правленый вручную CSV
+    (например, со смешанной точностью timestamp) обязан упасть с внятной
+    ошибкой, а не превратиться в дыры, которые потом кто-то будет отлаживать.
+    """
     for col in TIME_COLUMNS:
-        if col in df.columns:
+        if col not in df.columns:
+            continue
+        try:
             df[col] = pd.to_datetime(df[col], utc=True)
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise DatasetError(
+                f"{data_path}: column {col!r} is not parseable as UTC datetime: "
+                f"{exc}") from exc
     return df
 
 
@@ -206,6 +228,15 @@ def _validate_frame(df: pd.DataFrame, m: Mapping[str, Any],
                                                 pd.DatetimeTZDtype):
             raise DatasetError(f"{data_path}: {col} is not tz-aware datetime")
 
+    # Порядок важен для диагностики: дубликат или перемешанный порядок сначала
+    # проявились бы как «endpoint mismatch» и увели бы разбор не туда. Сперва
+    # говорим, что не так со СТРУКТУРОЙ open_time, и только потом сверяем
+    # границы с манифестом.
+    if not df["open_time"].is_unique:
+        raise DatasetError(f"{data_path}: open_time contains duplicates")
+    if not df["open_time"].is_monotonic_increasing:
+        raise DatasetError(f"{data_path}: open_time is not strictly increasing")
+
     if len(df):
         first, last = _to_ms(df["open_time"].iloc[0]), _to_ms(df["open_time"].iloc[-1])
         if m.get("first_open_time") != first:
@@ -217,11 +248,6 @@ def _validate_frame(df: pd.DataFrame, m: Mapping[str, Any],
                 f"{data_path}: manifest last_open_time={m.get('last_open_time')} "
                 f"!= frame {last}")
 
-    if not df["open_time"].is_unique:
-        raise DatasetError(f"{data_path}: open_time contains duplicates")
-    if not df["open_time"].is_monotonic_increasing:
-        raise DatasetError(f"{data_path}: open_time is not strictly increasing")
-
     # D15-инвариант: то, во что верит манифест, обязано быть правдой о данных.
     # Именно здесь ловится потеря taker_buy_base на CSV-раунд-трипе.
     data_has_taker = bool("taker_buy_base" in df.columns
@@ -231,6 +257,33 @@ def _validate_frame(df: pd.DataFrame, m: Mapping[str, Any],
             f"{data_path}: has_taker_buy_base={m.get('has_taker_buy_base')} in "
             f"manifest but data says {data_has_taker} — CVD метод сменился бы "
             "молча (D15)")
+
+
+def _validate_gaps(gaps: Mapping[str, Any], m: Mapping[str, Any],
+                   *, data_path: str) -> None:
+    """Манифест обязан совпасть с пересчитанным по данным отчётом о пропусках.
+
+    Раньше эти поля принимались на веру — единственное утверждение манифеста,
+    которое не перепроверялось. Устаревший, правленый или собранный чужим
+    инструментом манифест мог объявить датасет бездырочным, и max_gap_ratio
+    пропускал бы его: EMA200 поперёк дыры перестаёт быть EMA200 молча.
+
+    gap_examples намеренно НЕ сравниваются: это усечённая до 5 штук иллюстрация,
+    а не инвариант. Расхождение по count/missing/has_gaps уже фатально.
+    """
+    for key in ("gap_count", "missing_bars", "has_gaps"):
+        want = gaps[key]
+        got = m.get(key)
+        if got is None:
+            raise DatasetError(f"{data_path}: manifest has no {key}")
+        if type(want) is bool:
+            got = bool(got)
+        else:
+            got = int(got)
+        if got != want:
+            raise DatasetError(
+                f"{data_path}: manifest {key}={got!r} != recomputed {want!r} "
+                "— манифест не описывает эти данные")
 
 
 def load_frame(outdir: str, exchange: str, symbol: str, timeframe: str,
@@ -246,20 +299,25 @@ def load_frame(outdir: str, exchange: str, symbol: str, timeframe: str,
         raise DatasetError(f"{manifest_path}: manifest has no data_file")
     data_path = os.path.join(outdir, data_file)
 
-    df = _coerce_times(_read_data(data_path, manifest.get("file_format", "")))
+    df = _coerce_times(_read_data(data_path, manifest.get("file_format", "")),
+                       data_path)
     _validate_frame(df, manifest, data_path=data_path)
 
-    ratio = gap_ratio(manifest)
-    if max_gap_ratio is not None and ratio > max_gap_ratio:
+    # Пропуски считаются ПО ДАННЫМ, затем манифест сверяется с ними. Порог
+    # применяется к пересчитанному значению — иначе враньё в манифесте
+    # отключало бы риск-контроль.
+    gaps = _recompute_gaps(df, timeframe)
+    _validate_gaps(gaps, manifest, data_path=data_path)
+
+    if max_gap_ratio is not None and gaps["gap_ratio"] > max_gap_ratio:
         raise GapRatioExceeded(
-            f"{data_path}: gap ratio {ratio:.6f} > max_gap_ratio "
-            f"{max_gap_ratio:.6f} ({manifest.get('missing_bars')} missing bars "
-            f"over {manifest.get('actual_bars')}); индикаторы поперёк дыр "
-            "недостоверны")
+            f"{data_path}: gap ratio {gaps['gap_ratio']:.6f} > max_gap_ratio "
+            f"{max_gap_ratio:.6f} ({gaps['missing_bars']} missing bars over "
+            f"{len(df)}); индикаторы поперёк дыр недостоверны")
 
     return LoadedFrame(exchange=exchange, symbol=symbol, timeframe=timeframe,
                        df=df, manifest=dict(manifest), data_path=data_path,
-                       manifest_path=manifest_path)
+                       manifest_path=manifest_path, gaps=gaps)
 
 
 # ---------------------------------------------------------------------------

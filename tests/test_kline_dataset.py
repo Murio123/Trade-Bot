@@ -138,7 +138,48 @@ def test_unsorted_open_time_raises(tmp_path):
         kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m")
 
 
+def test_duplicate_reported_as_duplicate_not_endpoint_mismatch(tmp_path):
+    """Диагностика: структура open_time проверяется ДО сверки границ."""
+    df = _df(5)
+    dup = pd.concat([df, df.iloc[[2]]], ignore_index=True).sort_values("open_time")
+    _write(tmp_path, dup.reset_index(drop=True))
+    _patch_manifest(tmp_path, {"first_open_time": 1})  # границы тоже врут
+
+    with pytest.raises(DatasetError, match="duplicates"):
+        kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m")
+
+
+def test_unsorted_reported_as_monotonic_not_endpoint_mismatch(tmp_path):
+    df = _df(5)
+    _write(tmp_path, df.iloc[[0, 2, 1, 3, 4]].reset_index(drop=True))
+    _patch_manifest(tmp_path, {"last_open_time": 1})
+
+    with pytest.raises(DatasetError, match="not strictly increasing"):
+        kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m")
+
+
 # --- 8: dtype-контракт ------------------------------------------------------
+
+def test_mixed_precision_timestamps_raise_dataset_error(tmp_path):
+    """Чужой/правленый CSV падает внятно, а не непрозрачной ошибкой pandas."""
+    data_path, _, _ = _write(tmp_path, _df(5))
+    raw = pd.read_csv(data_path)
+    raw.loc[3, "open_time"] = "2023-11-15 00:13:20.001000+00:00"
+    raw.to_csv(data_path, index=False)
+
+    with pytest.raises(DatasetError, match="open_time"):
+        kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m")
+
+
+def test_unparseable_timestamp_raises_dataset_error(tmp_path):
+    data_path, _, _ = _write(tmp_path, _df(5))
+    raw = pd.read_csv(data_path)
+    raw.loc[2, "close_time"] = "not-a-timestamp"
+    raw.to_csv(data_path, index=False)
+
+    with pytest.raises(DatasetError, match="close_time"):
+        kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m")
+
 
 def test_csv_load_preserves_utc_datetimes(tmp_path):
     _write(tmp_path, _df(5))
@@ -219,6 +260,75 @@ def test_no_max_gap_ratio_means_no_enforcement(tmp_path):
     _write(tmp_path, df)
     frame = kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m")
     assert frame.gaps["missing_bars"] == 5  # видно, но не фатально
+
+
+def test_honest_gap_above_threshold_raises(tmp_path):
+    df = _df(200, skip_after=50, skip_len=5)
+    _write(tmp_path, df)
+    with pytest.raises(GapRatioExceeded):
+        kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m",
+                                 max_gap_ratio=0.01)
+
+
+# --- манифест не источник истины о пропусках (Codex Medium, c7ea403) --------
+
+_LIE = {"missing_bars": 0, "gap_count": 0, "has_gaps": False, "gap_examples": []}
+
+
+def test_lying_manifest_gap_fields_raise(tmp_path):
+    """Данные с реальной дырой + манифест, объявляющий их бездырочными."""
+    _write(tmp_path, _df(200, skip_after=50, skip_len=5))
+    _patch_manifest(tmp_path, _LIE)
+
+    with pytest.raises(DatasetError, match="recomputed"):
+        kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m")
+
+
+def test_max_gap_ratio_uses_recomputed_not_manifest(tmp_path):
+    """Враньё в манифесте не должно отключать риск-контроль max_gap_ratio."""
+    _write(tmp_path, _df(200, skip_after=50, skip_len=5))
+    _patch_manifest(tmp_path, _LIE)
+
+    with pytest.raises(DatasetError):
+        kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m",
+                                 max_gap_ratio=0.0)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("gap_count", 7), ("missing_bars", 99), ("has_gaps", False),
+])
+def test_manifest_gap_field_mismatch_raises(tmp_path, field, value):
+    _write(tmp_path, _df(2000, skip_after=100, skip_len=1))
+    _patch_manifest(tmp_path, {field: value})
+    with pytest.raises(DatasetError, match=field):
+        kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m")
+
+
+def test_loaded_frame_gaps_are_recomputed_from_data(tmp_path):
+    """gap_examples в манифесте затёрты, но фрейм всё равно их знает."""
+    _write(tmp_path, _df(2000, skip_after=100, skip_len=1))
+    # gap_examples — иллюстрация, а не инвариант: его подмена не фатальна,
+    # но и не должна попасть в LoadedFrame.gaps.
+    _patch_manifest(tmp_path, {"gap_examples": []})
+
+    frame = kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m",
+                                     max_gap_ratio=0.001)
+    assert frame.gaps["missing_bars"] == 1
+    assert frame.gaps["gap_count"] == 1
+    assert frame.gaps["gap_ratio"] == pytest.approx(1 / 2000)
+    assert len(frame.gaps["gap_examples"]) == 1  # пересчитано, не скопировано
+    assert frame.manifest["gap_examples"] == []
+
+
+def test_valid_cache_output_still_loads(tmp_path):
+    """Честный, свежий вывод kline_cache грузится без единой правки."""
+    _write(tmp_path, _df(50))
+    frame = kline_dataset.load_frame(str(tmp_path), "binance", "BTCUSDT", "15m",
+                                     max_gap_ratio=0.0)
+    assert frame.bars == 50
+    assert frame.gaps["has_gaps"] is False
+    assert frame.gaps["missing_bars"] == 0
+    assert frame.cvd_method == "exact"
 
 
 # --- 13..14: смешение источников (D15) --------------------------------------
