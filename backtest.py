@@ -69,6 +69,38 @@ async def _fetch_history(binance, interval: str, target: int) -> "pd.DataFrame":
     return full.iloc[-target:].reset_index(drop=True)
 
 
+def _htf_policy_ctx(rev: dict[str, Any], bull_tfs: int, bear_tfs: int,
+                    eq: dict[str, Any], liq: dict[str, Any],
+                    ob: dict[str, Any], fvg: dict[str, Any],
+                    cvd: dict[str, Any], bullish_div: bool,
+                    bearish_div: bool) -> dict[str, Any]:
+    """Per-bar context in the nested shape the HTF policies read.
+
+    ``block_counter_trend`` ignores ctx, so passing this changes no result for
+    any shipped trend profile; it exists so the backtest calls the gate with
+    the same arguments as the live cascade rather than through a call that
+    structurally cannot admit a ``require_exhaustion`` setup.
+
+    ``funding`` is deliberately ABSENT rather than fabricated: the walk carries
+    no funding history, and a missing mandatory source makes the exhaustion
+    predicates fail closed (see exhaustion.REQUIRED_CTX_KEYS). A bounce
+    backtest therefore reports zero counter-trend entries — the honest answer.
+    Faking an empty funding dict would instead pass the "funding is not crowded
+    against us" condition vacuously and inflate the results.
+    """
+    return {
+        "reversal": rev,
+        "reversal_mtf": {"bull_tf_count": bull_tfs, "bear_tf_count": bear_tfs},
+        "equilibrium": eq,
+        "liquidity": liq,
+        "order_blocks": ob,
+        "fvg": fvg,
+        "cvd": cvd,
+        "divergence": {"bullish_divergence": bullish_div,
+                       "bearish_divergence": bearish_div},
+    }
+
+
 async def run_backtest(binance: BinanceClient, profile_name: str = "swing",
                        warmup: int = 210) -> str:
     profile = get_profile(profile_name)
@@ -209,7 +241,10 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
             continue
         direction, total, scores = ("long", lt, ls) if lt > st else ("short", st, ss)
 
-        if apply_htf_policy(direction, htf_bias, profile) is None:
+        policy_ctx = _htf_policy_ctx(rev, bull_tfs, bear_tfs, eq, liq, ob, fvg,
+                                     cvd, flat["bullish_divergence"],
+                                     flat["bearish_divergence"])
+        if apply_htf_policy(direction, htf_bias, profile, policy_ctx) is None:
             continue
         if not has_diverse_confirmation(scores, config.MIN_DIVERSE_CATEGORIES):
             continue

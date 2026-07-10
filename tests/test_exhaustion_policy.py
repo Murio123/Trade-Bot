@@ -312,21 +312,39 @@ def test_none_direction_stays_none():
 
 
 # --- regression: existing profiles are untouched ----------------------------
+# Stage B2 gave the policy exactly ONE consumer: the disabled, observation-only
+# "bounce" profile. Every other profile is trend-following and its gate must
+# stay absolute — that is what these pin.
 
-def test_no_shipped_profile_uses_require_exhaustion():
-    """Stage B1 ships the policy DEAD: registered, tested, referenced by none."""
+TREND_PROFILES = tuple(sorted(set(PROFILES) - {"bounce"}))
+
+
+def test_only_bounce_uses_require_exhaustion():
     for name, profile in PROFILES.items():
-        assert profile["htf_policy"] == DEFAULT_HTF_POLICY, name
+        expected = "require_exhaustion" if name == "bounce" else DEFAULT_HTF_POLICY
+        assert profile["htf_policy"] == expected, name
 
 
-@pytest.mark.parametrize("name", sorted(PROFILES))
-def test_shipped_profiles_keep_blocking_counter_trend(name):
+@pytest.mark.parametrize("name", TREND_PROFILES)
+def test_trend_profiles_keep_blocking_counter_trend(name):
     profile = PROFILES[name]
     ctx = bullish_ctx()  # perfect exhaustion — must still not open the gate
     assert apply_htf_policy("long", "bearish", profile, ctx) is None
     assert apply_htf_policy("short", "bullish", profile, bearish_ctx()) is None
     assert apply_htf_policy("long", "bullish", profile, ctx) == "long"
     assert apply_htf_policy("short", "bearish", profile, ctx) == "short"
+
+
+def test_bounce_profile_admits_counter_trend_only_on_exhaustion():
+    """The one profile wired to the policy: exhaustion opens the gate, and
+    nothing else does."""
+    profile = PROFILES["bounce"]
+    assert apply_htf_policy("long", "bearish", profile, bullish_ctx()) == "long"
+    assert apply_htf_policy("short", "bullish", profile, bearish_ctx()) == "short"
+    # Counter-trend without exhaustion, and with no context at all: blocked.
+    assert apply_htf_policy("long", "bearish", profile, bearish_ctx()) is None
+    assert apply_htf_policy("short", "bullish", profile, bullish_ctx()) is None
+    assert apply_htf_policy("long", "bearish", profile, None) is None
 
 
 @pytest.mark.parametrize("profile", [None, {}, {"htf_policy": None},

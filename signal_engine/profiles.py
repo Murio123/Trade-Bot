@@ -108,6 +108,40 @@ PROFILES: dict[str, dict[str, Any]] = {
         "expected_holding_period": "15 минут – 24 часа",
         "max_decision_delay_seconds": _fnum("INTRADAY_MAX_DELAY_SEC", 180),
     },
+    "bounce": {
+        # Counter-trend mean reversion: the ONLY profile that may trade against
+        # the 1D regime, and only where the tape shows exhaustion (see
+        # signal_engine/exhaustion.py). Hierarchy: 1D = regime being faded,
+        # 12H/4H = zones the bounce reacts from, 1H = entry.
+        #
+        # OBSERVATION ONLY, and the scheduler stream is off unless
+        # ENABLE_BOUNCE_PROFILE=true. observation_only stops the run after the
+        # forecast row: no signal row, no Telegram, no journal trade. The
+        # profile exists so the require_exhaustion policy accumulates a
+        # measurable track record in the forecast ledger before it is ever
+        # allowed to deliver.
+        "label": "ОТСКОК",
+        "emoji": "🔁",
+        "analysis_type": "BOUNCE",
+        "observation_only": True,
+        "entry": "1h",
+        "htf": "1d",
+        "htf_policy": "require_exhaustion",
+        "mtf": ["1h", "4h", "12h", "1d"],  # entry / setup / structure / regime
+        "zone_tfs": ["12h", "4h"],
+        "stop_tf": "4h",                   # 1H-ATR stops are too tight to fade a trend
+        "cooldown_hours": 12,
+        "atr_mult": _fnum("BOUNCE_ATR_MULT", 1.2),
+        "targets": _targets("BOUNCE_TARGETS", (1.0, 2.0)),
+        "interval_minutes": 60,
+        "minimum_expected_move_points": _fnum("BOUNCE_MIN_MOVE_PTS", 700),
+        "minimum_confidence": _fnum("BOUNCE_MIN_CONFIDENCE", 0.3),
+        "minimum_risk_reward": _fnum("BOUNCE_MIN_RR", 1.5),
+        "forecast_horizon": "до 3 дней",
+        "forecast_horizon_hours": 72,
+        "expected_holding_period": "несколько часов – 3 дня",
+        "max_decision_delay_seconds": _fnum("BOUNCE_MAX_DELAY_SEC", 600),
+    },
 }
 
 DEFAULT_PROFILE = "swing"

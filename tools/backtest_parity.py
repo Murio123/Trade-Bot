@@ -340,7 +340,10 @@ def backtest_equiv_decision(profile_name: str, seed: int, drift: float,
     direction, total, scores = ("long", lt, ls) if lt > st else ("short", st, ss)
     out["direction"], out["total"] = direction, total
 
-    if bt.apply_htf_policy(direction, htf_bias, profile) is None:
+    policy_ctx = bt._htf_policy_ctx(rev, bull_tfs, bear_tfs, eq, liq, ob, fvg,
+                                    cvd, flat["bullish_divergence"],
+                                    flat["bearish_divergence"])
+    if bt.apply_htf_policy(direction, htf_bias, profile, policy_ctx) is None:
         out["outcome"] = "skip:htf_filter"
         return out
     if not bt.has_diverse_confirmation(scores, bt.config.MIN_DIVERSE_CATEGORIES):

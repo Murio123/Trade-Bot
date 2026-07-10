@@ -108,6 +108,17 @@ async def analysis_job(application, profile_name: str = "swing") -> None:
         except Exception:  # noqa: BLE001
             log.exception("forecast ledger insert failed [%s]", profile_name)
 
+    # Observation-only profiles (the counter-trend bounce stream) stop here:
+    # the run is recorded in the forecast ledger and nothing else happens — no
+    # signal row, no mark_delivered, no Telegram, no journal trade. Returning
+    # before _maybe_reversal_alert is deliberate: that alert is already
+    # broadcast by the trend streams, and an observation stream must not be
+    # able to put a message in front of the user.
+    if profile.get("observation_only"):
+        log.info("[%s] observation-only: forecast #%s recorded, nothing delivered",
+                 profile_name, forecast_id)
+        return
+
     # Proactive reversal (bottom/top) alert from the already-gathered context.
     await _maybe_reversal_alert(application, ctx, profile_name, timeframe)
 
@@ -430,7 +441,8 @@ def build_scheduler(application) -> AsyncIOScheduler:
     # treats as PAUSED — the recurring analyses never actually fired.
     streams = [("swing", True),
                ("position", config.ENABLE_POSITION_ANALYSIS),
-               ("intraday", config.ENABLE_FAST_ANALYSIS)]
+               ("intraday", config.ENABLE_FAST_ANALYSIS),
+               ("bounce", config.ENABLE_BOUNCE_PROFILE)]
     for name, enabled in streams:
         if not enabled:
             continue

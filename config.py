@@ -153,6 +153,11 @@ ENABLE_FAST_ANALYSIS = _get_bool("ENABLE_FAST_ANALYSIS", True)
 # Toggle for the position (4H entry, 1D structure) stream targeting
 # multi-day 2000-5000pt moves.
 ENABLE_POSITION_ANALYSIS = _get_bool("ENABLE_POSITION_ANALYSIS", True)
+# Toggle for the counter-trend bounce stream. OFF by default: the "bounce"
+# profile is observation_only (forecast ledger only — no signal row, no
+# Telegram, no journal trade), and with the flag false no scheduler job is
+# registered for it at all.
+ENABLE_BOUNCE_PROFILE = _get_bool("ENABLE_BOUNCE_PROFILE", False)
 
 # --- Forecast observability ledger ------------------------------------------
 # Every analysis run (including WAIT / NO_TRADE / blocked) is recorded in the
