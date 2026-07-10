@@ -241,13 +241,22 @@ def parquet_available() -> bool:
         return False
 
 
+def dataset_stem(exchange: str, symbol: str, timeframe: str) -> str:
+    """Единый источник правды об именовании файлов датасета.
+
+    И писатель (write_dataset), и читатель (tools.kline_dataset) обязаны
+    получать имя отсюда, иначе конвенция со временем разъедется.
+    """
+    return f"{exchange}_{symbol}_{timeframe}"
+
+
 def write_dataset(df: pd.DataFrame, outdir: str, *, exchange: str, symbol: str,
                   timeframe: str, requested_bars: int,
                   duplicate_count_removed: int) -> tuple[str, str, dict[str, Any]]:
     import os
 
     os.makedirs(outdir, exist_ok=True)
-    stem = f"{exchange}_{symbol}_{timeframe}"
+    stem = dataset_stem(exchange, symbol, timeframe)
     use_parquet = parquet_available()
     file_format = "parquet" if use_parquet else "csv"
     data_file = f"{stem}.{file_format}"
