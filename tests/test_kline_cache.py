@@ -207,6 +207,97 @@ def test_cli_json_mode_prints_manifest(tmp_path, monkeypatch, capsys):
     assert sidecar["source_pinned"] is True
 
 
+@pytest.mark.parametrize("bars", ["0", "-1"])
+def test_cli_rejects_non_positive_bars(bars, monkeypatch):
+    # Ни один запрос к бирже не должен уйти, если аргументы невалидны.
+    monkeypatch.setattr(kline_cache, "create_client",
+                        lambda exchange: pytest.fail("client must not be built"))
+    with pytest.raises(SystemExit) as exc:
+        kline_cache.main(["--exchange", "binance", "--timeframe", "15m",
+                          "--bars", bars])
+    assert exc.value.code == 2
+
+
+def test_cli_rejects_unsupported_timeframe(monkeypatch):
+    monkeypatch.setattr(kline_cache, "create_client",
+                        lambda exchange: pytest.fail("client must not be built"))
+    with pytest.raises(SystemExit) as exc:
+        kline_cache.main(["--exchange", "binance", "--timeframe", "7m",
+                          "--bars", "10"])
+    assert exc.value.code == 2
+    # allow-list таймфреймов совпадает с тем, что умеют мапить клиенты
+    assert "7m" not in kline_cache.INTERVAL_MS
+
+
+def test_cli_defaults_symbol_and_outdir(monkeypatch, capsys):
+    """--symbol -> BTCUSDT, --outdir -> data/klines. Диск не трогаем."""
+    client = FakeClient([_page(BASE_MS, 2)])
+    monkeypatch.setattr(kline_cache, "create_client", lambda exchange: client)
+
+    captured: dict = {}
+
+    def fake_write(df, outdir, **kwargs):
+        captured["outdir"] = outdir
+        captured["symbol"] = kwargs["symbol"]
+        return "data.csv", "manifest.json", {"source_pinned": True}
+
+    monkeypatch.setattr(kline_cache, "write_dataset", fake_write)
+
+    rc = kline_cache.main(["--exchange", "binance", "--timeframe", "15m",
+                           "--bars", "2", "--json"])
+    assert rc == 0
+    assert captured["symbol"] == "BTCUSDT"
+    assert captured["outdir"] == "data/klines"
+    # символ доезжает до клиента, а не теряется по дороге
+    assert client.calls[0]["symbol"] == "BTCUSDT"
+    assert json.loads(capsys.readouterr().out)["source_pinned"] is True
+
+
+def test_write_dataset_csv_branch_when_parquet_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(kline_cache, "parquet_available", lambda: False)
+    df = _page(BASE_MS, 3)
+
+    data_path, manifest_path, manifest = kline_cache.write_dataset(
+        df, str(tmp_path), exchange="bybit", symbol="BTCUSDT",
+        timeframe="15m", requested_bars=3, duplicate_count_removed=0)
+
+    assert manifest["file_format"] == "csv"
+    assert manifest["data_file"] == "bybit_BTCUSDT_15m.csv"
+    assert pathlib.Path(data_path).exists()
+    assert pathlib.Path(manifest_path).exists()
+    # CSV читается обратно без потери строк
+    assert len(pd.read_csv(data_path)) == 3
+
+
+def test_write_dataset_parquet_branch_when_engine_available(tmp_path, monkeypatch):
+    """Ветка Parquet без установки pyarrow/fastparquet: writer подделан."""
+    monkeypatch.setattr(kline_cache, "parquet_available", lambda: True)
+    written: dict = {}
+
+    def fake_to_parquet(self, path, index=False, **kwargs):
+        written["path"] = path
+        written["rows"] = len(self)
+        pathlib.Path(path).write_bytes(b"PAR1")
+
+    monkeypatch.setattr(pd.DataFrame, "to_parquet", fake_to_parquet,
+                        raising=False)
+
+    data_path, _, manifest = kline_cache.write_dataset(
+        _page(BASE_MS, 3), str(tmp_path), exchange="binance", symbol="BTCUSDT",
+        timeframe="15m", requested_bars=3, duplicate_count_removed=0)
+
+    assert manifest["file_format"] == "parquet"
+    assert manifest["data_file"] == "binance_BTCUSDT_15m.parquet"
+    assert written["path"] == data_path
+    assert written["rows"] == 3
+    assert not list(pathlib.Path(tmp_path).glob("*.csv")), "CSV писаться не должен"
+
+
+def test_parquet_available_reports_environment_truthfully():
+    # Зависимость не добавляем: тул обязан работать при любом ответе.
+    assert isinstance(kline_cache.parquet_available(), bool)
+
+
 # --- 11..14: статические гарантии -----------------------------------------
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
