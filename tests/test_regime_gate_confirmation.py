@@ -216,6 +216,30 @@ def test_decide_rejects_when_net_negative():
     assert decision == "REJECT_REGIME_GATE"
 
 
+def test_year_independence_rejects_one_of_two_years_positive():
+    # Regression: round(2 * 2/3) == 1 used to let a single positive year out
+    # of two qualifying years pass "not_dependent_on_one_calendar_year" —
+    # exactly the single-year dependence the check exists to catch.
+    full_sample = _full_sample(net_a=-0.02, net_b=0.05, net_c=0.05)
+    wf = {"fold_stability": {
+        "B_range_gate": {"positive_folds_ratio": 1.0, "n_confident_folds": 3},
+        "C_trend_up_exclusion_only": {"positive_folds_ratio": 1.0,
+                                      "n_confident_folds": 3}}}
+    year_stats = {
+        "B_range_gate": {"2023": {"net_expectancy_r": -0.1, "n": 100},
+                        "2024": {"net_expectancy_r": 0.2, "n": 100}},
+        "C_trend_up_exclusion_only": {"2023": {"net_expectancy_r": -0.1, "n": 100},
+                                     "2024": {"net_expectancy_r": 0.2, "n": 100}},
+    }
+    random_baselines = {
+        "B_range_gate": {"draws": [-0.05] * 100},
+        "C_trend_up_exclusion_only": {"draws": [-0.05] * 100},
+    }
+    checks = rgc.evaluate_robustness(full_sample, wf, year_stats,
+                                     random_baselines)
+    assert checks["B_range_gate"]["not_dependent_on_one_calendar_year"] is False
+
+
 def test_decide_needs_more_evidence_when_close_but_not_all_pass():
     # net positive, beats baseline, beats random, but fold stability short
     # of 2/3 and only one calendar year available -> not REJECT, not PROCEED.

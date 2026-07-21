@@ -194,7 +194,11 @@ def run_walk_forward(rows: list[dict[str, Any]], walk: dict[str, Any],
     folds = fold_windows(span_lo, span_hi, wf)
 
     holdout_lo = span_hi - wf.holdout_bars
-    holdout_rows = [r for r in rows if holdout_lo <= r["idx"] < span_hi]
+    # Count from walk["setups"] (all setups, incl. unresolved), matching
+    # tools.deep_backtest.walk_forward's own holdout setup count exactly —
+    # not just resolved rows.
+    holdout_setups = [s for s in walk["setups"]
+                     if holdout_lo <= s["idx"] < span_hi]
 
     fold_reports = []
     per_variant_fold_net: dict[str, list[float | None]] = {
@@ -233,7 +237,7 @@ def run_walk_forward(rows: list[dict[str, Any]], walk: dict[str, Any],
         "fold_stability": fold_stability,
         "holdout": {
             "idx_lo": holdout_lo, "idx_hi": span_hi,
-            "n_setups": len(holdout_rows), "sealed": True,
+            "n_setups": len(holdout_setups), "sealed": True,
             "note": ("geometry and setup count only; no performance stats "
                      "computed — sealed, not opened by C2.1"),
         },
@@ -297,9 +301,12 @@ def evaluate_robustness(full_sample: dict[str, Any], wf: dict[str, Any],
         years = year_stats.get(variant, {})
         year_nets = [y["net_expectancy_r"] for y in years.values()
                     if y["net_expectancy_r"] is not None and y["n"] >= 10]
+        positive_years = sum(1 for x in year_nets if x > 0)
+        # Integer form of "positive_years / len(year_nets) >= 2/3" avoids
+        # round()/floor() silently lowering the bar for small year counts
+        # (e.g. round(2 * 2/3) == 1 would wrongly pass 1-of-2 years).
         year_independent = (len(year_nets) >= 2
-                            and sum(1 for x in year_nets if x > 0) >= max(
-                                1, round(len(year_nets) * (2 / 3))))
+                            and positive_years * 3 >= len(year_nets) * 2)
         enough_trades = v["n"] is not None and v["n"] >= 50
         rb = random_baselines.get(variant, {})
         rank = percentile_rank(v["net_expectancy_r"], rb.get("draws", [])) \
