@@ -8,6 +8,7 @@ deep_walk — на синтетическом random-walk датасете, со
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
@@ -310,3 +311,220 @@ def test_nearest_level_distance():
 def test_nearest_level_distance_none_without_atr():
     levels = {"highs": [110.0], "lows": [90.0]}
     assert dd._nearest_level_distance(levels, price=100.0, atr=None) is None
+
+
+# ---------------------------------------------------------------------------
+# Part 3 — single-feature attribution, on crafted synthetic rows.
+# ---------------------------------------------------------------------------
+
+def _row(idx, *, flag=True, r=1.0, gross_r=None, outcome="win", year=2021,
+        regime="range", direction="long"):
+    return {
+        "idx": idx, "direction": direction, "score": 8,
+        "regime_current": regime, "regime_live_parity": regime,
+        "outcome": outcome, "hit_tp1": True, "r": r,
+        "gross_r": gross_r if gross_r is not None else r,
+        "year": year, "some_flag": flag,
+    }
+
+
+def _make_rows(n_true, n_false, *, r_true, r_false, year_fn=None,
+              regime_fn=None):
+    """Interleaved by idx (even=true, odd=false), so every temporal fold and
+    every year contains both buckets — mirrors real market data where a
+    feature's value alternates over time rather than sitting in one block.
+    """
+    rows = []
+    for i in range(n_true):
+        idx = 2 * i
+        rows.append(_row(idx, flag=True, r=r_true,
+                         year=year_fn(idx) if year_fn else 2021,
+                         regime=regime_fn(idx) if regime_fn else "range"))
+    for i in range(n_false):
+        idx = 2 * i + 1
+        rows.append(_row(idx, flag=False, r=r_false,
+                         year=year_fn(idx) if year_fn else 2021,
+                         regime=regime_fn(idx) if regime_fn else "range"))
+    return rows
+
+
+# "some_flag" is deliberately NOT registered in CATEGORICAL_FEATURES/
+# ALL_FEATURES: feature_bucket_table's categorical branch is the default for
+# any name not in NUMERIC_FEATURES, so the generic machinery is exercised
+# here without needing to touch the real recorder feature registry.
+
+def test_feature_bucket_table_categorical_splits_by_value():
+    rows = _make_rows(60, 60, r_true=0.5, r_false=-0.5)
+    table = dd.feature_bucket_table(rows, "some_flag")
+    assert set(table) == {"True", "False"}
+    assert table["True"]["n"] == 60
+    assert table["True"]["net_mean_r"] == pytest.approx(0.5)
+    assert table["False"]["net_mean_r"] == pytest.approx(-0.5)
+
+
+def test_feature_separation_identifies_best_and_worst():
+    rows = _make_rows(60, 60, r_true=0.5, r_false=-0.5)
+    table = dd.feature_bucket_table(rows, "some_flag")
+    sep = dd.feature_separation(table)
+    assert sep["best"] == "True" and sep["worst"] == "False"
+    assert sep["spread"] == pytest.approx(1.0)
+    assert sep["sign"] == "positive"
+
+
+def test_feature_separation_none_below_min_group_n():
+    rows = _make_rows(10, 10, r_true=0.5, r_false=-0.5)
+    table = dd.feature_bucket_table(rows, "some_flag")
+    assert dd.feature_separation(table) is None
+
+
+def test_classify_feature_keep_when_stable_across_years():
+    # 4 years, each with a clean positive split -> stable sign every year.
+    # year_fn receives the *idx* (even=true, odd=false per _make_rows), so it
+    # must key off idx // 2 to keep both buckets co-present in every year —
+    # keying off idx % 4 directly would put true (even idx) and false (odd
+    # idx) rows in disjoint year sets, leaving every year bucket-incomplete.
+    def year_fn(idx):
+        return 2018 + ((idx // 2) % 4)
+    rows = _make_rows(240, 240, r_true=0.4, r_false=-0.4, year_fn=year_fn)
+    table = dd.feature_bucket_table(rows, "some_flag")
+    sep = dd.feature_separation(table)
+    fold_of = dd._fold_assignment(rows)
+    fold_stab = dd._stability(rows, "some_flag", sep,
+                              lambda r: fold_of.get(r["idx"]))
+    year_stab = dd._stability(rows, "some_flag", sep, lambda r: r["year"])
+    result = dd.classify_feature("some_flag", table, fold_stab, year_stab,
+                                 len(rows))
+    assert result["label"] == "PRELIMINARY_KEEP"
+
+
+def test_classify_feature_remove_when_flat():
+    rows = _make_rows(120, 120, r_true=0.01, r_false=-0.01)
+    table = dd.feature_bucket_table(rows, "some_flag")
+    sep = dd.feature_separation(table)
+    fold_of = dd._fold_assignment(rows)
+    fold_stab = dd._stability(rows, "some_flag", sep,
+                              lambda r: fold_of.get(r["idx"]))
+    year_stab = dd._stability(rows, "some_flag", sep, lambda r: r["year"])
+    result = dd.classify_feature("some_flag", table, fold_stab, year_stab,
+                                 len(rows))
+    assert result["label"] == "PRELIMINARY_REMOVE"
+
+
+def test_classify_feature_remove_when_best_bucket_not_positive():
+    rows = _make_rows(120, 120, r_true=-0.1, r_false=-0.8)
+    table = dd.feature_bucket_table(rows, "some_flag")
+    sep = dd.feature_separation(table)
+    fold_of = dd._fold_assignment(rows)
+    fold_stab = dd._stability(rows, "some_flag", sep,
+                              lambda r: fold_of.get(r["idx"]))
+    year_stab = dd._stability(rows, "some_flag", sep, lambda r: r["year"])
+    result = dd.classify_feature("some_flag", table, fold_stab, year_stab,
+                                 len(rows))
+    assert result["label"] == "PRELIMINARY_REMOVE"
+
+
+def test_classify_feature_unknown_when_sample_too_small():
+    rows = _make_rows(60, 60, r_true=0.5, r_false=-0.5)
+    table = dd.feature_bucket_table(rows, "some_flag")
+    sep = dd.feature_separation(table)
+    fold_stab = year_stab = {"eligible": False}
+    result = dd.classify_feature("some_flag", table, fold_stab, year_stab,
+                                 len(rows))
+    assert result["label"] == "PRELIMINARY_UNKNOWN"
+    assert "< 200" in result["reason"] or "resolved" in result["reason"]
+
+
+def test_classify_feature_unknown_when_unstable_across_years():
+    # Positive pooled spread (clears both the flat and positive-eps gates)
+    # but the sign-replication check itself reports low agreement -> not
+    # enough to confirm KEEP. Stability dicts are crafted directly here
+    # (rather than derived from a synthetic year split) so the test isolates
+    # classify_feature's own gating logic from _stability's bucket-size
+    # sensitivity, which is covered separately by test_classify_feature_*
+    # sample-size tests and the real _stability unit coverage above.
+    rows = _make_rows(120, 120, r_true=0.4, r_false=-0.4)
+    table = dd.feature_bucket_table(rows, "some_flag")
+    fold_stab = {"eligible": True, "agree": 3, "evaluated": 4,
+                "agreement_ratio": 0.75}
+    year_stab = {"eligible": True, "agree": 1, "evaluated": 3,
+                "agreement_ratio": 0.33}
+    result = dd.classify_feature("some_flag", table, fold_stab, year_stab,
+                                 len(rows))
+    assert result["label"] == "PRELIMINARY_UNKNOWN"
+
+
+def test_regime_stability_not_applicable_for_regime_current_itself():
+    rows = _make_rows(120, 120, r_true=0.4, r_false=-0.4)
+    features = dd.run_single_feature_attribution(rows)
+    assert features["regime_current"]["regime_stability"]["eligible"] is False
+
+
+def test_score_bucket_edges():
+    assert dd.score_bucket(5) == "[5,6)"
+    assert dd.score_bucket(9.9) == "[9,10)"
+    assert dd.score_bucket(10) == "[10,inf)"
+    assert dd.score_bucket(4) == "below_min"
+
+
+def test_build_summary_table_matches_report_shape():
+    rows = _make_rows(120, 120, r_true=0.4, r_false=-0.4)
+    features = dd.run_single_feature_attribution(rows)
+    summary = dd.build_summary_table(features)
+    assert {r["feature"] for r in summary} == set(features)
+    for row in summary:
+        for key in ("feature", "sample", "gross_r", "net_r",
+                   "fold_stability", "year_stability", "regime_stability",
+                   "classification"):
+            assert key in row
+
+
+# ---------------------------------------------------------------------------
+# Integration: report structure + no threshold-advice tokens
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def discovery_report(tmp_path_factory):
+    outdir = tmp_path_factory.mktemp("c18run") / "binance"
+    _build_swing_dataset(outdir)
+    return dd.run_discovery(str(outdir), "binance", "BTCUSDT", "swing",
+                            SWING_BARS)
+
+
+def test_discovery_report_top_level_keys(discovery_report):
+    r = discovery_report
+    assert r["stage"] == "C1.8" and r["kind"] == "single_feature_attribution"
+    assert set(r["counts"]) == {"setups", "resolved", "unresolved"}
+    assert set(r["features"]) == set(dd.ALL_FEATURES)
+    for name, f in r["features"].items():
+        assert set(f) == {"kind", "buckets", "separation", "fold_stability",
+                          "year_stability", "regime_stability",
+                          "classification"}
+        assert f["classification"]["label"] in (
+            "PRELIMINARY_KEEP", "PRELIMINARY_REMOVE", "PRELIMINARY_UNKNOWN")
+
+
+def test_discovery_report_no_threshold_or_final_keep_token(discovery_report):
+    blob = json.dumps(discovery_report, default=str)
+    for token in ("recommended_threshold", '"label": "KEEP"',
+                 "SCORE_ALERT_MIN"):
+        assert token not in blob
+
+
+def test_discovery_text_report_sections(discovery_report):
+    text = dd.format_report(discovery_report)
+    for token in ("single-feature attribution (C1.8)", "feature", "limitations:"):
+        assert token in text
+
+
+def test_cli_writes_single_feature_reports(tmp_path, capsys):
+    dataset = _build_swing_dataset(tmp_path / "binance")
+    outdir = tmp_path / "out"
+    rc = dd.main(["--dataset", dataset, "--exchange", "binance",
+                 "--profile", "swing", "--bars", str(SWING_BARS),
+                 "--outdir", str(outdir)])
+    assert rc == 0
+    assert (outdir / "single_feature_report.json").exists()
+    assert (outdir / "single_feature_report.txt").exists()
+    with open(outdir / "single_feature_report.json") as fh:
+        data = json.load(fh)
+    assert data["kind"] == "single_feature_attribution"
