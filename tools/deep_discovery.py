@@ -796,9 +796,16 @@ def _contingency(rows: list[dict[str, Any]], primary_labels: dict[int, str],
 def redundancy_check(rows: list[dict[str, Any]], primary_name: str,
                      primary_labels: dict[int, str], other_name: str,
                      min_n: int = REDUNDANCY_MIN_STRATUM_N) -> dict[str, Any]:
-    """Does primary's best-vs-worst bucket sign hold within each of
+    """Does primary's pooled best-vs-worst bucket sign hold within each of
     other_name's own buckets? Answers "independent vs. entangled", not a
     full interaction model — see module docstring for scope.
+
+    Must compare the SAME pooled best/worst bucket labels in every stratum
+    (mirroring _stability), not recompute a fresh local best/worst per
+    stratum: feature_separation always picks whichever bucket is locally
+    max/min, so its "sign" is trivially "positive" in almost every stratum
+    by construction — that would make this check unable to ever detect a
+    real sign reversal (Codex-flagged defect in an earlier draft).
     """
     other_labels = _bucket_labels(rows, other_name)
     pooled_table = feature_bucket_table(rows, primary_name, labels=primary_labels)
@@ -815,17 +822,24 @@ def redundancy_check(rows: list[dict[str, Any]], primary_name: str,
     evaluated = 0
     for key in sorted(strata, key=str):
         sub = strata[key]
-        table = feature_bucket_table(sub, primary_name, labels=primary_labels)
-        sep = feature_separation(table, min_n=min_n)
-        if sep is None or pooled_sep is None:
+        if pooled_sep is None:
             per_stratum[str(key)] = {"n": len(sub), "status": "insufficient"}
             continue
-        matches = (sep["sign"] == pooled_sep["sign"]
+        table = feature_bucket_table(sub, primary_name, labels=primary_labels)
+        best_row, worst_row = table.get(pooled_sep["best"]), \
+            table.get(pooled_sep["worst"])
+        if not best_row or not worst_row or best_row["n"] < min_n \
+                or worst_row["n"] < min_n:
+            per_stratum[str(key)] = {"n": len(sub), "status": "insufficient"}
+            continue
+        delta = round(best_row["net_mean_r"] - worst_row["net_mean_r"], 4)
+        sign = _sign(delta)
+        matches = (sign == pooled_sep["sign"]
                   if pooled_sep["sign"] != "flat" else None)
         per_stratum[str(key)] = {"n": len(sub), "status": "evaluated",
-                                 "best": sep["best"],
-                                 "best_mean_r": sep["best_mean_r"],
-                                 "sign": sep["sign"],
+                                 "best": pooled_sep["best"],
+                                 "best_mean_r": best_row["net_mean_r"],
+                                 "delta": delta, "sign": sign,
                                  "matches_pooled": matches}
         evaluated += 1
         if matches:
@@ -922,7 +936,7 @@ def build_shortlist(features: dict[str, Any],
     # its raw label, since it may restate cvd_direction rather than add to it).
     _DEDICATED = {"cvd_direction", "distance_from_equilibrium", "cvd_last_delta"}
 
-    supporting_filters: list[str] = []
+    candidates: list[str] = []
     excluded: dict[str, str] = {}
     for name, f in features.items():
         if name in _DEDICATED:
@@ -932,18 +946,28 @@ def build_shortlist(features: dict[str, Any],
             # Evidence-respecting rule: promote to supporting filter only if
             # it independently cleared the same bar cvd_direction did — no
             # new interaction search is run to justify it.
-            supporting_filters.append(name)
-            excluded[name] = ("independently PRELIMINARY_KEEP; candidate "
-                              "supporting filter")
+            candidates.append(name)
         else:
             excluded[name] = label
+    if added_info_verdict == "independent":
+        candidates.append("cvd_last_delta")
+
+    # Cap first, THEN label — otherwise a feature cut by the [:2] cap could
+    # still say "candidate supporting filter" in excluded[], contradicting
+    # its own absence from supporting_filters (Codex-flagged nit).
+    supporting_filters = candidates[:2]
+    for name in candidates:
+        excluded[name] = (
+            "independently PRELIMINARY_KEEP; candidate supporting filter"
+            if name in supporting_filters else
+            "PRELIMINARY_KEEP but not promoted (max 2 supporting filters "
+            "already reached)")
+
     for name in DIAGNOSTIC_FEATURES:
         excluded[name] = "DIAGNOSTIC_ONLY"
     excluded["distance_from_equilibrium"] = "failed_robustness (see manual_overrides)"
-    excluded["cvd_last_delta"] = cvd_last_delta_verdict
-    if added_info_verdict == "independent":
-        supporting_filters.append("cvd_last_delta")
-    supporting_filters = supporting_filters[:2]
+    if "cvd_last_delta" not in excluded:
+        excluded["cvd_last_delta"] = cvd_last_delta_verdict
 
     return {
         "primary": primary,
@@ -1114,7 +1138,6 @@ def format_shortlist(report: dict[str, Any]) -> str:
     """SWING_SHORTLIST.md — the practical, forward-testing-facing deliverable."""
     short = report["shortlist"]
     features = report["features"]
-    red = report["redundancy"]
     lines = [
         "# SWING candidate shortlist — C1.8 step 5",
         "",
@@ -1200,15 +1223,43 @@ def format_shortlist(report: dict[str, Any]) -> str:
              "weighting, not yet grounds to say the score adds nothing.",
              "", "**Should the next step be:**", "",
              "A. C1.9 confirmation — no: nothing here has cleared economic "
-             "validation yet, only statistical preliminary checks.",
-             "", "B. Report-only forward test — **yes, if anything**: "
-             "cvd_direction is the only candidate with a coherent, "
-             "already-live-computable, non-contradicted signal. A report-"
-             "only forward test (measurement only, no order placement) is "
-             "the appropriate next step for it specifically.",
-             "", "C. Abandon the current swing entry formulation — not yet: "
-             "one candidate survived this reduction; abandoning is "
-             "premature while a report-only test hasn't been run.", ""]
+             "validation yet, only statistical preliminary checks."]
+
+    surviving = ([short["primary"]] if short["primary"] else []) + \
+        short["supporting_filters"]
+    if short["primary"]:
+        lines += ["", "B. Report-only forward test — **yes, if anything**: "
+                 f"{short['primary']} is the only candidate with a "
+                 "coherent, non-contradicted signal. A report-only forward "
+                 "test (measurement only, no order placement) is the "
+                 "appropriate next step for it specifically.",
+                 "", "C. Abandon the current swing entry formulation — not "
+                 "yet: a primary candidate survived this reduction; "
+                 "abandoning is premature while a report-only test hasn't "
+                 "been run.", ""]
+    elif surviving:
+        lines += ["", "B. Report-only forward test — **weakly, and only "
+                 f"for {', '.join(surviving)}**: no feature qualified as a "
+                 "primary signal (the intended primary, cvd_direction, "
+                 "reversed sign under conditioning). What remains is a "
+                 "supporting filter that independently reached "
+                 "PRELIMINARY_KEEP and wasn't shown redundant with "
+                 "cvd_direction — weaker evidence than a confirmed primary, "
+                 "but not yet nothing. A report-only test of it alone, "
+                 "clearly labeled as low-confidence, is defensible; a live "
+                 "gate is not.",
+                 "", "C. Abandon the current swing entry formulation — "
+                 "not conclusively, but close: the intended primary signal "
+                 "failed conditioning, and what's left is a single "
+                 "unconfirmed supporting feature. If a report-only test of "
+                 f"{', '.join(surviving)} also fails to hold up, abandonment "
+                 "becomes the more likely conclusion.", ""]
+    else:
+        lines += ["", "B. Report-only forward test — no: nothing survived "
+                 "step 5 with enough evidence to test.",
+                 "", "C. Abandon the current swing entry formulation — "
+                 "**yes**: no feature reached both a confirmed edge and "
+                 "passed conditioning; the candidate set is empty.", ""]
 
     lines += ["## Diagnostics-only (never candidate edges)", ""]
     for name in DIAGNOSTIC_FEATURES:

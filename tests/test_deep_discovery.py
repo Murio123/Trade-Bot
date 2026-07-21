@@ -630,27 +630,45 @@ def test_redundancy_check_independent_when_sign_holds_in_every_stratum():
 
 
 def test_redundancy_check_entangled_when_sign_flips_across_strata():
+    # Regression for a Codex-flagged defect: an earlier draft recomputed a
+    # fresh LOCAL feature_separation per stratum, whose "sign" is trivially
+    # "positive" whenever ANY two buckets differ (best/worst are always
+    # picked to make spread >= 0) — so a stratum where the pooled best/worst
+    # LABELS actually swap places still reported "matches_pooled" by
+    # accident. This construction is deliberately asymmetric (not a
+    # perfectly symmetric 50/50 flip) so the pooled sign is a clean, large
+    # "positive" — not "flat" — making the swap in the "bearish_htf" stratum
+    # a genuine, detectable reversal rather than something both the buggy
+    # and fixed code would call "entangled" for unrelated reasons.
     rows = []
     idx = 0
-    # bullish htf: bearish-cvd wins; bearish htf: sign flips (bullish-cvd wins)
-    for _ in range(40):
-        rows.append(_cvd_row(idx, cvd_dir="bearish", cvd_delta=0.0, r=0.3,
-                             htf="bullish"))
+    # bullish_htf: bearish-cvd strongly wins (pulls the pooled mean positive)
+    for _ in range(50):
+        rows.append(_cvd_row(idx, cvd_dir="bearish", cvd_delta=0.0, r=0.5,
+                             htf="bullish_htf"))
         idx += 1
-        rows.append(_cvd_row(idx, cvd_dir="bullish", cvd_delta=0.0, r=-0.3,
-                             htf="bullish"))
+        rows.append(_cvd_row(idx, cvd_dir="bullish", cvd_delta=0.0, r=-0.5,
+                             htf="bullish_htf"))
         idx += 1
-    for _ in range(40):
-        rows.append(_cvd_row(idx, cvd_dir="bearish", cvd_delta=0.0, r=-0.3,
-                             htf="bearish"))
+    # bearish_htf: the pooled-best label ("bearish") is now the WORSE bucket
+    # here (-0.1 vs +0.4) — a real reversal of which labeled bucket wins,
+    # not merely a smaller/noisier version of the same effect.
+    for _ in range(50):
+        rows.append(_cvd_row(idx, cvd_dir="bearish", cvd_delta=0.0, r=-0.1,
+                             htf="bearish_htf"))
         idx += 1
-        rows.append(_cvd_row(idx, cvd_dir="bullish", cvd_delta=0.0, r=0.3,
-                             htf="bearish"))
+        rows.append(_cvd_row(idx, cvd_dir="bullish", cvd_delta=0.0, r=0.4,
+                             htf="bearish_htf"))
         idx += 1
     labels = dd._bucket_labels(rows, "cvd_direction")
+    pooled_sep = dd.feature_separation(
+        dd.feature_bucket_table(rows, "cvd_direction", labels=labels))
+    assert pooled_sep["sign"] == "positive" and pooled_sep["best"] == "bearish"
+
     chk = dd.redundancy_check(rows, "cvd_direction", labels, "htf_bias",
                               min_n=30)
     assert chk["verdict"] == "entangled_or_inconsistent"
+    assert chk["agree"] == 1 and chk["evaluated"] == 2
 
 
 def test_redundancy_check_insufficient_evidence_below_stratum_floor():
