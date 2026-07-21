@@ -465,20 +465,42 @@ def _stats_for_group(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def feature_bucket_table(rows: list[dict[str, Any]], name: str
-                         ) -> dict[str, dict[str, Any]]:
-    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+def _bucket_labels(rows: list[dict[str, Any]], name: str) -> dict[int, str]:
+    """idx -> bucket label, computed once on the given (pooled) rows.
+
+    Numeric tertile edges are a property of the POOLED distribution; they
+    must not be recomputed on a split subset (see feature_bucket_table).
+    """
     if name in NUMERIC_FEATURES:
-        labels = _numeric_buckets(rows, name)
-        for r in rows:
-            lbl = labels.get(r["idx"])
-            if lbl is not None:
-                groups[lbl].append(r)
-    else:
-        for r in rows:
-            v = _feature_value(r, name)
-            if not _is_missing(v):
-                groups[str(v)].append(r)
+        return _numeric_buckets(rows, name)
+    labels: dict[int, str] = {}
+    for r in rows:
+        v = _feature_value(r, name)
+        if not _is_missing(v):
+            labels[r["idx"]] = str(v)
+    return labels
+
+
+def feature_bucket_table(rows: list[dict[str, Any]], name: str,
+                         labels: dict[int, str] | None = None
+                         ) -> dict[str, dict[str, Any]]:
+    """Bucket stats for ``rows``.
+
+    ``labels`` (idx -> bucket label) defaults to being computed from ``rows``
+    itself — the pooled call site. Split-level callers (see _stability) MUST
+    pass the pooled labels explicitly: recomputing tertile edges on a split
+    subset would silently redefine "low/mid/high" per split, so a stability
+    check would no longer be testing whether the POOLED best-vs-worst bucket
+    sign replicates — it would be comparing differently-defined buckets that
+    happen to share a name.
+    """
+    if labels is None:
+        labels = _bucket_labels(rows, name)
+    groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        lbl = labels.get(r["idx"])
+        if lbl is not None:
+            groups[lbl].append(r)
     return {k: _stats_for_group(v) for k, v in sorted(groups.items())}
 
 
@@ -528,8 +550,14 @@ def _fold_assignment(rows: list[dict[str, Any]], k: int = N_FOLDS
 def _stability(rows: list[dict[str, Any]], name: str,
               pooled_sep: dict[str, Any],
               split_key: Callable[[dict[str, Any]], Any],
+              labels: dict[int, str],
               min_n: int = MIN_GROUP_N) -> dict[str, Any]:
-    """Does the pooled best-vs-worst bucket sign replicate across splits?"""
+    """Does the pooled best-vs-worst bucket sign replicate across splits?
+
+    ``labels`` must be the POOLED idx->bucket mapping (from the same
+    feature_bucket_table call that produced pooled_sep), not recomputed per
+    split — see feature_bucket_table's docstring for why.
+    """
     splits: dict[Any, list[dict[str, Any]]] = defaultdict(list)
     for r in rows:
         splits[split_key(r)].append(r)
@@ -539,7 +567,7 @@ def _stability(rows: list[dict[str, Any]], name: str,
     details: dict[str, Any] = {}
     for key in sorted(splits, key=str):
         sub = splits[key]
-        table = feature_bucket_table(sub, name)
+        table = feature_bucket_table(sub, name, labels=labels)
         best_row, worst_row = table.get(pooled_sep["best"]), \
             table.get(pooled_sep["worst"])
         if not best_row or not worst_row or best_row["n"] < min_n \
@@ -622,7 +650,8 @@ def run_single_feature_attribution(rows: list[dict[str, Any]]
     fold_of = _fold_assignment(rows)
     features: dict[str, Any] = {}
     for name in ALL_FEATURES:
-        table = feature_bucket_table(rows, name)
+        labels = _bucket_labels(rows, name)
+        table = feature_bucket_table(rows, name, labels=labels)
         sep = feature_separation(table)
         if sep is None:
             fold_stab = {"eligible": False, "reason": "no pooled separation"}
@@ -630,12 +659,14 @@ def run_single_feature_attribution(rows: list[dict[str, Any]]
             regime_stab = dict(fold_stab)
         else:
             fold_stab = _stability(rows, name, sep,
-                                   lambda r: fold_of.get(r["idx"]))
-            year_stab = _stability(rows, name, sep, lambda r: r["year"])
+                                   lambda r: fold_of.get(r["idx"]), labels)
+            year_stab = _stability(rows, name, sep, lambda r: r["year"],
+                                   labels)
             regime_stab = (
                 {"eligible": False, "reason": "feature is the split axis"}
                 if name == "regime_current" else
-                _stability(rows, name, sep, lambda r: r["regime_current"]))
+                _stability(rows, name, sep, lambda r: r["regime_current"],
+                          labels))
         classification = classify_feature(name, table, fold_stab, year_stab,
                                           len(rows))
         features[name] = {

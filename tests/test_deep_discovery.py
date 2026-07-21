@@ -362,6 +362,35 @@ def test_feature_bucket_table_categorical_splits_by_value():
     assert table["False"]["net_mean_r"] == pytest.approx(-0.5)
 
 
+def test_stability_reuses_pooled_numeric_bucket_edges_not_resplit_quantiles(
+        monkeypatch):
+    # Regression for a Codex-flagged defect: numeric bucket edges (tertiles)
+    # are a property of the POOLED distribution. Recomputing pd.qcut on a
+    # split subset would silently redefine "low/mid/high" per split, so a
+    # stability check would compare differently-defined buckets rather than
+    # testing whether the pooled best-vs-worst sign replicates.
+    monkeypatch.setattr(dd, "NUMERIC_FEATURES", dd.NUMERIC_FEATURES + ["metric"])
+    rows = []
+    for i in range(30):
+        row = _row(i, r=float(i))
+        row["metric"] = float(i)  # pooled tertiles: [0,9]=low [10,19]=mid [20,29]=high
+        rows.append(row)
+
+    pooled_labels = dd._bucket_labels(rows, "metric")
+    subset = rows[:10]  # entirely pooled "low"
+
+    # Recomputing quantiles locally on a pooled-single-bucket subset invents
+    # fake separation (three fresh thirds where none should exist).
+    local_table = dd.feature_bucket_table(subset, "metric", labels=None)
+    assert set(local_table) == {"low", "mid", "high"}
+
+    # Using the pooled labels correctly recognizes every row here shares one
+    # pooled bucket — this is the path feature_bucket_table/_stability use
+    # for split-level calls once labels are threaded through explicitly.
+    pooled_table = dd.feature_bucket_table(subset, "metric", labels=pooled_labels)
+    assert set(pooled_table) == {"low"}
+
+
 def test_feature_separation_identifies_best_and_worst():
     rows = _make_rows(60, 60, r_true=0.5, r_false=-0.5)
     table = dd.feature_bucket_table(rows, "some_flag")
@@ -386,12 +415,14 @@ def test_classify_feature_keep_when_stable_across_years():
     def year_fn(idx):
         return 2018 + ((idx // 2) % 4)
     rows = _make_rows(240, 240, r_true=0.4, r_false=-0.4, year_fn=year_fn)
-    table = dd.feature_bucket_table(rows, "some_flag")
+    labels = dd._bucket_labels(rows, "some_flag")
+    table = dd.feature_bucket_table(rows, "some_flag", labels=labels)
     sep = dd.feature_separation(table)
     fold_of = dd._fold_assignment(rows)
     fold_stab = dd._stability(rows, "some_flag", sep,
-                              lambda r: fold_of.get(r["idx"]))
-    year_stab = dd._stability(rows, "some_flag", sep, lambda r: r["year"])
+                              lambda r: fold_of.get(r["idx"]), labels)
+    year_stab = dd._stability(rows, "some_flag", sep, lambda r: r["year"],
+                              labels)
     result = dd.classify_feature("some_flag", table, fold_stab, year_stab,
                                  len(rows))
     assert result["label"] == "PRELIMINARY_KEEP"
@@ -399,12 +430,14 @@ def test_classify_feature_keep_when_stable_across_years():
 
 def test_classify_feature_remove_when_flat():
     rows = _make_rows(120, 120, r_true=0.01, r_false=-0.01)
-    table = dd.feature_bucket_table(rows, "some_flag")
+    labels = dd._bucket_labels(rows, "some_flag")
+    table = dd.feature_bucket_table(rows, "some_flag", labels=labels)
     sep = dd.feature_separation(table)
     fold_of = dd._fold_assignment(rows)
     fold_stab = dd._stability(rows, "some_flag", sep,
-                              lambda r: fold_of.get(r["idx"]))
-    year_stab = dd._stability(rows, "some_flag", sep, lambda r: r["year"])
+                              lambda r: fold_of.get(r["idx"]), labels)
+    year_stab = dd._stability(rows, "some_flag", sep, lambda r: r["year"],
+                              labels)
     result = dd.classify_feature("some_flag", table, fold_stab, year_stab,
                                  len(rows))
     assert result["label"] == "PRELIMINARY_REMOVE"
@@ -412,12 +445,14 @@ def test_classify_feature_remove_when_flat():
 
 def test_classify_feature_remove_when_best_bucket_not_positive():
     rows = _make_rows(120, 120, r_true=-0.1, r_false=-0.8)
-    table = dd.feature_bucket_table(rows, "some_flag")
+    labels = dd._bucket_labels(rows, "some_flag")
+    table = dd.feature_bucket_table(rows, "some_flag", labels=labels)
     sep = dd.feature_separation(table)
     fold_of = dd._fold_assignment(rows)
     fold_stab = dd._stability(rows, "some_flag", sep,
-                              lambda r: fold_of.get(r["idx"]))
-    year_stab = dd._stability(rows, "some_flag", sep, lambda r: r["year"])
+                              lambda r: fold_of.get(r["idx"]), labels)
+    year_stab = dd._stability(rows, "some_flag", sep, lambda r: r["year"],
+                              labels)
     result = dd.classify_feature("some_flag", table, fold_stab, year_stab,
                                  len(rows))
     assert result["label"] == "PRELIMINARY_REMOVE"
