@@ -54,6 +54,8 @@ POSITIVE_EPS = 0.05
 
 EMA_SLOPE_LOOKBACK = 10  # баров HTF-среза для наклона EMA50 (без пересчёта)
 
+_recording = False  # non-reentrancy guard for record_walk, see below
+
 LIMITATIONS = [
     "Discovery only: this stage finds candidate market features, it does not "
     "recommend a strategy, scoring, threshold, or config change.",
@@ -102,7 +104,18 @@ def record_walk(frames: dict[str, Any], profile: dict[str, Any],
     (tools/deep_backtest.py), поэтому подмена видна изнутри без изменения
     файла. Все обёртки только читают аргументы/результат и делегируют
     оригиналу — вычисляемые числа не меняются ни на бит.
+
+    Не реентерабельно: вложенный/перекрывающийся вызов захватил бы уже
+    подменённые имена как «оригиналы» и оставил бы deep_backtest подменённым
+    навсегда после выхода обоих вызовов. Этот тул — однопоточный CLI, вызовы
+    всегда последовательны, но защита всё равно ставится явно, а не остаётся
+    на совести вызывающего.
     """
+    global _recording
+    if _recording:
+        raise RuntimeError(
+            "record_walk is not reentrant: a call is already in progress")
+    _recording = True
     originals = {
         name: getattr(deep_backtest, name)
         for name in ("calculate_confluence_score", "compute_equilibrium",
@@ -168,6 +181,7 @@ def record_walk(frames: dict[str, Any], profile: dict[str, Any],
     finally:
         for name, fn in originals.items():
             setattr(deep_backtest, name, fn)
+        _recording = False
     return walk, records
 
 

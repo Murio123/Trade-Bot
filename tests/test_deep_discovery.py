@@ -167,6 +167,24 @@ def test_recorder_restores_originals_even_if_deep_walk_raises(monkeypatch,
     with pytest.raises(RuntimeError):
         dd.record_walk(frames, profile, SWING_BARS)
     assert deep_backtest.resolve is original_resolve
+    assert dd._recording is False
+
+
+def test_recorder_rejects_reentrant_calls(monkeypatch, swing_walk_inputs):
+    frames, profile = swing_walk_inputs
+    original_resolve = deep_backtest.resolve
+
+    def nested_call(*args, **kwargs):
+        with pytest.raises(RuntimeError, match="not reentrant"):
+            dd.record_walk(frames, profile, SWING_BARS)
+        raise RuntimeError("outer aborted after nested attempt")
+
+    monkeypatch.setattr(deep_backtest, "deep_walk", nested_call)
+    with pytest.raises(RuntimeError, match="outer aborted"):
+        dd.record_walk(frames, profile, SWING_BARS)
+    # guard and originals both cleaned up after the (failed) outer call
+    assert dd._recording is False
+    assert deep_backtest.resolve is original_resolve
 
 
 # ---------------------------------------------------------------------------
