@@ -563,3 +563,208 @@ def test_cli_writes_single_feature_reports(tmp_path, capsys):
     with open(outdir / "single_feature_report.json") as fh:
         data = json.load(fh)
     assert data["kind"] == "single_feature_attribution"
+
+
+# ---------------------------------------------------------------------------
+# Part 3 (C1.8, step 5) — redundancy + candidate reduction.
+# ---------------------------------------------------------------------------
+
+def test_registry_reflects_step5_reduction():
+    for name in ("cvd_bullish", "cvd_bearish", "mfe_r", "mae_r",
+                "time_to_mfe", "time_to_mae"):
+        assert name not in dd.ALL_FEATURES
+    assert "cvd_direction" in dd.CATEGORICAL_FEATURES
+    assert set(dd.DIAGNOSTIC_FEATURES) == {"mfe_r", "mae_r", "time_to_mfe",
+                                           "time_to_mae"}
+    assert "distance_from_equilibrium" in dd.FAILED_ROBUSTNESS_OVERRIDES
+
+
+def test_cvd_direction_derivation():
+    assert dd._feature_value({"cvd_bearish": True, "cvd_bullish": False},
+                             "cvd_direction") == "bearish"
+    assert dd._feature_value({"cvd_bearish": False, "cvd_bullish": True},
+                             "cvd_direction") == "bullish"
+    assert dd._feature_value({"cvd_bearish": False, "cvd_bullish": False},
+                             "cvd_direction") == "neutral"
+
+
+def _cvd_row(idx, *, cvd_dir, cvd_delta, r, htf="neutral", regime="range",
+            direction="long", score=8, year=2021):
+    return {
+        "idx": idx, "direction": direction, "score": score,
+        "regime_current": regime, "regime_live_parity": regime,
+        "outcome": "win" if r > 0 else "loss", "hit_tp1": True, "r": r,
+        "gross_r": r, "year": year,
+        "cvd_bearish": cvd_dir == "bearish", "cvd_bullish": cvd_dir == "bullish",
+        "cvd_last_delta": cvd_delta, "htf_bias": htf,
+    }
+
+
+def test_diagnostic_bucket_report_uses_numeric_tertiles():
+    rows = [_row(i, r=float(i)) for i in range(30)]
+    for i, row in enumerate(rows):
+        row["mfe_r"] = float(i)
+    report = dd.diagnostic_bucket_report(rows)
+    assert set(report["mfe_r"]["buckets"]) <= {"low", "mid", "high"}
+    assert report["mfe_r"]["kind"] == "numeric_diagnostic_only"
+
+
+def test_redundancy_check_independent_when_sign_holds_in_every_stratum():
+    # cvd_direction separates R the same way (bearish > bullish) regardless
+    # of htf_bias — a clean "independent" case.
+    rows = []
+    idx = 0
+    for htf in ("bullish", "bearish"):
+        for _ in range(40):
+            rows.append(_cvd_row(idx, cvd_dir="bearish", cvd_delta=0.0,
+                                 r=0.3, htf=htf))
+            idx += 1
+            rows.append(_cvd_row(idx, cvd_dir="bullish", cvd_delta=0.0,
+                                 r=-0.3, htf=htf))
+            idx += 1
+    labels = dd._bucket_labels(rows, "cvd_direction")
+    chk = dd.redundancy_check(rows, "cvd_direction", labels, "htf_bias",
+                              min_n=30)
+    assert chk["verdict"] == "independent"
+    assert chk["evaluated"] == 2 and chk["agree"] == 2
+
+
+def test_redundancy_check_entangled_when_sign_flips_across_strata():
+    rows = []
+    idx = 0
+    # bullish htf: bearish-cvd wins; bearish htf: sign flips (bullish-cvd wins)
+    for _ in range(40):
+        rows.append(_cvd_row(idx, cvd_dir="bearish", cvd_delta=0.0, r=0.3,
+                             htf="bullish"))
+        idx += 1
+        rows.append(_cvd_row(idx, cvd_dir="bullish", cvd_delta=0.0, r=-0.3,
+                             htf="bullish"))
+        idx += 1
+    for _ in range(40):
+        rows.append(_cvd_row(idx, cvd_dir="bearish", cvd_delta=0.0, r=-0.3,
+                             htf="bearish"))
+        idx += 1
+        rows.append(_cvd_row(idx, cvd_dir="bullish", cvd_delta=0.0, r=0.3,
+                             htf="bearish"))
+        idx += 1
+    labels = dd._bucket_labels(rows, "cvd_direction")
+    chk = dd.redundancy_check(rows, "cvd_direction", labels, "htf_bias",
+                              min_n=30)
+    assert chk["verdict"] == "entangled_or_inconsistent"
+
+
+def test_redundancy_check_insufficient_evidence_below_stratum_floor():
+    rows = [_cvd_row(i, cvd_dir="bearish" if i % 2 == 0 else "bullish",
+                     cvd_delta=0.0, r=0.3 if i % 2 == 0 else -0.3,
+                     htf="bullish")
+           for i in range(10)]
+    labels = dd._bucket_labels(rows, "cvd_direction")
+    chk = dd.redundancy_check(rows, "cvd_direction", labels, "htf_bias",
+                              min_n=30)
+    assert chk["verdict"] == "insufficient_evidence"
+
+
+def test_contingency_counts_cooccurrence():
+    rows = [_cvd_row(0, cvd_dir="bearish", cvd_delta=0.0, r=0.1, htf="bullish"),
+           _cvd_row(1, cvd_dir="bearish", cvd_delta=0.0, r=0.1, htf="bullish"),
+           _cvd_row(2, cvd_dir="bullish", cvd_delta=0.0, r=0.1, htf="bearish")]
+    primary_labels = dd._bucket_labels(rows, "cvd_direction")
+    other_labels = dd._bucket_labels(rows, "htf_bias")
+    table = dd._contingency(rows, primary_labels, other_labels)
+    assert table["bearish"]["bullish"] == 2
+    assert table["bullish"]["bearish"] == 1
+
+
+def test_run_redundancy_analysis_structure(swing_walk_inputs):
+    frames, profile = swing_walk_inputs
+    walk, records = dd.record_walk(frames, profile, SWING_BARS)
+    rows = dd.build_feature_rows(walk, records)
+    features = dd.run_single_feature_attribution(rows)
+    red = dd.run_redundancy_analysis(rows, features)
+    assert set(red) == {"manual_overrides", "cvd_last_delta_added_information",
+                        "cvd_direction_conditioning", "diagnostics_only",
+                        "excluded_from_candidates"}
+    assert set(red["cvd_direction_conditioning"]) == \
+        set(dd.REDUNDANCY_CONDITIONING_FEATURES)
+    assert "distance_from_equilibrium" in red["manual_overrides"]
+    assert set(red["excluded_from_candidates"]) == set(dd.DIAGNOSTIC_FEATURES)
+
+
+def test_build_shortlist_never_promotes_failed_robustness_feature():
+    # Regression: distance_from_equilibrium independently reaches
+    # PRELIMINARY_KEEP in single-feature attribution on real data, but the
+    # manual override must keep it out of supporting_filters regardless.
+    rows = _make_rows(240, 240, r_true=0.4, r_false=-0.4)
+    features = dd.run_single_feature_attribution(rows)
+    # Force distance_from_equilibrium's raw classification to KEEP to prove
+    # the override wins even in the worst case, without depending on qcut
+    # producing that outcome from "some_flag"-shaped synthetic rows.
+    features["distance_from_equilibrium"] = {
+        "classification": {"label": "PRELIMINARY_KEEP"},
+    }
+    features["cvd_direction"] = {
+        "classification": {"label": "PRELIMINARY_REMOVE"},
+    }
+    red = {
+        "cvd_last_delta_added_information": {"verdict": "insufficient_evidence"},
+        "cvd_direction_conditioning": {f: {"verdict": "independent"}
+                                       for f in dd.REDUNDANCY_CONDITIONING_FEATURES},
+    }
+    short = dd.build_shortlist(features, red)
+    assert "distance_from_equilibrium" not in short["supporting_filters"]
+    assert short["excluded"]["distance_from_equilibrium"] == \
+        "failed_robustness (see manual_overrides)"
+
+
+def test_build_shortlist_max_one_primary_max_two_supporting():
+    rows = _make_rows(240, 240, r_true=0.4, r_false=-0.4)
+    features = dd.run_single_feature_attribution(rows)
+    features["cvd_direction"] = {"classification": {"label": "PRELIMINARY_KEEP"}}
+    red = {
+        "cvd_last_delta_added_information": {"verdict": "independent"},
+        "cvd_direction_conditioning": {f: {"verdict": "independent"}
+                                       for f in dd.REDUNDANCY_CONDITIONING_FEATURES},
+    }
+    short = dd.build_shortlist(features, red)
+    assert short["primary"] == "cvd_direction"
+    assert len(short["supporting_filters"]) <= 2
+
+
+def test_build_shortlist_no_primary_when_cvd_direction_not_keep():
+    rows = _make_rows(240, 240, r_true=0.01, r_false=-0.01)  # flat -> REMOVE
+    features = dd.run_single_feature_attribution(rows)
+    features["cvd_direction"] = {
+        "classification": {"label": "PRELIMINARY_REMOVE"}}
+    red = {
+        "cvd_last_delta_added_information": {"verdict": "insufficient_evidence"},
+        "cvd_direction_conditioning": {f: {"verdict": "insufficient_evidence"}
+                                       for f in dd.REDUNDANCY_CONDITIONING_FEATURES},
+    }
+    short = dd.build_shortlist(features, red)
+    assert short["primary"] is None
+
+
+def test_cli_redundancy_flag_writes_extra_reports(tmp_path):
+    dataset = _build_swing_dataset(tmp_path / "binance")
+    outdir = tmp_path / "out"
+    rc = dd.main(["--dataset", dataset, "--exchange", "binance",
+                 "--profile", "swing", "--bars", str(SWING_BARS),
+                 "--outdir", str(outdir), "--redundancy"])
+    assert rc == 0
+    assert (outdir / "redundancy_report.json").exists()
+    assert (outdir / "redundancy_report.txt").exists()
+    assert (outdir / "SWING_SHORTLIST.md").exists()
+    with open(outdir / "redundancy_report.json") as fh:
+        data = json.load(fh)
+    assert "redundancy" in data and "shortlist" in data
+
+
+def test_cli_without_redundancy_flag_skips_extra_reports(tmp_path):
+    dataset = _build_swing_dataset(tmp_path / "binance")
+    outdir = tmp_path / "out"
+    rc = dd.main(["--dataset", dataset, "--exchange", "binance",
+                 "--profile", "swing", "--bars", str(SWING_BARS),
+                 "--outdir", str(outdir)])
+    assert rc == 0
+    assert not (outdir / "redundancy_report.json").exists()
+    assert not (outdir / "SWING_SHORTLIST.md").exists()

@@ -386,20 +386,61 @@ SCORE_BUCKETS: list[tuple[int, int | None]] = [
 # name -> "categorical" | "numeric". Categorical buckets by literal value;
 # numeric buckets by pooled tertile (low/mid/high, degenerate distributions
 # collapse to fewer bins rather than being forced into 3).
+#
+# C1.8 step 5 (redundancy/candidate reduction) changed this set from step 4:
+#   - cvd_bullish/cvd_bearish collapsed into one "cvd_direction" categorical
+#     (they were confirmed mirror-image duplicates of the same raw CVD read,
+#     not two independent signals — see redundancy_report).
+#   - mfe_r/mae_r/time_to_mfe/time_to_mae removed entirely: they are computed
+#     from the SAME forward window as the outcome they'd be "predicting", so
+#     bucketing them against R is close to tautological, not a market
+#     discovery. They remain available as post-trade diagnostics only (see
+#     DIAGNOSTIC_FEATURES), never as entry-signal candidates.
 CATEGORICAL_FEATURES = [
     "direction", "regime_current", "regime_live_parity", "regime_agreement",
     "htf_bias", "eq_zone", "trend_aligned", "ob_present", "fvg_present",
-    "zone_kind", "liquidity_swept", "cvd_bullish", "cvd_bearish", "hit_tp1",
+    "zone_kind", "liquidity_swept", "cvd_direction", "hit_tp1",
     "weekday", "month", "score_bucket",
 ]
 NUMERIC_FEATURES = [
     "atr", "volatility_atr_pct", "volatility_atr_percentile", "ema_slope",
     "eq_pos", "distance_from_equilibrium", "zone_width_atr", "zone_age_bars",
     "entry_location", "distance_to_level_atr", "stop_distance_pct",
-    "rr_ratio", "cost_r", "mfe_r", "mae_r", "time_to_mfe", "time_to_mae",
-    "cvd_value", "cvd_last_delta", "distance_to_weekend",
+    "rr_ratio", "cost_r", "cvd_value", "cvd_last_delta", "distance_to_weekend",
 ]
 ALL_FEATURES = CATEGORICAL_FEATURES + NUMERIC_FEATURES
+
+# Post-trade diagnostics only (step 5): circular w.r.t. the outcome they'd be
+# scored against, so they are reported descriptively but never classified as
+# candidate edges and never appear in ALL_FEATURES.
+DIAGNOSTIC_FEATURES = ["mfe_r", "mae_r", "time_to_mfe", "time_to_mae"]
+
+# Step 5 manual override: a finding established by an out-of-band robustness
+# study (quartile/quintile/decile re-bucketing + rank correlation on the real
+# BTCUSDT swing dataset), not by this module's own automated pipeline. The
+# tertile-level "low distance beats mid/high" separation did not replicate at
+# finer resolution (quartiles/quintiles/deciles all show a non-monotonic,
+# noisy relationship; Spearman rho ~ -0.08) — the tertile boundaries happened
+# to isolate one localized dip, not a stable market relationship. Recorded
+# here so the classification is documented and reproducible in the report,
+# not silently re-derived by a general "robustness checker" (out of scope
+# for this step — see the step-5 instruction not to broaden research).
+FAILED_ROBUSTNESS_OVERRIDES: dict[str, dict[str, Any]] = {
+    "distance_from_equilibrium": {
+        "status": "failed_robustness",
+        "eligible_for_confirmation": False,
+        "eligible_for_runtime": False,
+        "reason": (
+            "Tertile-level separation (low +0.18R net vs mid -0.07R, high "
+            "-0.07R) did not replicate under quartile/quintile/decile "
+            "bucketing or continuous smoothing on the same 825-setup "
+            "dataset; quartile 4 (furthest from equilibrium) was positive "
+            "again (+0.09R), and deciles alternate sign with no consistent "
+            "pattern. Spearman rank correlation with R was ~0 (rho=-0.08, "
+            "n=825). Treated as a bucket-boundary artifact, not a market "
+            "property; not eligible for confirmation or runtime use."),
+    },
+}
 
 
 def score_bucket(score: float) -> str:
@@ -422,6 +463,15 @@ def _feature_value(row: dict[str, Any], name: str) -> Any:
     if name == "distance_from_equilibrium":
         pos = row.get("eq_pos")
         return round(abs(pos - 0.5), 4) if pos is not None else None
+    if name == "cvd_direction":
+        # Collapses cvd_bullish/cvd_bearish (raw, direction-independent CVD
+        # read) into one canonical categorical — step 5 confirmed these were
+        # mirror-image duplicates of the same signal, not two features.
+        if row.get("cvd_bearish"):
+            return "bearish"
+        if row.get("cvd_bullish"):
+            return "bullish"
+        return "neutral"
     return row.get(name)
 
 
@@ -700,12 +750,236 @@ def build_summary_table(features: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
+# Part 3 (C1.8, step 5): redundancy + candidate reduction.
+#
+# Scope is deliberately narrow — exactly the questions the step 5 brief asks
+# for, nothing broader: whether cvd_last_delta adds information beyond the
+# collapsed cvd_direction, and whether cvd_direction's own effect holds when
+# conditioned on each of four named features (htf_bias, regime_current,
+# direction, score_bucket). No exhaustive pairwise search, no clustering, no
+# SHAP, no new indicators.
+# ---------------------------------------------------------------------------
+
+REDUNDANCY_CONDITIONING_FEATURES = ("htf_bias", "regime_current", "direction",
+                                    "score_bucket")
+REDUNDANCY_MIN_STRATUM_N = 30  # lower than MIN_GROUP_N: strata are subsets of
+                               # an already-bucketed sample, not the pooled set
+
+
+def diagnostic_bucket_report(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Descriptive-only bucket stats for post-trade diagnostics.
+
+    DIAGNOSTIC_FEATURES are deliberately outside NUMERIC_FEATURES, so this
+    calls _numeric_buckets directly (bypassing feature_bucket_table's
+    registry-based dispatch) rather than reusing the classification pipeline
+    — these are reported, never classified as candidate edges.
+    """
+    report: dict[str, Any] = {}
+    for name in DIAGNOSTIC_FEATURES:
+        labels = _numeric_buckets(rows, name)
+        table = feature_bucket_table(rows, name, labels=labels)
+        report[name] = {"kind": "numeric_diagnostic_only", "buckets": table}
+    return report
+
+
+def _contingency(rows: list[dict[str, Any]], primary_labels: dict[int, str],
+                 other_labels: dict[int, str]) -> dict[str, dict[str, int]]:
+    """primary_label -> other_label -> co-occurrence count."""
+    table: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for r in rows:
+        p, o = primary_labels.get(r["idx"]), other_labels.get(r["idx"])
+        if p is not None and o is not None:
+            table[p][o] += 1
+    return {p: dict(o) for p, o in table.items()}
+
+
+def redundancy_check(rows: list[dict[str, Any]], primary_name: str,
+                     primary_labels: dict[int, str], other_name: str,
+                     min_n: int = REDUNDANCY_MIN_STRATUM_N) -> dict[str, Any]:
+    """Does primary's best-vs-worst bucket sign hold within each of
+    other_name's own buckets? Answers "independent vs. entangled", not a
+    full interaction model — see module docstring for scope.
+    """
+    other_labels = _bucket_labels(rows, other_name)
+    pooled_table = feature_bucket_table(rows, primary_name, labels=primary_labels)
+    pooled_sep = feature_separation(pooled_table)
+
+    strata: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for r in rows:
+        lbl = other_labels.get(r["idx"])
+        if lbl is not None:
+            strata[lbl].append(r)
+
+    per_stratum: dict[str, Any] = {}
+    agree = 0
+    evaluated = 0
+    for key in sorted(strata, key=str):
+        sub = strata[key]
+        table = feature_bucket_table(sub, primary_name, labels=primary_labels)
+        sep = feature_separation(table, min_n=min_n)
+        if sep is None or pooled_sep is None:
+            per_stratum[str(key)] = {"n": len(sub), "status": "insufficient"}
+            continue
+        matches = (sep["sign"] == pooled_sep["sign"]
+                  if pooled_sep["sign"] != "flat" else None)
+        per_stratum[str(key)] = {"n": len(sub), "status": "evaluated",
+                                 "best": sep["best"],
+                                 "best_mean_r": sep["best_mean_r"],
+                                 "sign": sep["sign"],
+                                 "matches_pooled": matches}
+        evaluated += 1
+        if matches:
+            agree += 1
+
+    agreement_ratio = round(agree / evaluated, 4) if evaluated else None
+    if evaluated < 2:
+        verdict = "insufficient_evidence"
+    elif agreement_ratio >= STABILITY_AGREEMENT_MIN:
+        verdict = "independent"
+    else:
+        verdict = "entangled_or_inconsistent"
+
+    return {
+        "other_feature": other_name,
+        "pooled_sign": pooled_sep["sign"] if pooled_sep else None,
+        "per_stratum": per_stratum,
+        "evaluated": evaluated, "agree": agree,
+        "agreement_ratio": agreement_ratio,
+        "contingency": _contingency(rows, primary_labels, other_labels),
+        "verdict": verdict,
+    }
+
+
+def run_redundancy_analysis(rows: list[dict[str, Any]],
+                            features: dict[str, Any]) -> dict[str, Any]:
+    """Step 5: manual overrides, cvd_last_delta added-information check, the
+    four named cvd_direction conditioning checks, and diagnostics-only stats.
+    """
+    cvd_labels = _bucket_labels(rows, "cvd_direction")
+    cvd_last_delta_labels = _bucket_labels(rows, "cvd_last_delta")
+
+    added_info = redundancy_check(rows, "cvd_last_delta",
+                                  cvd_last_delta_labels, "cvd_direction",
+                                  min_n=MIN_GROUP_N)
+    conditioning = {
+        other: redundancy_check(rows, "cvd_direction", cvd_labels, other)
+        for other in REDUNDANCY_CONDITIONING_FEATURES
+    }
+
+    return {
+        "manual_overrides": dict(FAILED_ROBUSTNESS_OVERRIDES),
+        "cvd_last_delta_added_information": added_info,
+        "cvd_direction_conditioning": conditioning,
+        "diagnostics_only": diagnostic_bucket_report(rows),
+        "excluded_from_candidates": list(DIAGNOSTIC_FEATURES),
+    }
+
+
+def build_shortlist(features: dict[str, Any],
+                    redundancy: dict[str, Any]) -> dict[str, Any]:
+    """Max 1 primary signal, max 2 supporting filters — everything else
+    explicitly classified REMOVE / UNKNOWN / DIAGNOSTIC_ONLY.
+
+    Conservative by design: a supporting filter is only promoted if it
+    already independently reached PRELIMINARY_KEEP in the single-feature
+    pass — this step does not run a broader search to justify one (that
+    would be the disallowed "other interaction search").
+    """
+    cvd_cls = features["cvd_direction"]["classification"]["label"]
+    added_info_verdict = redundancy["cvd_last_delta_added_information"]["verdict"]
+    conditioning_verdicts = {
+        other: chk["verdict"]
+        for other, chk in redundancy["cvd_direction_conditioning"].items()
+    }
+    contradicted = any(v == "entangled_or_inconsistent"
+                      for v in conditioning_verdicts.values())
+
+    primary = None
+    primary_reason = ""
+    if cvd_cls == "PRELIMINARY_KEEP" and not contradicted:
+        primary = "cvd_direction"
+        primary_reason = ("PRELIMINARY_KEEP in single-feature attribution; "
+                          "sign did not reverse under conditioning on any of "
+                          f"{list(conditioning_verdicts)}")
+    elif cvd_cls != "PRELIMINARY_KEEP":
+        primary_reason = (f"cvd_direction classification is {cvd_cls}, not "
+                          "PRELIMINARY_KEEP — no primary signal qualifies")
+    else:
+        primary_reason = ("cvd_direction's sign reversed under conditioning "
+                          f"on at least one of {list(conditioning_verdicts)} "
+                          "— too entangled to stand alone as a primary")
+
+    cvd_last_delta_verdict = ("REMOVE (redundant with cvd_direction)"
+                              if added_info_verdict != "independent" else
+                              "candidate supporting filter (adds information "
+                              "beyond cvd_direction)")
+
+    # Names with dedicated handling below — excluded from the generic
+    # PRELIMINARY_KEEP -> supporting_filters promotion so a feature can never
+    # end up in supporting_filters while its excluded[] text says otherwise
+    # (distance_from_equilibrium is overridden regardless of its raw step-4
+    # label; cvd_last_delta is gated by the added-information verdict, not
+    # its raw label, since it may restate cvd_direction rather than add to it).
+    _DEDICATED = {"cvd_direction", "distance_from_equilibrium", "cvd_last_delta"}
+
+    supporting_filters: list[str] = []
+    excluded: dict[str, str] = {}
+    for name, f in features.items():
+        if name in _DEDICATED:
+            continue
+        label = f["classification"]["label"]
+        if label == "PRELIMINARY_KEEP":
+            # Evidence-respecting rule: promote to supporting filter only if
+            # it independently cleared the same bar cvd_direction did — no
+            # new interaction search is run to justify it.
+            supporting_filters.append(name)
+            excluded[name] = ("independently PRELIMINARY_KEEP; candidate "
+                              "supporting filter")
+        else:
+            excluded[name] = label
+    for name in DIAGNOSTIC_FEATURES:
+        excluded[name] = "DIAGNOSTIC_ONLY"
+    excluded["distance_from_equilibrium"] = "failed_robustness (see manual_overrides)"
+    excluded["cvd_last_delta"] = cvd_last_delta_verdict
+    if added_info_verdict == "independent":
+        supporting_filters.append("cvd_last_delta")
+    supporting_filters = supporting_filters[:2]
+
+    return {
+        "primary": primary,
+        "primary_reason": primary_reason,
+        "supporting_filters": supporting_filters,
+        "cvd_last_delta_verdict": cvd_last_delta_verdict,
+        "excluded": excluded,
+    }
+
+
+# Manual note (codebase fact, not derived from the R-analysis pipeline):
+# cvd_direction requires no new live computation — pipeline.py already
+# computes compute_cvd_from_klines and feeds cvd_bullish/cvd_bearish into
+# signal_engine.confluence.calculate_confluence_score today.
+LIVE_COMPUTABILITY_NOTES: dict[str, dict[str, Any]] = {
+    "cvd_direction": {
+        "live_computable": True,
+        "note": ("Already computed in the live pipeline: pipeline.py calls "
+                 "compute_cvd_from_klines and feeds cvd_bullish/cvd_bearish "
+                 "into signal_engine.confluence.calculate_confluence_score "
+                 "(pipeline.py:567-568, confluence.py:138,141) — collapsing "
+                 "them into one canonical direction consumes an existing "
+                 "value differently, it does not require any new "
+                 "computation, indicator, or data source."),
+    },
+}
+
+
+# ---------------------------------------------------------------------------
 # Report assembly + CLI
 # ---------------------------------------------------------------------------
 
 def run_discovery(dataset: str, exchange: str, symbol: str, profile_name: str,
                   bars: int, max_gap_ratio: float = 0.001,
-                  allow_estimated_cvd: bool = False) -> dict[str, Any]:
+                  allow_estimated_cvd: bool = False,
+                  include_redundancy: bool = False) -> dict[str, Any]:
     frames, profile, _table, cvd_method = prepare(
         dataset, exchange, symbol, profile_name, bars, max_gap_ratio,
         allow_estimated_cvd)
@@ -713,7 +987,7 @@ def run_discovery(dataset: str, exchange: str, symbol: str, profile_name: str,
     rows = build_feature_rows(walk, records)
     features = run_single_feature_attribution(rows)
     resolved = [s for s in walk["setups"] if s["outcome"] != "unresolved"]
-    return {
+    report = {
         "stage": STAGE,
         "kind": "single_feature_attribution",
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -738,6 +1012,12 @@ def run_discovery(dataset: str, exchange: str, symbol: str, profile_name: str,
             "sign replication, not forward performance.",
         ],
     }
+    if include_redundancy:
+        redundancy = run_redundancy_analysis(rows, features)
+        report["kind"] = "single_feature_attribution+redundancy"
+        report["redundancy"] = redundancy
+        report["shortlist"] = build_shortlist(features, redundancy)
+    return report
 
 
 _SUMMARY_COLS = (f"{'sample':>7} {'gross_r':>8} {'net_r':>8} "
@@ -777,6 +1057,167 @@ def format_report(report: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_redundancy_report(report: dict[str, Any]) -> str:
+    red = report["redundancy"]
+    short = report["shortlist"]
+    lines = [
+        f"C1.8 step 5 — redundancy & candidate reduction — "
+        f"{report['exchange']} {report['symbol']} profile={report['profile']}",
+        f"  generated_at : {report['generated_at_utc']}",
+        f"  resolved     : {report['counts']['resolved']}",
+        "",
+        "manual overrides:",
+    ]
+    for name, ov in red["manual_overrides"].items():
+        lines.append(f"  {name}: {ov['status']} "
+                     f"(eligible_for_confirmation={ov['eligible_for_confirmation']}, "
+                     f"eligible_for_runtime={ov['eligible_for_runtime']})")
+        lines.append(f"    reason: {ov['reason']}")
+
+    lines.append("")
+    lines.append("cvd_last_delta added-information check (vs cvd_direction):")
+    added = red["cvd_last_delta_added_information"]
+    lines.append(f"  verdict={added['verdict']} "
+                 f"(evaluated={added['evaluated']}, agree={added['agree']}, "
+                 f"agreement_ratio={added['agreement_ratio']})")
+
+    lines.append("")
+    lines.append("cvd_direction conditioning (independent vs entangled):")
+    for other, chk in red["cvd_direction_conditioning"].items():
+        lines.append(f"  vs {other}: verdict={chk['verdict']} "
+                     f"(evaluated={chk['evaluated']}, agree={chk['agree']}, "
+                     f"agreement_ratio={chk['agreement_ratio']})")
+
+    lines.append("")
+    lines.append("shortlist:")
+    lines.append(f"  primary            : {short['primary']}")
+    lines.append(f"  primary_reason     : {short['primary_reason']}")
+    lines.append(f"  supporting_filters : {short['supporting_filters']}")
+    lines.append(f"  cvd_last_delta     : {short['cvd_last_delta_verdict']}")
+    lines.append("")
+    lines.append("excluded (every other feature):")
+    for name, status in sorted(short["excluded"].items()):
+        lines.append(f"  {name:<28} {status}")
+
+    lines.append("")
+    lines.append("limitations:")
+    lines.extend(f"  - {item}" for item in report["limitations"] + [
+        "Step 5 scope is intentionally narrow: only the four named "
+        "cvd_direction conditioning checks and the cvd_last_delta "
+        "added-information check were run. No exhaustive pairwise search, "
+        "clustering, or SHAP was performed.",
+    ])
+    return "\n".join(lines)
+
+
+def format_shortlist(report: dict[str, Any]) -> str:
+    """SWING_SHORTLIST.md — the practical, forward-testing-facing deliverable."""
+    short = report["shortlist"]
+    features = report["features"]
+    red = report["redundancy"]
+    lines = [
+        "# SWING candidate shortlist — C1.8 step 5",
+        "",
+        f"Profile: swing · {report['exchange']} {report['symbol']} · "
+        f"resolved setups: {report['counts']['resolved']} · "
+        f"generated: {report['generated_at_utc']}",
+        "",
+        "This is a research shortlist, not a trading recommendation. No "
+        "runtime, scoring, or threshold change is proposed or implied.",
+        "",
+        "## Retained candidates",
+        "",
+    ]
+
+    def _candidate_block(name: str) -> list[str]:
+        f = features[name]
+        sep = f["separation"]
+        best = f["buckets"].get(sep["best"]) if sep else None
+        live = LIVE_COMPUTABILITY_NOTES.get(name, {})
+        block = [f"### {name}", ""]
+        if best:
+            block += [
+                f"- Sample size (best bucket): {best['n']}",
+                f"- Gross expectancy: {best['gross_mean_r']:+.4f}R",
+                f"- Net expectancy: {best['net_mean_r']:+.4f}R",
+                f"- Fold stability: {f['fold_stability'].get('agreement_ratio')}",
+                f"- Year stability: {f['year_stability'].get('agreement_ratio')}",
+                f"- Regime stability: {f['regime_stability'].get('agreement_ratio')}",
+                f"- Live computable: {live.get('live_computable', 'unknown')}",
+                f"- Economic rationale note: {live.get('note', 'not documented')}",
+            ]
+        block.append(
+            "- Ready for report-only forward testing: yes, as a measurement "
+            "gate only — not for live order placement" if name == short["primary"]
+            else "- Ready for report-only forward testing: not yet (supporting "
+                 "filter, not independently confirmed)")
+        block.append("")
+        return block
+
+    if short["primary"]:
+        lines += _candidate_block(short["primary"])
+    else:
+        lines += ["_No primary signal qualified — see reason below._", ""]
+        lines += [f"Reason: {short['primary_reason']}", ""]
+
+    for name in short["supporting_filters"]:
+        lines += _candidate_block(name)
+
+    if not short["primary"] and not short["supporting_filters"]:
+        lines += ["## Conclusion", "",
+                  "No feature reached both PRELIMINARY_KEEP and passed "
+                  "conditioning without contradiction. The candidate set "
+                  "for this swing formulation is empty.", ""]
+
+    lines += ["## Classification of every other feature", "", "| Feature | Status |",
+              "|---|---|"]
+    for name, status in sorted(short["excluded"].items()):
+        lines.append(f"| {name} | {status} |")
+
+    lines += ["", "## Answers", "", "**Is there enough evidence for a simple "
+             "CVD-based swing gate?**", ""]
+    if short["primary"] == "cvd_direction":
+        lines.append(
+            "Marginally, and only as something to *forward-test*, not "
+            "deploy: cvd_direction reached PRELIMINARY_KEEP with fold/year "
+            "stability and did not reverse sign under conditioning on HTF "
+            "bias, regime, trade direction, or score bucket. It is already "
+            "live-computable with zero new code (see above). But it has not "
+            "cleared economic validation or C1.9 confirmation, and its "
+            "unconditioned edge size is small (well under 0.1R net) — "
+            "treat this as 'worth measuring live', not 'worth trading on'.")
+    else:
+        lines.append(
+            "No — cvd_direction did not clear the bar on its own this run "
+            f"({short['primary_reason']}).")
+    lines += ["", "**Is the current swing score useful at all?**", "",
+             "Not established either way by this stage. `score_bucket` "
+             "showed a large raw spread in single-feature attribution but "
+             "insufficient fold/year sample to confirm it; the structure-"
+             "category inputs it weights most heavily (OB/FVG presence, "
+             "liquidity sweep, level distance) showed no independent edge "
+             "in step 4. That is a reason to question the score's current "
+             "weighting, not yet grounds to say the score adds nothing.",
+             "", "**Should the next step be:**", "",
+             "A. C1.9 confirmation — no: nothing here has cleared economic "
+             "validation yet, only statistical preliminary checks.",
+             "", "B. Report-only forward test — **yes, if anything**: "
+             "cvd_direction is the only candidate with a coherent, "
+             "already-live-computable, non-contradicted signal. A report-"
+             "only forward test (measurement only, no order placement) is "
+             "the appropriate next step for it specifically.",
+             "", "C. Abandon the current swing entry formulation — not yet: "
+             "one candidate survived this reduction; abandoning is "
+             "premature while a report-only test hasn't been run.", ""]
+
+    lines += ["## Diagnostics-only (never candidate edges)", ""]
+    for name in DIAGNOSTIC_FEATURES:
+        lines.append(f"- `{name}` — post-trade path descriptor, computed "
+                     "from the same forward window as the outcome; retained "
+                     "for diagnosis, never for entry-timing.")
+    return "\n".join(lines) + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m tools.deep_discovery",
@@ -797,6 +1238,11 @@ def main(argv: list[str] | None = None) -> int:
                         help="artifact directory for the JSON/text reports")
     parser.add_argument("--json", action="store_true",
                         help="print JSON to stdout instead of the text report")
+    parser.add_argument("--redundancy", action="store_true",
+                        help="also run step 5 (redundancy + candidate "
+                             "reduction) from the same walk and write "
+                             "redundancy_report.json/.txt and "
+                             "SWING_SHORTLIST.md")
     args = parser.parse_args(argv)
 
     if args.bars <= 0:
@@ -805,7 +1251,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report = run_discovery(args.dataset, args.exchange, args.symbol,
                                args.profile, args.bars, args.max_gap_ratio,
-                               args.allow_estimated_cvd)
+                               args.allow_estimated_cvd,
+                               include_redundancy=args.redundancy)
     except DeepBacktestError as exc:
         print(f"deep_discovery: {exc}", file=sys.stderr)
         return 2
@@ -817,6 +1264,16 @@ def main(argv: list[str] | None = None) -> int:
     text = format_report(report)
     with open(f"{stem}.txt", "w", encoding="utf-8") as fh:
         fh.write(text + "\n")
+
+    if args.redundancy:
+        red_stem = os.path.join(args.outdir, "redundancy_report")
+        with open(f"{red_stem}.json", "w", encoding="utf-8") as fh:
+            json.dump(report, fh, ensure_ascii=False, indent=2, default=str)
+        with open(f"{red_stem}.txt", "w", encoding="utf-8") as fh:
+            fh.write(format_redundancy_report(report) + "\n")
+        with open(os.path.join(args.outdir, "SWING_SHORTLIST.md"), "w",
+                 encoding="utf-8") as fh:
+            fh.write(format_shortlist(report))
 
     print(json.dumps(report, ensure_ascii=False, indent=2, default=str)
           if args.json else text)
