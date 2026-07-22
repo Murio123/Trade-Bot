@@ -121,16 +121,42 @@ def test_evaluate_h1_zero_eligible_before_rr_is_insufficient_evidence():
     assert h1["verdict"] == "INSUFFICIENT_EVIDENCE_DUE_TO_ZERO_COVERAGE"
 
 
-def test_evaluate_h1_rr_gate_reached_and_failed_is_reject_frozen_spec():
+def test_evaluate_h1_raises_on_nonzero_validation_coverage():
+    # Regression: evaluate_h1's two-label contract only covers zero
+    # validation-region coverage. A taken trade inside the validation
+    # window must raise, not silently route to REJECT_FROZEN_SPECIFICATION
+    # (the original bug: summary["n"] was folded into the same
+    # eligible_before_rr counter that triggers REJECT_FROZEN_SPECIFICATION,
+    # so ANY taken trade — success or not — was mislabeled as a rejection).
     records = ([_rec(i, eligible=False, rejection_reason="regime_not_trend")
-               for i in range(15)]
-              + [_rec(15 + j, eligible=False, rejection_reason="rr_below_floor")
-                 for j in range(5)])
+               for i in range(13)]
+              + [_rec(13 + j, eligible=True, net_r=1.0) for j in range(5)])
     wf = deep_backtest.WFConfig(train_bars=10, val_bars=5, purge_bars=2,
                                embargo_bars=1, holdout_bars=0, min_folds=1)
     folds = deep_backtest.fold_windows(0, 20, wf)
+    with pytest.raises(ValueError, match="does not define a verdict"):
+        swf.evaluate_h1(records, folds, hold_bars=2)
+
+
+def test_evaluate_h1_rr_gate_reached_and_failed_is_reject_frozen_spec():
+    # fold_windows(0, 20, wf) below produces exactly one fold with
+    # val=[13, 18) — place the rr_below_floor records precisely inside that
+    # validation window so the (now validation-only) pooled count is exact;
+    # records outside [13, 18), including other rr_below_floor rejections,
+    # must NOT be counted (they'd fall in train/purge/embargo, never
+    # scored).
+    records = ([_rec(i, eligible=False, rejection_reason="regime_not_trend")
+               for i in range(13)]
+              + [_rec(13 + j, eligible=False, rejection_reason="rr_below_floor")
+                 for j in range(5)]
+              + [_rec(18 + j, eligible=False, rejection_reason="rr_below_floor")
+                 for j in range(2)])  # idx 18-19: outside the val window
+    wf = deep_backtest.WFConfig(train_bars=10, val_bars=5, purge_bars=2,
+                               embargo_bars=1, holdout_bars=0, min_folds=1)
+    folds = deep_backtest.fold_windows(0, 20, wf)
+    assert len(folds) == 1 and folds[0].val_lo == 13 and folds[0].val_hi == 18
     h1 = swf.evaluate_h1(records, folds, hold_bars=2)
-    assert h1["eligible_before_rr_filter"] == 5
+    assert h1["eligible_before_rr_filter"] == 5  # only the in-window ones
     assert h1["verdict"] == "REJECT_FROZEN_SPECIFICATION"
 
 
@@ -302,6 +328,40 @@ def test_module_never_monkeypatches_deep_backtest():
     import re
     assert "setattr(deep_backtest" not in WF_SOURCE
     assert not re.search(r"deep_backtest\.\w+\s*=(?!=)", WF_SOURCE)
+
+
+def test_evaluate_h2_pooled_stats_exclude_records_outside_validation_windows():
+    # Regression: pooled/baseline/random-distribution figures must be built
+    # ONLY from the union of fold validation windows, never the full input
+    # lists (which span the sealed holdout and non-validation train-only
+    # regions too). fold_windows(0, 20, wf) below produces one fold with
+    # val=[13, 18); records outside that window carry a wildly different
+    # net_r (-100.0) that would massively skew pooled stats if leaked in.
+    import pandas as pd
+    in_window = [_rec(13 + j, net_r=1.0, gross_r=1.1) for j in range(5)]
+    outside_window = ([_rec(i, net_r=-100.0, gross_r=-99.9) for i in range(13)]
+                      + [_rec(18 + j, net_r=-100.0, gross_r=-99.9)
+                         for j in range(2)])
+    records = in_window + outside_window
+    baseline_setups = [{"idx": r["idx"], "r": r["net_r"], "outcome": "win"}
+                      for r in records]
+    regime_records = records  # same schema, reused as its own regime pool
+
+    wf = deep_backtest.WFConfig(train_bars=10, val_bars=5, purge_bars=2,
+                               embargo_bars=1, holdout_bars=0, min_folds=1)
+    folds = deep_backtest.fold_windows(0, 20, wf)
+    assert len(folds) == 1 and folds[0].val_lo == 13 and folds[0].val_hi == 18
+
+    entry_df = pd.DataFrame({"low": [90.0] * 30, "high": [110.0] * 30,
+                             "close": [100.0] * 30})
+    h2 = swf.evaluate_h2(records, regime_records, baseline_setups, entry_df,
+                        hold_bars=2, cost_pct=0.001, folds=folds)
+
+    assert h2["pooled_summary"]["n"] == 5
+    assert h2["pooled_summary"]["net_expectancy_r"] == pytest.approx(1.0)
+    assert h2["baselines"]["A_current_swing_baseline"]["pooled_net_expectancy_r"] \
+        == pytest.approx(1.0)
+    assert h2["baselines"]["C_regime_direction"]["pooled_summary"]["n"] == 5
 
 
 # ---------------------------------------------------------------------------

@@ -213,7 +213,21 @@ def matched_coverage_random_baseline(pool_records: list[dict[str, Any]],
 
 def evaluate_h1(records: list[dict[str, Any]], folds, hold_bars: int
                ) -> dict[str, Any]:
-    summary = summarize(records)
+    """Pooled figures are built from the UNION of fold validation windows
+    only (never the full `records` list, which spans the sealed holdout and
+    non-validation train-only regions too) — fold_windows() already
+    subtracts holdout_bars from its region, so concatenating every fold's
+    val partition can never include a holdout bar."""
+    per_fold = []
+    all_val: list[dict[str, Any]] = []
+    for f in folds:
+        _, val = partition_setups(records, f, hold_bars)
+        s = summarize(val)
+        per_fold.append({"fold": f.index, "val_lo": f.val_lo, "val_hi": f.val_hi,
+                         "n_considered": len(val), **s})
+        all_val.extend(val)
+
+    summary = summarize(all_val)
     rc = summary["rejection_counts"]
     # Bars that reached the RR gate: passed regime/htf_bias/volatility/
     # timing/structure/reward-headroom, then were tested against RR>=1.5
@@ -221,27 +235,38 @@ def evaluate_h1(records: list[dict[str, Any]], folds, hold_bars: int
     # (cost_r_exceeds_ceiling), or passed everything (taken).
     eligible_before_rr = (rc.get("rr_below_floor", 0)
                          + rc.get("cost_r_exceeds_ceiling", 0) + summary["n"])
+    rr_gate_reached = (rc.get("rr_below_floor", 0) > 0
+                      or rc.get("cost_r_exceeds_ceiling", 0) > 0)
 
-    per_fold = []
-    for f in folds:
-        _, val = partition_setups(records, f, hold_bars)
-        s = summarize(val)
-        per_fold.append({"fold": f.index, "val_lo": f.val_lo, "val_hi": f.val_hi,
-                         "n_considered": len(val), **s})
+    if summary["n"] > 0:
+        # This stage's two-label contract presumes zero validation-region
+        # coverage (per the C2.2c spec: "because H1 has zero pooled trades
+        # ... classify as one of [these two]"). Nonzero coverage is outside
+        # that contract — never observed on real data (0 taken pooled and
+        # in every fold, confirmed in C2.2b and this stage's own real run)
+        # — so fail loudly rather than silently mislabel a result the spec
+        # never anticipated.
+        raise ValueError(
+            f"evaluate_h1's two-label classification only covers zero "
+            f"validation-region coverage, but {summary['n']} trade(s) were "
+            f"taken in validation folds; C2.2c's contract does not define "
+            f"a verdict for nonzero H1 coverage")
 
-    if eligible_before_rr > 0:
+    if rr_gate_reached:
         verdict = "REJECT_FROZEN_SPECIFICATION"
-        reason = (f"{eligible_before_rr} bars reached the RR gate (passed "
-                 "regime/htf_bias/volatility/pullback-timing/structure/"
-                 "reward-headroom checks) and 100% failed the frozen "
-                 "RR>=1.5 floor or the cost ceiling; the specification was "
-                 "genuinely exercised at its final gates and never "
-                 "survives on this dataset, not merely absent from it.")
+        reason = (f"{eligible_before_rr} bars in validation folds reached "
+                 "the RR gate (passed regime/htf_bias/volatility/pullback-"
+                 "timing/structure/reward-headroom checks) and 100% failed "
+                 "the frozen RR>=1.5 floor or the cost ceiling; the "
+                 "specification was genuinely exercised at its final gates "
+                 "and never survives on this dataset, not merely absent "
+                 "from it.")
     else:
         verdict = "INSUFFICIENT_EVIDENCE_DUE_TO_ZERO_COVERAGE"
-        reason = ("No bar reached the RR gate at all under the frozen "
-                 "specification; earlier gates already eliminated every "
-                 "candidate, so the RR floor itself was never tested.")
+        reason = ("No bar in any validation fold reached the RR gate at "
+                 "all under the frozen specification; earlier gates "
+                 "already eliminated every candidate, so the RR floor "
+                 "itself was never tested.")
 
     return {
         "considered": summary["considered"],
@@ -260,10 +285,16 @@ def evaluate_h2(records: list[dict[str, Any]],
                regime_records: list[dict[str, Any]],
                baseline_setups: list[dict[str, Any]], entry_df, hold_bars: int,
                cost_pct: float, folds) -> dict[str, Any]:
-    pooled = summarize(records)
-    regime_pooled = summarize(regime_records)
-
+    """Every pooled/baseline/distribution figure below is built from the
+    UNION of fold validation windows only (never the full input lists,
+    which span the sealed holdout and non-validation train-only regions
+    too) — fold_windows() already subtracts holdout_bars from its region,
+    so concatenating every fold's val partition can never include a
+    holdout bar."""
     per_fold, baseline_per_fold, regime_per_fold = [], [], []
+    all_val: list[dict[str, Any]] = []
+    all_baseline_val: list[dict[str, Any]] = []
+    all_regime_val: list[dict[str, Any]] = []
     for f in folds:
         _, val = partition_setups(records, f, hold_bars)
         s = summarize(val)
@@ -271,35 +302,40 @@ def evaluate_h2(records: list[dict[str, Any]],
                          "train_hi": f.train_hi, "val_lo": f.val_lo,
                          "val_hi": f.val_hi, "purge_bars": f.purge_bars,
                          "embargo_bars": f.embargo_bars, **s})
+        all_val.extend(val)
 
         _, bval = partition_setups(baseline_setups, f, hold_bars)
         b_net = (round(float(np.mean([r["r"] for r in bval])), 4)
                 if bval else None)
         baseline_per_fold.append({"fold": f.index, "n": len(bval),
                                   "net_expectancy_r": b_net})
+        all_baseline_val.extend(bval)
 
         _, rval = partition_setups(regime_records, f, hold_bars)
         regime_per_fold.append({"fold": f.index, **summarize(rval)})
+        all_regime_val.extend(rval)
 
-    yearly = year_stats(records)
+    pooled = summarize(all_val)
+    regime_pooled = summarize(all_regime_val)
+
+    yearly = year_stats(all_val)
     year_ok, year_detail = year_independence_check(yearly)
     fold_ratio, n_confident_folds = fold_positive_ratio(per_fold)
     dominance_ok, dominance_detail = single_fold_dominance_ok(per_fold)
 
-    random_draws = random_direction_distribution(records, entry_df, hold_bars,
+    random_draws = random_direction_distribution(all_val, entry_df, hold_bars,
                                                  cost_pct)
     random_p95 = float(np.percentile(random_draws, 95)) if random_draws else None
     random_rank = (percentile_rank(pooled["net_expectancy_r"], random_draws)
                   if pooled["net_expectancy_r"] is not None else None)
 
-    matched_draws = matched_coverage_random_baseline(regime_records, pooled["n"])
+    matched_draws = matched_coverage_random_baseline(all_regime_val, pooled["n"])
     matched_p95 = float(np.percentile(matched_draws, 95)) if matched_draws else None
     matched_rank = (percentile_rank(pooled["net_expectancy_r"], matched_draws)
                    if pooled["net_expectancy_r"] is not None else None)
 
-    baseline_resolved = [s for s in baseline_setups]
-    baseline_net = (round(float(np.mean([r["r"] for r in baseline_resolved])), 4)
-                   if baseline_resolved else None)
+    baseline_net = (round(float(np.mean([r["r"] for r in all_baseline_val])), 4)
+                   if all_baseline_val else None)
 
     n_eligible_total = pooled["n"] + pooled["unresolved"]
     unresolved_fraction = (pooled["unresolved"] / n_eligible_total
