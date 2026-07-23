@@ -145,7 +145,6 @@ def run(dataset: str, exchange: str, symbol: str, bars: int = BARS,
     pooled_pred: list[float] = []
     pooled_baselines: dict[str, list[float]] = {"persistence": [], "rolling_mean_60": [],
                                                 "train_mean": []}
-    registered_models: list[ModelMetadata] = []
 
     for fold in folds:
         train_rows, val_rows = partition_rows(rows, fold, VOLATILITY_HORIZON_BARS)
@@ -161,7 +160,7 @@ def run(dataset: str, exchange: str, symbol: str, bars: int = BARS,
         model = RidgeForecastModel(identity)
         model.prepare(train_df, feature_names, "label")
         model.train()
-        registered_models.append(model.metadata())
+        # per-fold model metadata already captured in fold_reports below
 
         val_pred = model.predict(val_df) if len(val_df) else np.array([])
         baselines = (_fold_baselines(train_df["label"], len(val_df))

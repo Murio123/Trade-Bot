@@ -64,12 +64,34 @@ def _design_matrix(df: pd.DataFrame, feature_names: list[str]) -> pd.DataFrame:
     return pd.concat(parts, axis=1)
 
 
-def _drop_missing(design: pd.DataFrame, label: pd.Series
-                  ) -> tuple[pd.DataFrame, pd.Series]:
-    """C4.1 §6: rows with any missing required feature are EXCLUDED, never
-    imputed."""
-    mask = design.notna().all(axis=1) & label.notna()
-    return design[mask], label[mask]
+def _raw_missing_mask(df: pd.DataFrame, feature_names: list[str]) -> pd.Series:
+    """True where a row is COMPLETE across every raw feature column.
+
+    Must run on the RAW columns, before one-hot encoding: a missing/None
+    categorical value compares False against every frozen level
+    (`_one_hot`'s `df[column] == level`), so `design.notna()` alone can
+    never detect it — it would otherwise silently become an all-zero
+    one-hot row (indistinguishable from a genuinely unseen category)
+    instead of being excluded per C4.1 §6's "excluded, never imputed"
+    policy."""
+    mask = pd.Series(True, index=df.index)
+    for name in feature_names:
+        mask &= df[name].notna()
+    return mask
+
+
+def _drop_missing(df: pd.DataFrame, design: pd.DataFrame, label: pd.Series,
+                  feature_names: list[str]
+                  ) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series]:
+    """C4.1 §6: rows with any missing required feature (categorical or
+    numeric) are EXCLUDED, never imputed. Returns (df, design, label) all
+    re-indexed 0..n-1 in lockstep, so any later positional (`.iloc`) split
+    — e.g. the alpha-selection inner split — stays aligned across all
+    three."""
+    mask = (_raw_missing_mask(df, feature_names) & design.notna().all(axis=1)
+           & label.notna())
+    return (df[mask].reset_index(drop=True), design[mask].reset_index(drop=True),
+           label[mask].reset_index(drop=True))
 
 
 def _ridge_fit(x: np.ndarray, y: np.ndarray, alpha: float
@@ -157,7 +179,7 @@ class RidgeForecastModel(ForecastModel):
                 "train()")
         design = _design_matrix(df, self._feature_names)
         label = df[self._label_col]
-        design, label = _drop_missing(design, label)
+        df, design, label = _drop_missing(df, design, label, self._feature_names)
         if len(design) == 0:
             raise RidgeTrainingError(
                 "every train row was excluded by the missing-value policy "

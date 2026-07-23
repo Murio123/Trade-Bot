@@ -155,6 +155,25 @@ def test_rows_with_missing_features_are_excluded_not_imputed():
     assert model._scaler_mean[x1_col_idx] == pytest.approx(expected_mean)
 
 
+def test_rows_with_missing_categorical_are_excluded_not_silently_zeroed():
+    """Regression test: a missing/None categorical value must be EXCLUDED
+    from training like any other missing feature — not silently one-hot
+    encoded as all-zero (which would be indistinguishable from a
+    genuinely unseen category and violates the C4.1 §6 "excluded, never
+    imputed" policy). Caught by Codex audit of commit f806c0d."""
+    df = _synthetic_df(seed=10)
+    df.loc[df.index[:15], "htf_bias"] = None
+    model = RidgeForecastModel(_identity())
+    model.prepare(df, FEATURES)
+    model.train()
+    # scaler mean for a numeric column must reflect only the 185
+    # rows that survived exclusion, not all 200.
+    expected_mean = df.loc[df["htf_bias"].notna(), "x1"].mean()
+    x1_col_idx = model._design_columns.index("x1")
+    assert model._scaler_mean[x1_col_idx] == pytest.approx(expected_mean)
+    assert model._train_df is not None  # sanity: prepare() still ran
+
+
 def test_unseen_categorical_level_at_predict_time_does_not_crash():
     df = _synthetic_df(seed=6)
     model = RidgeForecastModel(_identity())
