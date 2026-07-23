@@ -40,14 +40,13 @@ AI-Telegram-бот для торговых сигналов BTC/USDT (фьюче
 | Команда | Действие |
 |---|---|
 | `/signal`, `/intraday` | Свинг / интрадей сигнал по запросу |
-| `/deep` | Институциональный разбор 1D/12H/4H со взвешенным score /100 |
 | `/reversal` | Дно/пик: истощение тренда сразу по 1H/4H/12H/1D (≥2 ТФ = подтверждение) |
 | `/levels` | Ближайшие S/R, OB/FVG с HTF, Volume Profile, ликвидации, EMA, вывод |
-| `/funding`, `/fear` | Деривативы и индекс страха/жадности |
+| `/funding` | Деривативы: funding rate, long/short ratio |
+| `/market` | Цена, funding, L/S, open interest, Fear & Greed одним экраном |
 | `/journal` | Реальный винрейт и R по закрытым сделкам |
 | `/backtest [swing\|intraday]` | Перебор порогов на истории, NET (с комиссиями), проекция %/мес |
 | `/status`, `/testalert` | Здоровье бота и проверка канала уведомлений |
-| `/guide` | Встроенный гид по всем функциям |
 | `/ask <вопрос>` | Вопрос к Claude с рыночным контекстом (любой текст = /ask) |
 
 Интерфейс — кнопки (reply-клавиатура + inline-меню), появляются после `/start`.
@@ -78,11 +77,11 @@ analyzer/               binance, bybit, exchange (auto-failover 451→запас
 
 signal_engine/          htf_filter, confluence, conflict_resolver,
                         mtf_confidence, cooldown, daily_limiter,
-                        profiles (свинг/интрадей), quality_score (/100 для /deep)
+                        profiles (свинг/интрадей)
 
 bot/                    handlers (+гейткипер доступа), keyboards, formatting,
-                        alerts (DRY_RUN-aware), journal (лайфцикл), guide
-ai/                     claude (сигналы, /ask), swing_analysis (/deep нарратив)
+                        alerts (DRY_RUN-aware), journal (лайфцикл)
+ai/                     claude (сигналы, /ask)
 tests/                  pytest: каскад, лайфцикл сделок, анализаторы
 ```
 
