@@ -2,7 +2,7 @@
 
 NewsAPI free tier for headlines; a small keyword lexicon scores sentiment
 without external NLP dependencies. Also exposes the Fear & Greed index
-(alternative.me, no key) used by the /fear command.
+(alternative.me, no key), shown as one line in the /market command.
 """
 from __future__ import annotations
 

@@ -246,8 +246,8 @@ def test_legacy_outcome_without_realized_r_does_not_break():
 
 
 # --- Stage 14 Option B / Step 2.1: read-only latest_forecast ----------------
-# Helper ЧИТАЕТ последний сохранённый forecast (для /deep-объяснения), никогда
-# не пишет и не влияет на decision-path. Проверяем фильтры, порядок и read-only.
+# Helper ЧИТАЕТ последний сохранённый forecast, никогда не пишет и не влияет
+# на decision-path. Проверяем фильтры, порядок и read-only.
 
 def _fc(symbol="BTCUSDT", analysis_type="SWING", close_h=4, **kw):
     base = {

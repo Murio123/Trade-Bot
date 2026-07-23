@@ -463,8 +463,8 @@ class Database:
                               analysis_type: str) -> Optional[dict[str, Any]]:
         """Newest saved forecast for a mode; read-only. None when none exist.
 
-        Used to *explain* the engine's already-persisted decision (e.g. /deep):
-        pure SELECT, never writes, never influences a trading decision. JSONB
+        Used to *explain* the engine's already-persisted decision: pure
+        SELECT, never writes, never influences a trading decision. JSONB
         fields are decoded via the same _row_to_signal path as other reads."""
         if not self.pool:
             return self._mem.latest_forecast(symbol, analysis_type)
