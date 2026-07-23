@@ -83,7 +83,6 @@ def format_signal(signal: dict[str, Any]) -> str:
         f"⏳ Удержание: ~{_fmt_duration(signal.get('hold_tp1_hours'))}–"
         f"{_fmt_duration(signal.get('hold_tp2_hours'))} (до TP1–TP2)",
         "",
-        f"📈 Confluence Score: {min(signal.get('score', 0), 10)}/10",
         f"• HTF Bias ({signal.get('htf_tf', '1d').upper()}): "
         f"{BIAS_LABEL.get(signal.get('htf_bias', 'neutral'))} (фильтр пройден)",
     ]
@@ -105,10 +104,6 @@ def format_signal(signal: dict[str, Any]) -> str:
         vol = sessions.get(best, {}).get("avg_range_pct")
         vol_str = f" (исторически +{vol}% волатильность)" if vol else ""
         lines.append(f"⏰ Лучшая сессия: {best}{vol_str}")
-
-    conf = signal.get("confidence")
-    if conf is not None:
-        lines.append(f"⚡ Уверенность ИИ: {int(round(conf * 100))}%")
 
     ai_text = signal.get("ai_text")
     if ai_text:
@@ -225,7 +220,7 @@ def format_reversal_alert(ctx: dict[str, Any], direction: str,
             f"🎯 План ({d}):",
             f"  Вход: {_fmt_price(plan['entry'])} (по рынку)",
             f"  🛑 Стоп: {_fmt_price(plan['stop'])} ({plan['risk_pct']}%)",
-            f"  🎯 TP1: {_fmt_price(plan['tp1'])} (R:R {plan['rr']})",
+            f"  🎯 TP1: {_fmt_price(plan['tp1'])}",
             f"  🎯 TP2: {_fmt_price(plan['tp2'])}",
         ]
 
@@ -702,15 +697,6 @@ def format_market(price: float | None, funding: dict[str, Any],
     return "\n".join(lines)
 
 
-def format_fear(fng: dict[str, Any]) -> str:
-    val = fng.get("value")
-    cls = fng.get("classification")
-    if val is None:
-        return "😶 Индекс страха/жадности недоступен."
-    emoji = "😱" if val < 25 else "😟" if val < 45 else "😐" if val < 55 else "🙂" if val < 75 else "🤑"
-    return f"{emoji} Индекс страха и жадности: {val}/100 ({cls})"
-
-
 def format_journal(stats: dict[str, Any], open_count: int = 0) -> str:
     total = stats.get("total", 0)
     lines = [
@@ -753,106 +739,6 @@ BLOCK_HINT = {
     "bearish": "Жду совпадения импульса с трендом вниз.",
     "neutral": "Жду формирования чёткого дневного тренда.",
 }
-
-
-DECISION_EMOJI = {
-    "STRONG BUY": "🟢🟢", "BUY": "🟢", "WEAK BUY": "🟢",
-    "NO TRADE": "⚪", "WEAK SELL": "🔴", "SELL": "🔴", "STRONG SELL": "🔴🔴",
-}
-
-SECTION_LABEL = {
-    "trend_alignment": "Тренд",
-    "market_structure": "Структура",
-    "liquidity": "Ликвидность",
-    "volume": "Объём",
-    "momentum": "Импульс",
-    "derivatives": "Деривативы",
-    "macro": "Макро",
-    "historical": "История",
-    "risk_profile": "R:R",
-    "execution": "Исполнение",
-}
-
-
-def format_deep(quality: dict[str, Any], ctx: dict[str, Any], ai_text: str) -> str:
-    decision = quality.get("decision", "NO TRADE")
-    overall = quality.get("overall", 0)
-    direction = quality.get("direction")
-    scores = quality.get("scores", {})
-    plan = quality.get("plan", {})
-    hist = ctx.get("historical", {})
-    vol = ctx.get("volatility", {})
-
-    lines = [
-        f"🏛 ГЛУБОКИЙ АНАЛИЗ {config.SYMBOL_DISPLAY} | 1D/12H/4H",
-        f"Цена: {_fmt_price(ctx.get('price'))}",
-        "",
-        f"{DECISION_EMOJI.get(decision, '')} Решение: {decision}",
-        f"📊 Trade Quality Score: {overall}/100",
-        "",
-        "Разбивка (взвешенная):",
-    ]
-    for item in quality.get("breakdown", []):
-        lines.append(f"• {item['label']}: {item['earned']}/{item['max']}")
-
-    if direction and decision != "NO TRADE":
-        lines += [
-            "",
-            f"🎯 План ({'ЛОНГ' if direction == 'long' else 'ШОРТ'}):",
-            f"Вход: {_fmt_price(plan.get('entry'))}",
-            f"🛑 Стоп: {_fmt_price(plan.get('stop'))} (за структурой)",
-            f"🎯 TP1: {_fmt_price(plan.get('tp1'))}",
-            f"🎯 TP2: {_fmt_price(plan.get('tp2'))}",
-            f"🎯 TP3: {_fmt_price(plan.get('tp3'))}",
-            f"R:R ≈ {plan.get('rr')} | макс. просадка {plan.get('max_drawdown_pct')}%",
-        ]
-
-    # For NO TRADE the full plan is hidden — still show the hypothetical R:R.
-    if decision == "NO TRADE" and direction and plan.get("rr") is not None:
-        lines += [
-            "",
-            f"ℹ️ Если бы вход ({'ЛОНГ' if direction == 'long' else 'ШОРТ'}): "
-            f"стоп {_fmt_price(plan.get('stop'))}, R:R ≈ {plan.get('rr')}",
-        ]
-
-    rev = ctx.get("reversal", {})
-    if rev.get("bullish_reversal") or rev.get("bearish_reversal"):
-        is_bull = rev.get("bullish_reversal")
-        factors = rev.get("factors_bull") if is_bull else rev.get("factors_bear")
-        strong = rev.get("bull_strong") if is_bull else rev.get("bear_strong")
-        lines += [
-            "",
-            f"🔄 Истощение тренда: {'возможное ДНО 🟢' if is_bull else 'возможный ПИК 🔴'}"
-            f"{' (сильное)' if strong else ''}",
-            "  • " + "\n  • ".join(factors),
-        ]
-
-    em = (vol.get("expected_move") or {}).get("7d", {})
-    lines += [
-        "",
-        f"📈 Волатильность: {vol.get('regime')}, ATR-перцентиль {vol.get('atr_percentile')}%",
-        f"Ожидаемое движение 7д: ±{em.get('pct')}%" if em else "",
-        f"🕰 Аналоги: {hist.get('matches', 0)} | "
-        f"в сторону сделки {_hist_dir_pct(hist, direction)}% | "
-        f"ср. {hist.get('avg_return')}% | conf {hist.get('confidence')}",
-    ]
-
-    if ai_text:
-        lines += ["", "— — —", ai_text]
-
-    if decision.startswith("WEAK"):
-        lines += ["", "⚠️ Слабый сетап — рассматривать осторожно, уменьшенным объёмом."]
-    elif decision == "NO TRADE":
-        lines += ["", "💡 Кэш — тоже позиция. Сделка не форсируется."]
-
-    return "\n".join(lines)
-
-
-def _hist_dir_pct(hist: dict[str, Any], direction: str | None) -> Any:
-    bp = hist.get("bullish_pct")
-    if bp is None:
-        return "н/д"
-    return round(bp if direction == "long" else 100 - bp, 1)
 
 
 def _ago(dt) -> str:
@@ -984,8 +870,6 @@ def format_blocked(result: dict[str, Any],
                    display_price: float | None = None) -> str:
     stage = result.get("blocked_at")
     bias = result.get("htf_bias", "neutral")
-    long_s = result.get("long_score")
-    short_s = result.get("short_score")
 
     lines = ["ℹ️ Нет активного сигнала"]
     lines.append(f"Причина: {BLOCK_REASON.get(stage, stage or 'нет данных')}")
@@ -998,138 +882,6 @@ def format_blocked(result: dict[str, Any],
 
     lines.append(f"HTF ({result.get('htf_tf', '1d').upper()}): {HTF_LINE.get(bias, bias)}")
 
-    if long_s is not None and short_s is not None:
-        lines.append(f"Score: лонг {long_s} / шорт {short_s}")
-
-    # Show which categories are active so it's clear what's missing.
-    cats = result.get("category_scores") or {}
-    active = {k: v for k, v in cats.items() if v > 0}
-    if active:
-        lines.append("Категории: " + ", ".join(
-            f"{CATEGORY_LABEL.get(k, k)} {v}" for k, v in active.items()))
-        if stage == "diversity":
-            from config import MIN_DIVERSE_CATEGORIES
-            lines.append(f"Сейчас {len(active)} категория(и), нужно ≥{MIN_DIVERSE_CATEGORIES} разных.")
-
     lines.append("")
     lines.append(BLOCK_HINT.get(bias, "Жду более сильного сетапа."))
-    return "\n".join(lines)
-
-
-CATEGORY_LABEL = {
-    "trend": "Тренд", "momentum": "Импульс", "volume": "Объём",
-    "structure": "Структура", "macro": "Макро",
-}
-
-
-# --- Stage 14 Option B / Step 1 -----------------------------------------------
-# Pure presentation for signal_engine.deep_renderer.render_deep output.
-# ЖЁСТКИЙ инвариант: только показ уже готовых значений из sections. Никаких
-# решений, вычислений, вывода LONG/SHORT/ENTER/WAIT/NO_TRADE — decision/bias
-# берутся из sections как есть. Отсутствующее -> «н/д». Не мутирует вход,
-# не импортирует БД/scheduler/pipeline/ai/risk.
-DEEP_DECISION_EMOJI = {"ENTER": "🟢", "WAIT": "🟡", "NO_TRADE": "⚪", "blocked": "🚫"}
-
-_MISSING = "н/д"
-
-
-def _deep_val(value: Any) -> str:
-    """Скаляр -> строка; None/пусто -> «н/д». Числа не переформатируем в цену."""
-    if value is None or value == "":
-        return _MISSING
-    if isinstance(value, float):
-        return f"{value:g}"
-    return str(value)
-
-
-def _deep_list(items: Any) -> list[str]:
-    """Нормализовать секцию-список в список строк (пустое -> [])."""
-    if not items:
-        return []
-    if isinstance(items, (list, tuple)):
-        return [str(x) for x in items]
-    return [str(items)]
-
-
-def _deep_kv(value: Any) -> str:
-    """Опциональный dict-контекст (volatility/bollinger/historical) в компактную
-    строку «ключ: значение», пропуская None. Не-dict -> _deep_val."""
-    if not value:
-        return _MISSING
-    if not isinstance(value, dict):
-        return _deep_val(value)
-    parts = [f"{k}: {_deep_val(v)}" for k, v in value.items() if v is not None]
-    return ", ".join(parts) if parts else _MISSING
-
-
-def format_deep_sections(sections: dict[str, Any]) -> str:
-    """Отрендерить render_deep-секции в Telegram-friendly текст /deep.
-
-    Только чтение sections: функция ничего не решает и не выводит направление —
-    decision/bias/scores/confidence уже посчитаны движком и лежат в sections.
-    """
-    decision = sections.get("decision") or _MISSING
-    bias = sections.get("bias") or _MISSING
-    emoji = DEEP_DECISION_EMOJI.get(sections.get("decision"), "")
-
-    conf = sections.get("confidence") or {}
-    scores = sections.get("scores") or {}
-    move = sections.get("expected_move") or {}
-    stop = sections.get("stop") or {}
-    targets = sections.get("targets") or {}
-    regime = sections.get("regime") or {}
-
-    lines: list[str] = [
-        f"🏛 ГЛУБОКИЙ РАЗБОР {config.SYMBOL_DISPLAY}",
-        f"{emoji} Решение: {decision}".strip(),
-        f"🧭 Смещение: {bias}",
-        f"🗂 Тип анализа: {_deep_val(sections.get('analysis_type'))}",
-        "",
-        f"📊 Уверенность: {_deep_val(conf.get('score'))}",
-        f"⚔️ Скоринг: LONG {_deep_val(scores.get('long'))} / "
-        f"SHORT {_deep_val(scores.get('short'))}",
-        "",
-        f"📈 Ожидаемый ход: {_deep_val(move.get('points'))} п · "
-        f"{_deep_val(move.get('percent'))}% · {_deep_val(move.get('atr'))} ATR",
-        f"🛑 Стоп: {_fmt_price(stop.get('stop_loss'))} "
-        f"(инвалидация {_fmt_price(stop.get('invalidation_level'))})",
-    ]
-
-    tp_levels = targets.get("levels") or []
-    tp1 = tp_levels[0] if len(tp_levels) > 0 else None
-    tp2 = tp_levels[1] if len(tp_levels) > 1 else None
-    lines.append(f"🎯 Цели: TP1 {_fmt_price(tp1)} · TP2 {_fmt_price(tp2)}")
-    lines.append(f"⚖️ R:R: {_deep_val(sections.get('risk_reward'))}")
-
-    # Режим/волатильность/Bollinger/история — опциональные обогащения.
-    lines += [
-        "",
-        f"🌡 Режим: {_deep_val(regime.get('market_regime'))} / "
-        f"волатильность {_deep_val(regime.get('volatility_regime'))}",
-        f"🌪 Волатильность: {_deep_kv(sections.get('volatility'))}",
-    ]
-    if sections.get("bollinger"):
-        lines.append(f"📉 Bollinger: {_deep_kv(sections.get('bollinger'))}")
-    if sections.get("historical_quality"):
-        lines.append(f"📚 История: {_deep_kv(sections.get('historical_quality'))}")
-
-    # Blocked-путь: показать гейт как есть (не решаем, лишь отображаем).
-    blocked_gate = sections.get("blocked_gate")
-    if blocked_gate:
-        lines += ["", f"🚫 Заблокировавший гейт: {_deep_val(blocked_gate)}"]
-
-    def _block(title: str, key: str) -> None:
-        vals = _deep_list(sections.get(key))
-        if vals:
-            lines.append("")
-            lines.append(title)
-            lines.extend(f"  • {v}" for v in vals)
-
-    _block("✅ За:", "supporting_factors")
-    _block("⚠️ Против:", "contradicting_factors")
-    _block("📋 Причины NO_TRADE:", "no_trade_reasons")
-    _block("🔧 Что должно измениться:", "what_must_change")
-    _block("❌ Инвалидация сетапа:", "what_invalidates")
-    _block("👀 За чем следить:", "what_to_watch")
-
     return "\n".join(lines)

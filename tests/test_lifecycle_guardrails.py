@@ -37,9 +37,8 @@ LIFECYCLE_TOKENS = (
 
 # Modules that COMPUTE the trading decision (status / bias / confidence / scores
 # / stop / TP / RR / gating / risk). Deliberately excludes the persistence
-# boundary (signal_engine.forecast_record) and the explanation layer
-# (signal_engine.deep_renderer), where lifecycle metadata may legitimately be
-# carried later — it just must not drive a decision.
+# boundary (signal_engine.forecast_record), where lifecycle metadata may
+# legitimately be carried later — it just must not drive a decision.
 DECISION_MODULES = (
     "pipeline",                      # run_cascade lives here
     "contracts.final_gate",

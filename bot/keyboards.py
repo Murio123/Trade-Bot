@@ -31,13 +31,10 @@ BTN_OLD_INTRADAY = "⚡ Интрадей"
 BTN_OLD_POSITION = "🌊 Позиция"
 BTN_OLD_REVERSAL = "🔄 Дно/Пик"
 BTN_OLD_LEVELS = "📐 Уровни"
-BTN_OLD_DEEP = "🏛 Глубокий анализ"
 BTN_OLD_MARKET = "💹 Рынок"
 BTN_OLD_JOURNAL = "📒 Журнал"
 BTN_OLD_STATUS = "🩺 Статус"
-BTN_GUIDE = "📖 Гид"
 BTN_FUNDING = "💸 Funding"
-BTN_FEAR = "😱 Fear & Greed"
 BTN_BACKTEST = "📈 Бэктест"
 BTN_ASK = "🧠 Спросить ИИ"
 BTN_HELP = "❓ Помощь"
@@ -55,12 +52,11 @@ SUBMENUS: dict[str, tuple[str, list[list[tuple[str, str]]]]] = {
     "analyze": ("📊 Новый анализ — выбери режим:", [
         [("⚡ Интрадей", "cmd:intraday"), ("📊 Свинг", "cmd:signal")],
         [("🌊 Позиционный", "cmd:position"), ("🔄 Разворот", "cmd:reversal")],
-        [("🏛 Глубокий анализ", "cmd:deep")],
         [(BTN_BACK, "menu:main")],
     ]),
     "market": ("📈 Рынок — что показать?", [
         [("📐 Ключевые уровни", "cmd:levels"), ("📊 Обзор рынка", "cmd:market")],
-        [("💸 Funding", "cmd:funding"), ("😱 Fear & Greed", "cmd:fear")],
+        [("💸 Funding", "cmd:funding")],
         [(BTN_BACK, "menu:main")],
     ]),
     "history": ("📒 История — что показать?", [
@@ -118,13 +114,10 @@ LABEL_TO_COMMAND.update({
     BTN_OLD_POSITION: "position",
     BTN_OLD_REVERSAL: "reversal",
     BTN_OLD_LEVELS: "levels",
-    BTN_OLD_DEEP: "deep",
     BTN_OLD_MARKET: "market",
     BTN_OLD_JOURNAL: "journal",
     BTN_OLD_STATUS: "status",
-    BTN_GUIDE: "guide",
     BTN_FUNDING: "funding",
-    BTN_FEAR: "fear",
     BTN_BACKTEST: "backtest",
     BTN_HELP: "help",
     BTN_ASK: "ask_prompt",

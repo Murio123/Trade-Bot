@@ -83,12 +83,12 @@ async def interpret_signal(signal: dict[str, Any]) -> dict[str, Any]:
     }
     if client is None:
         # Deterministic fallback: derive confidence from score + mtf modifier.
+        # No comment is fabricated here — an unlabeled restatement of the
+        # `reasons` list dressed up as AI commentary is exactly the kind of
+        # misleading UX this fallback used to produce (D1.2/D1.3 cleanup).
         base = (signal.get("score", 0) / 10.0)
         conf = max(0.0, min(1.0, base * signal.get("confidence_modifier", 1.0)))
-        return {
-            "confidence": round(conf, 2),
-            "comment": "; ".join(signal.get("reasons", [])[:3]) or "Confluence подтверждён.",
-        }
+        return {"confidence": round(conf, 2), "comment": ""}
     try:
         resp = await client.messages.create(
             model=config.ANTHROPIC_MODEL,
@@ -102,8 +102,9 @@ async def interpret_signal(signal: dict[str, Any]) -> dict[str, Any]:
         return {"confidence": round(conf, 2), "comment": data.get("comment", "")}
     except Exception as exc:  # noqa: BLE001
         log.warning("Claude interpret_signal failed: %s", exc)
+        # Same rule as the no-client path: never fabricate a comment.
         base = signal.get("score", 0) / 10.0
-        return {"confidence": round(base, 2), "comment": "; ".join(signal.get("reasons", [])[:3])}
+        return {"confidence": round(base, 2), "comment": ""}
 
 
 async def ask(question: str, market_context: dict[str, Any]) -> str:

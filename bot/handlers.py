@@ -1,6 +1,6 @@
 """Telegram command handlers.
 
-Commands: /signal /levels /funding /fear /backtest /ask /journal (+ /start /help).
+Commands: /signal /levels /funding /backtest /ask /journal (+ /start /help).
 Shared objects (Binance client, latest context cache) live in ``application.bot_data``.
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ from telegram.ext import ContextTypes
 import config
 from analyzer.news import get_fear_greed
 from ai import claude
-from bot import formatting, guide, journal, keyboards
+from bot import formatting, journal, keyboards
 from database import db
 from pipeline import gather_market_context, run_cascade
 
@@ -29,15 +29,13 @@ HELP_TEXT = (
     "🔍 Анализ:\n"
     "/reversal — дно/пик по 4 ТФ + план входа\n"
     "/levels — ключевые уровни + график\n"
-    "/deep — глубокий разбор со score /100\n"
     "/market — цена, funding, L/S, Fear&Greed\n\n"
     "📒 Учёт:\n"
     "/journal — винрейт и R по сделкам\n"
     "/setalert <цена> — алерт по уровню (/alerts — список, /delalert — удалить)\n"
     "/backtest [swing|intraday] — подбор порога по истории\n\n"
     "⚙️ Сервис:\n"
-    "/status — здоровье бота | /testalert — проверка уведомлений\n"
-    "/guide — 📖 подробный гид по всем функциям\n\n"
+    "/status — здоровье бота | /testalert — проверка уведомлений\n\n"
     "💬 Любой текст без команды — вопрос к ИИ с рыночным контекстом."
 )
 
@@ -158,26 +156,6 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         HELP_TEXT, reply_markup=keyboards.main_reply_keyboard()
     )
-
-
-async def guide_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text(
-        guide.INTRO, reply_markup=guide.menu_keyboard()
-    )
-
-
-async def guide_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle guide navigation (callback_data 'help:<topic>')."""
-    query = update.callback_query
-    if not query:
-        return
-    await query.answer()
-    key = (query.data or "").split(":", 1)[1] if ":" in (query.data or "") else "menu"
-    if key == "menu":
-        await query.edit_message_text(guide.INTRO, reply_markup=guide.menu_keyboard())
-    else:
-        await query.edit_message_text(guide.get_topic(key),
-                                      reply_markup=guide.back_keyboard())
 
 
 async def _run_signal(update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -329,11 +307,6 @@ async def market_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return d if isinstance(v, Exception) else v
     await update.effective_message.reply_text(formatting.format_market(
         _ok(price, None), _ok(funding, {}), _ok(ls, {}), _ok(oi, None), _ok(fng, {})))
-
-
-async def fear_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    fng = await get_fear_greed()
-    await update.effective_message.reply_text(formatting.format_fear(fng))
 
 
 async def journal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -561,63 +534,6 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text(formatting.format_status(s))
 
 
-# Поля решения, которые /deep только ОБЪЯСНЯЕТ — движок уже их посчитал и
-# сохранил. forecast_to_deep_input их лишь переносит, ничего не пересчитывая.
-_DEEP_PASSTHROUGH = (
-    "analysis_status", "candidate_direction", "final_bias",
-    "long_score", "short_score", "raw_confidence",
-    "expected_move_min_pct", "expected_move_max_pct",
-    "expected_move_points", "expected_move_percent", "expected_move_atr",
-    "stop_loss", "take_profit_levels", "risk_reward",
-    "no_trade_reasons", "blocked_gate",
-    "market_regime", "volatility_regime",
-    "strategy_version", "context_version", "entry_zone",
-)
-
-
-def forecast_to_deep_input(forecast: dict[str, Any]) -> dict[str, Any]:
-    """Сохранённая forecasts-строка -> вход для render_deep. Чистая функция:
-    ничего не решает и не выдумывает направление — только переносит уже
-    посчитанные поля. Синтезирует ТОЛЬКО совместимый ``status``, чтобы
-    render_deep не приписал ложный blocked_gate="unknown" (в строке нет ключа
-    ``status``, а его дефолт там — "blocked"). Вход не мутируется."""
-    deep: dict[str, Any] = {k: forecast.get(k) for k in _DEEP_PASSTHROUGH}
-
-    analysis_status = forecast.get("analysis_status")
-    blocked_gate = forecast.get("blocked_gate")
-    if analysis_status == "ENTER":
-        status = "alert"
-    elif analysis_status == "WAIT":
-        status = "journal"
-    elif analysis_status == "NO_TRADE":
-        status = "blocked" if blocked_gate else "ignored"
-    else:
-        status = "ignored"
-    deep["status"] = status
-    return deep
-
-
-async def deep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Объяснить ПОСЛЕДНИЙ сохранённый прогноз движка. /deep ничего не решает
-    и не пересчитывает: saved forecast — источник истины."""
-    from signal_engine.deep_renderer import render_deep
-    from signal_engine.profiles import get_profile
-
-    analysis_type = get_profile("swing")["analysis_type"]
-    forecast = await db.latest_forecast(symbol=config.SYMBOL,
-                                        analysis_type=analysis_type)
-    if forecast is None:
-        await update.effective_message.reply_text(
-            "📭 Пока нет сохранённого прогноза. Дождитесь ближайшего анализа."
-        )
-        return
-
-    sections = render_deep(forecast_to_deep_input(forecast))
-    await update.effective_message.reply_text(
-        formatting.format_deep_sections(sections)
-    )
-
-
 async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     question = " ".join(context.args) if context.args else ""
     if not question:
@@ -724,18 +640,15 @@ COMMAND_DISPATCH = {
     "signal": signal_cmd,
     "intraday": intraday_cmd,
     "position": position_cmd,
-    "deep": deep_cmd,
     "reversal": reversal_cmd,
     "levels": levels_cmd,
     "market": market_cmd,
     "funding": funding_cmd,
-    "fear": fear_cmd,
     "journal": journal_cmd,
     "alerts": alerts_cmd,
     "backtest": backtest_cmd,
     "status": status_cmd,
     "testalert": testalert_cmd,
-    "guide": guide_cmd,
     "help": help_cmd,
 }
 
@@ -746,14 +659,12 @@ BOT_COMMANDS = [
     ("position", "🌊 Позиционный (движения 2000-5000 пт)"),
     ("reversal", "🔄 Дно/пик по 4 ТФ"),
     ("levels", "📐 Ключевые уровни"),
-    ("deep", "🏛 Глубокий анализ /100"),
     ("market", "💹 Рынок: цена, funding, L/S, F&G"),
     ("journal", "📒 Статистика сделок"),
     ("setalert", "🔔 Поставить алерт по цене"),
     ("alerts", "📋 Мои ценовые алерты"),
     ("backtest", "📈 Подбор порога по истории"),
     ("status", "🩺 Статус бота"),
-    ("guide", "📖 Гид по функциям"),
     ("ask", "🧠 Вопрос к ИИ"),
     ("help", "❓ Все команды"),
 ]
@@ -787,12 +698,10 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("signal", signal_cmd))
     application.add_handler(CommandHandler("intraday", intraday_cmd))
     application.add_handler(CommandHandler("position", position_cmd))
-    application.add_handler(CommandHandler("deep", deep_cmd))
     application.add_handler(CommandHandler("reversal", reversal_cmd))
     application.add_handler(CommandHandler("levels", levels_cmd))
     application.add_handler(CommandHandler("market", market_cmd))
     application.add_handler(CommandHandler("funding", funding_cmd))
-    application.add_handler(CommandHandler("fear", fear_cmd))
     application.add_handler(CommandHandler("journal", journal_cmd))
     application.add_handler(CommandHandler("backtest", backtest_cmd))
     application.add_handler(CommandHandler("status", status_cmd))
@@ -800,11 +709,9 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("setalert", setalert_cmd))
     application.add_handler(CommandHandler("alerts", alerts_cmd))
     application.add_handler(CommandHandler("delalert", delalert_cmd))
-    application.add_handler(CommandHandler("guide", guide_cmd))
     application.add_handler(CommandHandler("ask", ask_cmd))
     application.add_handler(CallbackQueryHandler(button_callback, pattern=r"^cmd:"))
     application.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu:"))
-    application.add_handler(CallbackQueryHandler(guide_callback, pattern=r"^help:"))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_message)
     )

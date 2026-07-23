@@ -80,16 +80,25 @@ def test_every_submenu_button_routes_and_has_back():
 
 def test_legacy_labels_still_route():
     for label in ["📊 Свинг", "⚡ Интрадей", "🌊 Позиция", "🔄 Дно/Пик",
-                  "📐 Уровни", "🏛 Глубокий анализ", "💹 Рынок", "📒 Журнал",
-                  "🩺 Статус", "📖 Гид", "💸 Funding", "😱 Fear & Greed"]:
+                  "📐 Уровни", "💹 Рынок", "📒 Журнал",
+                  "🩺 Статус", "💸 Funding"]:
         cmd = k.LABEL_TO_COMMAND.get(label)
         assert cmd in h.COMMAND_DISPATCH, f"legacy {label!r} no longer routes"
 
 
 def test_legacy_callback_data_still_dispatches():
     for cmd in ["signal", "intraday", "position", "reversal", "levels",
-                "deep", "market", "journal", "alerts", "status", "guide"]:
+                "market", "journal", "alerts", "status"]:
         assert cmd in h.COMMAND_DISPATCH, f"old cmd:{cmd} would be dropped"
+
+
+def test_removed_ux_no_longer_routes():
+    """D1.3 cleanup: /guide, /deep, /fear are gone — dead UX must not
+    silently resurrect via a stale label/callback mapping."""
+    for label in ["🏛 Глубокий анализ", "📖 Гид", "😱 Fear & Greed"]:
+        assert label not in k.LABEL_TO_COMMAND, f"removed label {label!r} still mapped"
+    for cmd in ["deep", "guide", "fear"]:
+        assert cmd not in h.COMMAND_DISPATCH, f"removed command {cmd!r} still dispatches"
 
 
 def _menu_query(data: str):
