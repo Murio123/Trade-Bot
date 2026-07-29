@@ -177,6 +177,33 @@ def test_error_template_is_shared_and_single_line_reason():
     assert "⚠️ Ошибка" not in inspect.getsource(handlers)
 
 
+def test_status_ai_line_reports_reachability_not_capability():
+    """D1.2 §16: /status says whether the Claude API answers — it must not
+    read as 'AI is validating the trades'."""
+    from bot import formatting
+
+    up = formatting.format_status({"ai_ok": True, "ai_model": "claude-x"})
+    down = formatting.format_status({"ai_ok": False, "ai_error": "timeout"})
+    unknown = formatting.format_status({})
+
+    assert "Claude API: доступен (claude-x)" in up
+    assert "Claude API: недоступен (timeout)" in down
+    assert "проверка ещё не выполнялась" in unknown
+    for text in (up, down, unknown):
+        assert "🧠 AI:" not in text
+
+
+def test_entry_screens_state_what_the_bot_does_not_know():
+    """D1.2 §1/§2: /start and /help must not imply a validated edge, and
+    must say plainly where the honest numbers are."""
+    from bot import handlers
+
+    for text in (handlers.WELCOME_TEXT, handlers.HELP_TEXT):
+        assert "подтверждённой торговой модели" in text
+    assert "присылаю сигналы" not in handlers.WELCOME_TEXT
+    assert "/journal" in handlers.HELP_TEXT
+
+
 def _menu_query(data: str):
     query = MagicMock()
     query.data = data

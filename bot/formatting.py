@@ -769,13 +769,15 @@ def _ago(dt) -> str:
 
 
 def _ai_status_line(s: dict[str, Any]) -> str:
+    # D1.2 §16: this reports whether the Claude API is reachable — nothing
+    # more. The old "🧠 AI: ✅" styling read as "AI is validating trades",
+    # so the label now names the API, not an analytical capability.
     ok = s.get("ai_ok")
     if ok is True:
-        return f"🧠 AI: ✅ {s.get('ai_model')}"
+        return f"Claude API: доступен ({s.get('ai_model')})"
     if ok is False:
-        return (f"🧠 AI: ⚠️ недоступен — детерминированный fallback "
-                f"({s.get('ai_error')})")
-    return "🧠 AI: — (проверка ещё не выполнялась)"
+        return f"Claude API: недоступен ({s.get('ai_error')})"
+    return "Claude API: проверка ещё не выполнялась"
 
 
 def format_status(s: dict[str, Any]) -> str:

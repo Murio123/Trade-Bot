@@ -392,18 +392,22 @@ def _report(setups: list[dict[str, Any]], profile: dict[str, Any],
     candidates = [r for r in rows if r.get("trades", 0) >= MIN_TRADES_FOR_REC
                   and r.get("avg_r", -9) > 0]
     lines.append("")
+    # D1.2 §15: this is a single-run, in-sample fit — a measurement, not
+    # advice. The numbers stay; the "recommendation" framing (and the
+    # "поставь SCORE_ALERT_MIN=… в Railway" instruction that acted on it)
+    # does not.
     if candidates:
         best = max(candidates, key=lambda r: r["avg_r"])
-        lines.append(f"✅ Рекомендация: порог {best['threshold']} — "
+        lines.append(f"Лучший результат на этой истории: порог {best['threshold']} — "
                      f"ср. {best['avg_r']:+.2f}R при {best['trades']} сделках.")
-        lines.append(f"Поставь SCORE_ALERT_MIN={best['threshold']} в Railway.")
         lines += _monthly_projection(best, profile, bars)
     else:
-        lines.append("⚠️ Ни один порог не дал устойчивого плюса на этой истории — "
-                     "цель 10%/мес пока не обоснована. Смягчи фильтры или поменяй TP.")
+        lines.append("Ни один порог не дал устойчивого плюса на этой истории.")
     lines.append("")
-    lines.append("ℹ️ Без funding/on-chain истории — оценка приблизительная. "
-                 "Прошлые результаты не гарантируют будущие.")
+    lines.append("ℹ️ Это одиночный прогон на одной и той же истории, по которой "
+                 "подбирался порог — измерение, а не рекомендация. Без "
+                 "funding/on-chain истории оценка приблизительная. Прошлые "
+                 "результаты не гарантируют будущие.")
     return "\n".join(lines)
 
 
@@ -420,11 +424,4 @@ def _monthly_projection(row: dict[str, Any], profile: dict[str, Any], bars: int)
         f"📅 Проекция (риск {RISK_PERCENT:g}%/сделку, история ~{period_days:.0f} дн):",
         f"  ~{trades_pm:.0f} сделок/мес | ~{r_pm:+.1f}R/мес | ≈ {ret_pm:+.1f}%/мес",
     ]
-    if r_pm > 0:
-        req = 10 / r_pm
-        out.append(f"  🎯 Для +10%/мес: риск ~{req:.1f}%/сделку "
-                   f"(либо больше сделок/выше R).")
-        if req > 3:
-            out.append("  ⚠️ Нужный риск >3%/сделку — агрессивно; цель 10%/мес "
-                       "на этом edge труднодостижима без роста R или частоты.")
     return out
