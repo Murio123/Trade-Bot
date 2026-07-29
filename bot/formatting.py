@@ -225,8 +225,7 @@ def format_reversal_alert(ctx: dict[str, Any], direction: str,
         ]
 
     if alignment == "aligned":
-        lines += ["", "✅ Разворот В СТОРОНУ тренда 1D — покупка отката, "
-                      "самый надёжный тип входа."]
+        lines += ["", "✅ Разворот в сторону тренда 1D."]
     elif alignment == "counter":
         lines += ["", "⚠️ ПРОТИВ тренда 1D — контртренд: уменьшенный объём, "
                       "быстрая фиксация, стоп неприкосновенен."]
@@ -355,8 +354,7 @@ def _reversal_conclusion(ctx: dict[str, Any], price: float | None) -> list[str]:
     if mtf.get("combined_bullish"):
         n = len(mtf.get("bull_tfs", []))
         if trend == "бычий":
-            out.append(f"🟢 Дно подтверждено на {n} ТФ ПО тренду вверх — покупка отката, "
-                       "надёжный сетап.")
+            out.append(f"🟢 Дно подтверждено на {n} ТФ по тренду вверх.")
         elif trend == "медвежий":
             out.append(f"🟡 Дно на {n} ТФ, но ПРОТИВ тренда вниз — отскок/ловля ножа. "
                        "Рискованно, малым объёмом и быстрой фиксацией.")
@@ -368,8 +366,7 @@ def _reversal_conclusion(ctx: dict[str, Any], price: float | None) -> list[str]:
     elif mtf.get("combined_bearish"):
         n = len(mtf.get("bear_tfs", []))
         if trend == "медвежий":
-            out.append(f"🔴 Пик подтверждён на {n} ТФ ПО тренду вниз — шорт отскока, "
-                       "надёжный сетап.")
+            out.append(f"🔴 Пик подтверждён на {n} ТФ по тренду вниз.")
         elif trend == "бычий":
             out.append(f"🟡 Пик на {n} ТФ, но ПРОТИВ тренда вверх — лишь коррекция. "
                        "Шорт рискован, малым объёмом.")

@@ -177,7 +177,9 @@ def test_reversal_alert_header_by_alignment():
            "volume_profile": {}, "liquidity": {}, "order_blocks": {}}
     aligned = format_reversal_alert(ctx, "bull", ["x"], False, ["4h", "1d"],
                                     alignment="aligned")
-    assert "ПО ТРЕНДУ — точка входа" in aligned and "самый надёжный" in aligned
+    assert "ПО ТРЕНДУ — точка входа" in aligned
+    # D1.2: confidence-signaling verdict language must not come back
+    assert "надёжн" not in aligned
     counter = format_reversal_alert(ctx, "bull", ["x"], False, ["4h", "1d", "12h"],
                                     alignment="counter")
     assert "против тренда" in counter and "контртренд" in counter
