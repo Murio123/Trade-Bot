@@ -52,6 +52,14 @@ def format_risk_cap_note() -> str:
             "вход сверх риск-бюджета. Сделка НЕ добавлена в журнал.")
 
 
+# D1.2: every descriptive-context message ends with the same honest
+# statement of what it is. No validated trading model exists — H1/H2 were
+# rejected, the confluence score was never validated, C4.3c paused the
+# volatility model — so nothing here may read as a recommendation.
+EVIDENTIARY_NOTE = ("Это описание структуры, не рекомендация — "
+                    "подтверждённой торговой модели пока нет.")
+
+
 def format_signal(signal: dict[str, Any]) -> str:
     ts = signal.get("timestamp")
     if isinstance(ts, datetime):
@@ -68,26 +76,33 @@ def format_signal(signal: dict[str, Any]) -> str:
     ]
     if signal.get("display_price") is not None:
         lines.append(f"💰 Текущая цена: {_fmt_price(signal.get('display_price'))}")
+    # D1.2 §2: these numbers are real structural facts (nearest swing, ATR
+    # distance), so they stay — but they are presented as descriptive
+    # reference points, not as a recommended trade plan built on a
+    # validated edge. No "Risk Management"/"План"/"Размер позиции" framing.
     lines += [
-        f"🕯 Цена свечи / вход: {_fmt_price(signal.get('entry_price'))}",
+        f"🕯 Цена свечи: {_fmt_price(signal.get('entry_price'))}",
+        f"Тренд {signal.get('htf_tf', '1d').upper()}: "
+        f"{BIAS_LABEL.get(signal.get('htf_bias', 'neutral'))}",
         "",
-        "📐 Risk Management:",
-        f"🛑 Стоп-лосс: {_fmt_price(signal.get('stop_loss'))} "
+        "Структурные ориентиры (не рекомендация):",
+        f"  Структурная граница: {_fmt_price(signal.get('stop_loss'))} "
         f"({'за структурой HTF' if signal.get('stop_basis') == 'structure' else str(signal.get('atr_multiplier_used', config.ATR_MULTIPLIER)) + '×ATR ' + str(signal.get('stop_atr_tf', '')).upper()}"
         f"{_stop_pct(signal)})",
-        f"🎯 Цель 1: {_fmt_price(signal.get('target_1'))}"
+        f"  Ориентир 1: {_fmt_price(signal.get('target_1'))}"
         f"{' (HTF-структура)' if signal.get('targets_structure') else ''}",
-        f"🎯 Цель 2: {_fmt_price(signal.get('target_2'))}",
-        f"💼 Размер позиции: {signal.get('position_size')} {config.SYMBOL_DISPLAY} "
-        f"({signal.get('risk_percent', config.RISK_PERCENT)}% риска)",
-        f"⏳ Удержание: ~{_fmt_duration(signal.get('hold_tp1_hours'))}–"
-        f"{_fmt_duration(signal.get('hold_tp2_hours'))} (до TP1–TP2)",
-        "",
-        f"• HTF Bias ({signal.get('htf_tf', '1d').upper()}): "
-        f"{BIAS_LABEL.get(signal.get('htf_bias', 'neutral'))} (фильтр пройден)",
+        f"  Ориентир 2: {_fmt_price(signal.get('target_2'))}",
+        f"  Объём при риске {signal.get('risk_percent', config.RISK_PERCENT)}%: "
+        f"{signal.get('position_size')} {config.SYMBOL_DISPLAY}",
+        f"  Типичное время до ориентиров: ~{_fmt_duration(signal.get('hold_tp1_hours'))}–"
+        f"{_fmt_duration(signal.get('hold_tp2_hours'))}",
     ]
 
-    for reason in signal.get("reasons", [])[:8]:
+    reasons = signal.get("reasons", [])[:8]
+    if reasons:
+        lines.append("")
+        lines.append("Наблюдения:")
+    for reason in reasons:
         lines.append(f"• {reason}")
 
     mtf = signal.get("mtf") or {}
@@ -112,8 +127,10 @@ def format_signal(signal: dict[str, Any]) -> str:
 
     if signal.get("status") == "journal":
         lines.append("")
-        lines.append("📒 Слабый сигнал (score 5-7) — записан в журнал, доступен по /signal")
+        lines.append("📒 Записано в журнал, доступно по /signal")
 
+    lines.append("")
+    lines.append(EVIDENTIARY_NOTE)
     return "\n".join(lines)
 
 
@@ -731,13 +748,6 @@ BLOCK_REASON = {
     "abnormal_volatility": "аномальная волатильность (ATR в экстремуме) — вне торговых условий",
 }
 
-BLOCK_HINT = {
-    "bullish": "Жду совпадения импульса с трендом вверх.",
-    "bearish": "Жду совпадения импульса с трендом вниз.",
-    "neutral": "Жду формирования чёткого дневного тренда.",
-}
-
-
 def _ago(dt) -> str:
     if dt is None:
         return "ещё не было"
@@ -877,8 +887,9 @@ def format_blocked(result: dict[str, Any],
     if price is not None:
         lines.append(f"🕯 Цена свечи / контекста: {_fmt_price(price)}")
 
-    lines.append(f"HTF ({result.get('htf_tf', '1d').upper()}): {HTF_LINE.get(bias, bias)}")
+    lines.append(f"Тренд {result.get('htf_tf', '1d').upper()}: {HTF_LINE.get(bias, bias)}")
 
     lines.append("")
-    lines.append(BLOCK_HINT.get(bias, "Жду более сильного сетапа."))
+    lines.append("Условия для наблюдения ещё не сложились — "
+                 "проверю снова на следующей свече.")
     return "\n".join(lines)

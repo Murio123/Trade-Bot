@@ -101,6 +101,64 @@ def test_removed_ux_no_longer_routes():
         assert cmd not in h.COMMAND_DISPATCH, f"removed command {cmd!r} still dispatches"
 
 
+def _d12_signal() -> dict:
+    return {
+        "timeframe": "4h", "timestamp": "2026-07-21 14:00 UTC",
+        "direction": "long", "style_label": "Свинг", "style_emoji": "📊",
+        "display_price": 118_420.0, "entry_price": 118_260.0,
+        "stop_loss": 116_900.0, "target_1": 119_800.0, "target_2": 121_300.0,
+        "position_size": 0.42, "htf_bias": "bullish", "htf_tf": "1d",
+        "reasons": ["EMA aligned bullish", "Bullish order block reaction"],
+    }
+
+
+def test_signal_presents_structure_not_a_trade_plan():
+    """D1.2 §2/§4: the numbers stay (real structural facts) but the
+    prescriptive trade-plan framing does not, and every message says
+    plainly that no validated model backs it."""
+    from bot import formatting
+
+    text = formatting.format_signal(_d12_signal())
+
+    # the facts survive
+    assert "116 900" in text and "119 800" in text and "121 300" in text
+    assert "EMA aligned bullish" in text
+    # the prescriptive framing does not
+    for banned in ["Risk Management", "Стоп-лосс", "Цель 1", "Размер позиции",
+                   "Удержание", "План"]:
+        assert banned not in text, f"prescriptive framing {banned!r} came back"
+    assert formatting.EVIDENTIARY_NOTE in text
+
+
+def test_signal_and_blocked_never_show_score_or_confidence():
+    """D1.2 §3: the score and the fake AI-confidence number must not
+    return to any user-facing screen."""
+    from bot import formatting
+
+    texts = [
+        formatting.format_signal({**_d12_signal(), "score": 8, "status": "journal"}),
+        formatting.format_blocked(
+            {"blocked_at": "no_trade", "price": 118_260.0,
+             "htf_bias": "bullish", "htf_tf": "1d"},
+            display_price=118_420.0),
+    ]
+    for text in texts:
+        for banned in ["Score", "score", "Уверенность", "Confluence", "/10"]:
+            assert banned not in text, f"{banned!r} leaked into a user screen"
+
+
+def test_blocked_drops_directional_waiting_hint():
+    """D1.2 §5: BLOCK_HINT's directional framing oversold a system with no
+    validated edge; the diagnostic fact stays, the lean goes."""
+    from bot import formatting
+
+    assert not hasattr(formatting, "BLOCK_HINT")
+    text = formatting.format_blocked(
+        {"blocked_at": "no_trade", "htf_bias": "neutral", "htf_tf": "1d"})
+    assert "Жду" not in text
+    assert "следующей свече" in text
+
+
 def _menu_query(data: str):
     query = MagicMock()
     query.data = data

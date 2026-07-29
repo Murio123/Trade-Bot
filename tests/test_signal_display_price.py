@@ -34,8 +34,8 @@ def test_combined_signal_sections_share_display_price_and_label_candle_prices():
     ])
 
     assert text.count("💰 Текущая цена: 63 094") == 2
-    assert "🕯 Цена свечи / вход: 63 094" in text
-    assert "🕯 Цена свечи / вход: 63 378" in text
+    assert "🕯 Цена свечи: 63 094" in text
+    assert "🕯 Цена свечи: 63 378" in text
     assert "\nЦена: 63 094" not in text
     assert "\nЦена: 63 378" not in text
 
