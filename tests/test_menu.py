@@ -204,6 +204,21 @@ def test_entry_screens_state_what_the_bot_does_not_know():
     assert "/journal" in handlers.HELP_TEXT
 
 
+def test_every_scheduled_message_shares_one_dry_run_path():
+    """D1.2 item D: lifecycle events and reversal alerts used plain
+    broadcast(), so in DRY_RUN they were dropped entirely and never carried
+    the '🧪 DRY-RUN / MANUAL ONLY' banner the signal alert gets — despite
+    being subject to the same gating."""
+    import inspect
+
+    import scheduler
+
+    src = inspect.getsource(scheduler)
+    # broadcast_photo is a separate, non-textual path and stays as-is
+    assert "alerts.broadcast(" not in src
+    assert src.count("alerts.send_signal_alert(") == 3
+
+
 def _menu_query(data: str):
     query = MagicMock()
     query.data = data

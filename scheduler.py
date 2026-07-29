@@ -244,7 +244,12 @@ async def resolve_trades_job(application) -> None:
 
         for event in evaluation["events"]:
             text = formatting.format_trade_event(trade, event)
-            await alerts.broadcast(application.bot, text)
+            # D1.2 item D: lifecycle events are subject to the same dry-run
+            # gating as the signal alert that opened the trade, so they go
+            # through the same path and carry the same banner. Plain
+            # broadcast() silently dropped them in DRY_RUN and, when it did
+            # send, sent them unlabelled.
+            await alerts.send_signal_alert(application.bot, text)
 
 
 async def outcome_tracking_job(application) -> None:
@@ -403,7 +408,8 @@ async def _maybe_reversal_alert(application, ctx: dict, profile_name: str,
     text = formatting.format_reversal_alert(ctx, direction, factors,
                                             len(tfs) >= 3, tfs,
                                             alignment=alignment)
-    await alerts.broadcast(application.bot, text)
+    # Same DRY-RUN consistency fix as the lifecycle events above.
+    await alerts.send_signal_alert(application.bot, text)
     # Prime (with-trend) entries also get the chart with the zones.
     if alignment == "aligned" and ctx.get("df_signal") is not None:
         try:

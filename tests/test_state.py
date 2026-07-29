@@ -56,11 +56,14 @@ def test_concurrent_streams_send_one_reversal_alert(monkeypatch):
 
     sent = []
 
-    async def fake_broadcast(bot, text, chat_ids=None):
+    async def fake_broadcast(bot, text):
         await asyncio.sleep(0.01)  # widen the race window
         sent.append(text)
 
-    monkeypatch.setattr("scheduler.alerts.broadcast", fake_broadcast)
+    # Reversal alerts go through send_signal_alert since the D1.2 item D
+    # dry-run consistency fix; the one-alert-under-race invariant is
+    # unchanged.
+    monkeypatch.setattr("scheduler.alerts.send_signal_alert", fake_broadcast)
     monkeypatch.setattr("scheduler.formatting.format_reversal_alert",
                         lambda *a, **k: "reversal!")
 
