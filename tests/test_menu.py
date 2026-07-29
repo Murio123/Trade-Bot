@@ -101,6 +101,33 @@ def test_removed_ux_no_longer_routes():
         assert cmd not in h.COMMAND_DISPATCH, f"removed command {cmd!r} still dispatches"
 
 
+def test_removed_ux_is_not_advertised_anywhere():
+    """The mapping check above only guards the keyboard. A removed button
+    named in any other user-facing string tells the user to press something
+    that no longer exists — that is how "жми 🏛 Глубокий анализ" survived in
+    an /ask error message long after /deep was deleted."""
+    import pathlib
+    import re
+
+    # Button labels carry their emoji, so this does not collide with the
+    # Fear & Greed *metric*, which legitimately survives inside /market.
+    # The commands are matched with a boundary so that module paths like
+    # tools/deep_discovery.py are not mistaken for an invitation to /deep.
+    dead = [re.escape(lbl) for lbl in
+            ("🏛 Глубокий анализ", "📖 Гид", "😱 Fear & Greed")]
+    dead += [r"/(?:deep|guide|fear)(?![\w/])"]
+    pattern = re.compile("|".join(dead))
+
+    root = pathlib.Path(__file__).resolve().parent.parent
+    offenders = []
+    for path in root.rglob("*.py"):
+        if "tests" in path.parts or ".venv" in path.parts:
+            continue
+        for hit in set(pattern.findall(path.read_text(encoding="utf-8"))):
+            offenders.append(f"{path.relative_to(root)}: {hit!r}")
+    assert not offenders, "removed UX still referenced: " + "; ".join(offenders)
+
+
 def _d12_signal() -> dict:
     return {
         "timeframe": "4h", "timestamp": "2026-07-21 14:00 UTC",
