@@ -22,18 +22,20 @@ log = logging.getLogger(__name__)
 
 HELP_TEXT = (
     "🤖 BTC Signal Bot — все команды\n\n"
-    "Рыночный контекст:\n"
-    "/signal — свинг (вход 4H, структура 12H, тренд 1D)\n"
-    "/intraday — интрадей (вход 15m, тренд 1H)\n"
-    "/position — позиционный (холд дни)\n"
-    "/reversal — признаки дна/пика по 4 ТФ\n"
+    "📊 Анализ рынка:\n"
+    "/market — общий анализ: цена, funding, L/S, Fear&Greed\n"
     "/levels — ключевые уровни + график\n"
-    "/market — цена, funding, L/S, Fear&Greed\n\n"
-    "Учёт:\n"
+    "/funding — funding и long/short\n"
+    "/reversal — признаки дна/пика по 4 ТФ\n\n"
+    "🔮 Прогноз:\n"
+    "/position — спот (структура 1D/12H, горизонт недели)\n"
+    "/signal — фьючерсы, свинг (вход 4H, тренд 1D)\n"
+    "/intraday — фьючерсы, интрадей (вход 15m, тренд 4H)\n\n"
+    "📓 Торговый журнал:\n"
     "/journal — винрейт и R по закрытым сделкам\n"
-    "/setalert <цена> — алерт по уровню (/alerts — список, /delalert — удалить)\n"
     "/backtest [swing|intraday] — измерение по истории\n\n"
     "Сервис:\n"
+    "/setalert <цена> — алерт по уровню (/alerts — список, /delalert — удалить)\n"
     "/status — здоровье бота | /testalert — проверка уведомлений\n\n"
     "💬 Любой текст без команды — вопрос к Claude с рыночным контекстом.\n\n"
     "Всё, кроме /journal, — описание текущей структуры рынка, а не "
@@ -43,11 +45,13 @@ HELP_TEXT = (
 
 WELCOME_TEXT = (
     "🤖 Привет! Я BTC Signal Bot.\n\n"
-    "Показываю структуру рынка BTC/USDT по нескольким таймфреймам: уровни, "
-    "тренд, funding, статистику по журналу.\n"
+    "Три раздела:\n"
+    "📊 Анализ рынка — что происходит прямо сейчас\n"
+    "🔮 Прогноз — спот или фьючерсы (свинг / интрадей)\n"
+    "📓 Торговый журнал — открытые прогнозы, история, статистика\n\n"
     "Это описание рынка, а не торговые рекомендации — подтверждённой "
     "торговой модели у меня пока нет.\n"
-    "Выбери действие на кнопках ниже 👇"
+    "Выбери раздел на кнопках ниже 👇"
 )
 
 
@@ -134,8 +138,11 @@ def _submenu_handler(section: str):
     return _handler
 
 
+menu_market_cmd = _submenu_handler("market")      # 📊 Анализ рынка
+menu_forecast_cmd = _submenu_handler("forecast")  # 🔮 Прогноз
+menu_journal_cmd = _submenu_handler("journal")    # 📓 Торговый журнал
+# Superseded sections: still dispatched so old keyboards keep navigating.
 menu_analyze_cmd = _submenu_handler("analyze")
-menu_market_cmd = _submenu_handler("market")
 menu_history_cmd = _submenu_handler("history")
 
 
@@ -636,6 +643,8 @@ def _ask_context(ctx: dict[str, Any]) -> dict[str, Any]:
 # Maps an internal command name to its handler (used by reply-keyboard
 # buttons and inline-menu callbacks alike).
 COMMAND_DISPATCH = {
+    "menu_forecast": menu_forecast_cmd,
+    "menu_journal": menu_journal_cmd,
     "menu_analyze": menu_analyze_cmd,
     "menu_market": menu_market_cmd,
     "menu_history": menu_history_cmd,
@@ -659,18 +668,18 @@ COMMAND_DISPATCH = {
 
 # Shown in the Telegram "/" command menu.
 BOT_COMMANDS = [
-    ("signal", "📊 Свинг-сигнал (вход 4H)"),
-    ("intraday", "⚡ Интрадей-сигнал (вход 15m)"),
-    ("position", "🌊 Позиционный (движения 2000-5000 пт)"),
-    ("reversal", "🔄 Дно/пик по 4 ТФ"),
+    ("market", "📊 Анализ рынка: цена, funding, L/S, F&G"),
     ("levels", "📐 Ключевые уровни"),
-    ("market", "💹 Рынок: цена, funding, L/S, F&G"),
-    ("journal", "📒 Статистика сделок"),
+    ("reversal", "🔄 Дно/пик по 4 ТФ"),
+    ("position", "🟢 Прогноз: спот"),
+    ("signal", "📈 Прогноз: фьючерсы, свинг"),
+    ("intraday", "⚡ Прогноз: фьючерсы, интрадей"),
+    ("journal", "📓 Журнал: статистика сделок"),
+    ("backtest", "📉 Измерение порога по истории"),
     ("setalert", "🔔 Поставить алерт по цене"),
     ("alerts", "📋 Мои ценовые алерты"),
-    ("backtest", "📈 Подбор порога по истории"),
     ("status", "🩺 Статус бота"),
-    ("ask", "🧠 Вопрос к ИИ"),
+    ("ask", "💬 Вопрос к Claude"),
     ("help", "❓ Все команды"),
 ]
 

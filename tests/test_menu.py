@@ -40,8 +40,7 @@ def test_bot_command_menu_matches_registered_commands():
 
 # --- new two-level menu structure -------------------------------------------
 
-MAIN_LABELS = ["📊 Новый анализ", "📌 Последний прогноз", "📈 Рынок",
-               "📒 История", "🔔 Алерты", "🟢 Статус"]
+MAIN_LABELS = ["📊 Анализ рынка", "🔮 Прогноз", "📓 Торговый журнал"]
 
 
 def _labels(markup) -> list[str]:
@@ -49,9 +48,44 @@ def _labels(markup) -> list[str]:
     return [btn.text for row in rows for btn in row]
 
 
-def test_main_menu_has_exactly_the_six_target_buttons():
+def test_main_menu_has_exactly_the_three_d13_sections():
     assert _labels(k.main_reply_keyboard()) == MAIN_LABELS
     assert _labels(k.main_inline_keyboard()) == MAIN_LABELS
+
+
+def test_forecast_submenu_maps_each_market_to_its_profile():
+    """D1.3: the three forecast buttons must reach the three existing
+    profiles — spot to the positional path, the other two to futures."""
+    markup = k.submenu_keyboard("forecast")
+    pairs = [(btn.text, btn.callback_data)
+             for row in markup.inline_keyboard for btn in row]
+    assert pairs == [
+        ("🟢 Спот", "cmd:position"),
+        ("📈 Фьючерсы — свинг", "cmd:signal"),
+        ("⚡ Фьючерсы — интрадей", "cmd:intraday"),
+        ("⬅️ Назад", "menu:main"),
+    ]
+
+
+def test_journal_submenu_reuses_existing_journal_handlers():
+    markup = k.submenu_keyboard("journal")
+    pairs = [(btn.text, btn.callback_data)
+             for row in markup.inline_keyboard for btn in row]
+    assert pairs == [
+        ("📌 Открытые прогнозы", "cmd:recent_forecasts"),
+        ("📜 История", "cmd:forecast_results"),
+        ("📊 Статистика", "cmd:journal"),
+        ("⬅️ Назад", "menu:main"),
+    ]
+
+
+def test_superseded_main_menu_labels_still_route():
+    """A reply keyboard already in a user's chat keeps sending the OLD label
+    text until they press /start again — those presses must not go nowhere."""
+    for label in ["📊 Новый анализ", "📌 Последний прогноз", "📈 Рынок",
+                  "📒 История", "🔔 Алерты", "🟢 Статус"]:
+        cmd = k.LABEL_TO_COMMAND.get(label)
+        assert cmd in h.COMMAND_DISPATCH, f"superseded {label!r} no longer routes"
 
 
 def test_main_inline_sections_navigate_and_actions_dispatch():

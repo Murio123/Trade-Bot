@@ -4,28 +4,35 @@ The reply keyboard sits under the input field and is always available; its
 buttons send the label text, which text_message routes to the right handler.
 The inline menu (shown on /start) uses callback_data for a tappable grid.
 
-Navigation is two-level: the main menu holds six entries, three of which open
-submenus (analyze / market / history). Inline transitions edit the message in
-place via callback_data "menu:<section>"; actions keep the "cmd:<name>"
-namespace. Legacy labels stay in LABEL_TO_COMMAND so stale keyboards keep
-working.
+Navigation is two-level. D1.3 reduces the main menu to the three sections the
+product actually has — market analysis, forecast, journal — instead of the
+previous six mixed entries. Inline transitions edit the message in place via
+callback_data "menu:<section>"; actions keep the "cmd:<name>" namespace.
+
+Superseded labels and sections stay in LABEL_TO_COMMAND / SUBMENUS: a reply
+keyboard already sitting in a user's chat keeps sending the OLD label text,
+and an inline menu in message history keeps its OLD callback_data, so dropping
+either mapping would strand every client that has not pressed /start again.
 """
 from __future__ import annotations
 
 from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
                       KeyboardButton, ReplyKeyboardMarkup)
 
-# --- current main-menu labels -----------------------------------------------
+# --- current main-menu labels (D1.3) ----------------------------------------
+BTN_MARKET_ANALYSIS = "📊 Анализ рынка"
+BTN_FORECAST = "🔮 Прогноз"
+BTN_JOURNAL = "📓 Торговый журнал"
+
+BTN_BACK = "⬅️ Назад"
+
+# --- legacy labels (removed from the keyboard, still routed) ---------------
 BTN_ANALYZE = "📊 Новый анализ"
 BTN_LAST_FORECAST = "📌 Последний прогноз"
 BTN_MARKET = "📈 Рынок"
 BTN_HISTORY = "📒 История"
 BTN_ALERTS = "🔔 Алерты"
 BTN_STATUS = "🟢 Статус"
-
-BTN_BACK = "⬅️ Назад"
-
-# --- legacy labels (removed from the keyboard, still routed) ---------------
 BTN_OLD_SIGNAL = "📊 Свинг"
 BTN_OLD_INTRADAY = "⚡ Интрадей"
 BTN_OLD_POSITION = "🌊 Позиция"
@@ -42,21 +49,44 @@ BTN_HELP = "❓ Помощь"
 # Main menu rows of (label, command). Sections dispatch to menu_* commands
 # which open the corresponding submenu; the rest are direct actions.
 _LAYOUT = [
-    [(BTN_ANALYZE, "menu_analyze"), (BTN_LAST_FORECAST, "last_forecast")],
-    [(BTN_MARKET, "menu_market"), (BTN_HISTORY, "menu_history")],
-    [(BTN_ALERTS, "alerts"), (BTN_STATUS, "status")],
+    [(BTN_MARKET_ANALYSIS, "menu_market")],
+    [(BTN_FORECAST, "menu_forecast")],
+    [(BTN_JOURNAL, "menu_journal")],
 ]
+
+# Forecast submenu labels — the one place the spot/futures split is named.
+BTN_SPOT = "🟢 Спот"
+BTN_FUT_SWING = "📈 Фьючерсы — свинг"
+BTN_FUT_INTRADAY = "⚡ Фьючерсы — интрадей"
 
 # section -> (title, rows of (label, callback_data)).
 SUBMENUS: dict[str, tuple[str, list[list[tuple[str, str]]]]] = {
+    "forecast": ("🔮 Прогноз — выбери рынок:", [
+        [(BTN_SPOT, "cmd:position")],
+        [(BTN_FUT_SWING, "cmd:signal")],
+        [(BTN_FUT_INTRADAY, "cmd:intraday")],
+        [(BTN_BACK, "menu:main")],
+    ]),
+    "journal": ("📓 Торговый журнал:", [
+        [("📌 Открытые прогнозы", "cmd:recent_forecasts")],
+        [("📜 История", "cmd:forecast_results")],
+        [("📊 Статистика", "cmd:journal")],
+        [(BTN_BACK, "menu:main")],
+    ]),
+    # Reached from the "📊 Анализ рынка" main-menu button AND from the old
+    # "menu:market" callback_data still sitting in message history — one
+    # section serves both, so nothing loses functionality either way.
+    "market": ("📊 Анализ рынка — что показать?", [
+        [("📊 Общий анализ", "cmd:market")],
+        [("📐 Уровни", "cmd:levels")],
+        [("💰 Funding", "cmd:funding")],
+        [("🔄 Reversal", "cmd:reversal")],
+        [(BTN_BACK, "menu:main")],
+    ]),
+    # --- superseded sections, still reachable from old inline messages ------
     "analyze": ("📊 Новый анализ — выбери режим:", [
         [("⚡ Интрадей", "cmd:intraday"), ("📊 Свинг", "cmd:signal")],
         [("🌊 Позиционный", "cmd:position"), ("🔄 Разворот", "cmd:reversal")],
-        [(BTN_BACK, "menu:main")],
-    ]),
-    "market": ("📈 Рынок — что показать?", [
-        [("📐 Ключевые уровни", "cmd:levels"), ("📊 Обзор рынка", "cmd:market")],
-        [("💸 Funding", "cmd:funding")],
         [(BTN_BACK, "menu:main")],
     ]),
     "history": ("📒 История — что показать?", [
@@ -75,7 +105,7 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         rows,
         resize_keyboard=True,
-        input_field_placeholder="Кнопка — команда, текст — вопрос к ИИ…",
+        input_field_placeholder="Кнопка — раздел, текст — вопрос к Claude…",
     )
 
 
@@ -108,7 +138,20 @@ def submenu_title(section: str) -> str:
 
 # Map reply-keyboard label -> internal command name (incl. legacy labels).
 LABEL_TO_COMMAND = {label: cmd for row in _LAYOUT for label, cmd in row}
+# Forecast/journal submenu labels are inline-only, but a user can also type
+# them verbatim, so route them too.
 LABEL_TO_COMMAND.update({
+    BTN_SPOT: "position",
+    BTN_FUT_SWING: "signal",
+    BTN_FUT_INTRADAY: "intraday",
+})
+LABEL_TO_COMMAND.update({
+    BTN_ANALYZE: "menu_analyze",
+    BTN_LAST_FORECAST: "last_forecast",
+    BTN_MARKET: "menu_market",
+    BTN_HISTORY: "menu_history",
+    BTN_ALERTS: "alerts",
+    BTN_STATUS: "status",
     BTN_OLD_SIGNAL: "signal",
     BTN_OLD_INTRADAY: "intraday",
     BTN_OLD_POSITION: "position",
