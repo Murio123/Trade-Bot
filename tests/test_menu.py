@@ -228,9 +228,11 @@ def test_market_format_renders():
         {"ratio": 2.3}, 91234.0,
         {"value": 28, "classification": "Fear"})
     assert "Цена: 58 000" in text
-    assert "перегрев лонгов" in text
-    assert "лонги переполнены" in text
     assert "Fear & Greed: 28/100" in text
+    # D1.2 §11: raw numbers, no interpretation layered on top
+    assert "0.0800%" in text and "z=2.4" in text and "2.30" in text
+    for banned in ("перегрев", "переполнены", "баланс", "норма"):
+        assert banned not in text, f"alarmist reading {banned!r} came back"
     # degrades with everything missing
     assert format_market(None, {}, {}, None, {}).startswith("💹 Рынок")
 

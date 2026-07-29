@@ -347,10 +347,9 @@ def format_reversal(ctx: dict[str, Any]) -> str:
         lines += _reversal_watch(ctx, price)
 
     lines.append("")
-    lines.append("⚠️ Развороты — это фейд движения: ниже винрейт, выше R:R. "
-                 "Лучше брать в сторону старшего тренда.")
-    lines.append("")
     lines += _reversal_conclusion(ctx, price)
+    lines.append("")
+    lines.append(EVIDENTIARY_NOTE)
     return "\n".join(lines)
 
 
@@ -648,18 +647,10 @@ def _levels_conclusion(ctx: dict[str, Any], price: float | None,
             f"{_fmt_price(res_c['mid'])}{r_star} "
             f"(+{(res_c['mid'] - price) / price * 100:.1f}%).")
 
-    # Directional lean from trend + premium/discount.
-    if trend == "бычий" and zone == "discount":
-        lean = "🟢 Преимущество у покупателей: откат в дисконте по тренду вверх — зона интереса для лонгов."
-    elif trend == "бычий" and zone == "premium":
-        lean = "🟡 Тренд вверх, но цена в премиуме — лонги дороже, ждать отката/подтверждения."
-    elif trend == "медвежий" and zone == "premium":
-        lean = "🔴 Преимущество у продавцов: отскок в премиуме по тренду вниз — зона интереса для шортов."
-    elif trend == "медвежий" and zone == "discount":
-        lean = "🟡 Тренд вниз, но цена в дисконте — возможен отскок, шорты рискованнее."
-    else:
-        lean = "⚪ Чёткого перевеса нет — ждать реакции от ближайшего уровня."
-    out.append(lean)
+    # D1.2 §9: the closing "directional lean" turned a structural fact into
+    # an implied trade bias ("Преимущество у покупателей … зона интереса для
+    # лонгов"). The structure above is descriptive and stays; the lean does
+    # not, because nothing establishes that this structure predicts anything.
     return out
 
 
@@ -687,18 +678,16 @@ def format_market(price: float | None, funding: dict[str, Any],
     if price:
         lines.append(f"💰 Цена: {_fmt_price(price)}")
 
+    # D1.2 §11: raw exchange data only — the alarmist reading ("перегрев
+    # лонгов", "лонги переполнены") interpreted the number for the user
+    # without anything establishing what that reading is worth.
     cur = funding.get("current")
     if cur is not None:
-        mood = ("⚠️ перегрев лонгов" if funding.get("anomalous") and cur > 0 else
-                "⚠️ перегрев шортов" if funding.get("anomalous") and cur < 0 else
-                "норма")
-        lines.append(f"💸 Funding: {cur * 100:.4f}% ({mood}, z={funding.get('zscore', 0):.1f})")
+        lines.append(f"💸 Funding: {cur * 100:.4f}% (z={funding.get('zscore', 0):.1f})")
 
     ratio = ls_ratio.get("ratio")
     if ratio is not None:
-        crowd = "лонги переполнены" if ratio > 2 else \
-                "шорты переполнены" if ratio < 0.5 else "баланс"
-        lines.append(f"⚖️ Long/Short: {ratio:.2f} ({crowd})")
+        lines.append(f"⚖️ Long/Short: {ratio:.2f}")
 
     if oi:
         lines.append(f"📊 Open Interest: {oi:,.0f}".replace(",", " "))
