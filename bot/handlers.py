@@ -176,7 +176,7 @@ async def _run_signal(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                    open_trades=open_now)
     except Exception as exc:  # noqa: BLE001
         log.exception("signal (%s) failed", profile_name)
-        await update.effective_message.reply_text(f"⚠️ Ошибка анализа: {exc}")
+        await update.effective_message.reply_text(formatting.format_error(exc))
         return
 
     if result.get("status") == "blocked":
@@ -269,7 +269,7 @@ async def reversal_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     try:
         ctx = await _fresh_context(context, profile_name="swing")
     except Exception as exc:  # noqa: BLE001
-        await update.effective_message.reply_text(f"⚠️ Ошибка: {exc}")
+        await update.effective_message.reply_text(formatting.format_error(exc))
         return
     await update.effective_message.reply_text(formatting.format_reversal(ctx))
 
@@ -278,7 +278,7 @@ async def levels_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     try:
         ctx = await _fresh_context(context)
     except Exception as exc:  # noqa: BLE001
-        await update.effective_message.reply_text(f"⚠️ Ошибка: {exc}")
+        await update.effective_message.reply_text(formatting.format_error(exc))
         return
     await update.effective_message.reply_text(formatting.format_levels(ctx))
     await _send_chart(update, ctx)
@@ -290,7 +290,7 @@ async def funding_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         funding = await binance.funding_rate()
         ls = await binance.long_short_ratio()
     except Exception as exc:  # noqa: BLE001
-        await update.effective_message.reply_text(f"⚠️ Ошибка: {exc}")
+        await update.effective_message.reply_text(formatting.format_error(exc))
         return
     await update.effective_message.reply_text(formatting.format_funding(funding, ls))
 
@@ -391,7 +391,7 @@ async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         report = await run_backtest(binance, profile_name=profile)
     except Exception as exc:  # noqa: BLE001
         log.exception("backtest failed")
-        await update.effective_message.reply_text(f"⚠️ Ошибка бэктеста: {exc}")
+        await update.effective_message.reply_text(formatting.format_error(exc))
         return
     await update.effective_message.reply_text(report)
 
@@ -550,7 +550,7 @@ async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             ctx = await _fresh_context(context)
         except Exception as exc:  # noqa: BLE001
             if ctx is None:
-                await update.effective_message.reply_text(f"⚠️ Ошибка: {exc}")
+                await update.effective_message.reply_text(formatting.format_error(exc))
                 return
             log.warning("ask: context refresh failed, using stale cache: %s", exc)
     market_context = _ask_context(ctx)

@@ -159,6 +159,24 @@ def test_blocked_drops_directional_waiting_hint():
     assert "следующей свече" in text
 
 
+def test_error_template_is_shared_and_single_line_reason():
+    """D1.2 §8/§22: one template for every command, and a raw multi-line
+    exception never reaches the user verbatim."""
+    import inspect
+
+    from bot import formatting, handlers
+
+    text = formatting.format_error(ValueError("binance timeout\nTraceback..."))
+    assert text.startswith("⚠️ Не получилось выполнить запрос.")
+    assert "binance timeout" in text
+    assert "Traceback" not in text
+    assert "/status" in text
+    # degrades without an exception
+    assert "None" not in formatting.format_error()
+    # no handler keeps its own bespoke variant
+    assert "⚠️ Ошибка" not in inspect.getsource(handlers)
+
+
 def _menu_query(data: str):
     query = MagicMock()
     query.data = data

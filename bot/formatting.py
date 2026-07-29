@@ -60,6 +60,22 @@ EVIDENTIARY_NOTE = ("Это описание структуры, не реком
                     "подтверждённой торговой модели пока нет.")
 
 
+def format_error(exc: Exception | None = None) -> str:
+    """One shared error template (D1.2 §8/§22).
+
+    Replaced six near-identical "⚠️ Ошибка …: {exc}" variants that differed
+    only by which command raised. The reason is kept on its own line and
+    truncated — a raw multi-line traceback string is not a user-facing
+    explanation.
+    """
+    lines = ["⚠️ Не получилось выполнить запрос."]
+    reason = str(exc).strip().splitlines()[0] if exc and str(exc).strip() else ""
+    if reason:
+        lines.append(reason[:200])
+    lines.append("Попробуй ещё раз через минуту или проверь /status.")
+    return "\n".join(lines)
+
+
 def format_signal(signal: dict[str, Any]) -> str:
     ts = signal.get("timestamp")
     if isinstance(ts, datetime):
