@@ -236,11 +236,13 @@ def test_every_scheduled_message_shares_one_dry_run_path():
     broadcast(), so in DRY_RUN they were dropped entirely and never carried
     the '🧪 DRY-RUN / MANUAL ONLY' banner the signal alert gets — despite
     being subject to the same gating."""
-    import inspect
+    import pathlib
 
-    import scheduler
-
-    src = inspect.getsource(scheduler)
+    # Read the source instead of importing: importing scheduler needs a live
+    # event loop, so an earlier test that ran asyncio.run() (and closed the
+    # loop it created) made this guard fail purely on file ordering.
+    src = (pathlib.Path(__file__).resolve().parent.parent / "scheduler.py"
+           ).read_text(encoding="utf-8")
     # broadcast_photo is a separate, non-textual path and stays as-is
     assert "alerts.broadcast(" not in src
     assert src.count("alerts.send_signal_alert(") == 3
