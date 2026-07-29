@@ -191,6 +191,110 @@ def test_signal_presents_structure_not_a_trade_plan():
     assert formatting.EVIDENTIARY_NOTE in text
 
 
+def test_forecast_names_its_market():
+    """D1.3: each forecast identifies its market up front."""
+    from bot import formatting
+
+    expected = {"POSITIONAL": "СПОТ", "SWING": "ФЬЮЧЕРСЫ · СВИНГ",
+                "INTRADAY": "ФЬЮЧЕРСЫ · ИНТРАДЕЙ"}
+    for analysis_type, label in expected.items():
+        text = formatting.format_signal({**_d12_signal(),
+                                         "analysis_type": analysis_type})
+        assert label in text.splitlines()[0], \
+            f"{analysis_type} header lacks {label!r}"
+
+
+def test_futures_forecast_keeps_four_numbered_blocks():
+    """The futures body is capped at the four sanctioned blocks — no
+    free-form extra sections."""
+    from bot import formatting
+
+    for analysis_type in ("SWING", "INTRADAY"):
+        text = formatting.format_signal({**_d12_signal(),
+                                         "analysis_type": analysis_type})
+        blocks = [ln for ln in text.splitlines() if ln[:2] in
+                  ("1.", "2.", "3.", "4.")]
+        assert blocks == ["1. Состояние рынка", "2. Основной сценарий",
+                          "3. Ключевые уровни", "4. Инвалидация"], blocks
+
+
+def _spot(**over) -> dict:
+    return {**_d12_signal(), "analysis_type": "POSITIONAL", **over}
+
+
+def test_spot_forecast_uses_its_own_sections():
+    from bot import formatting
+
+    text = formatting.format_signal(_spot())
+    for section in ("Состояние рынка", "Сценарий", "Ключевые уровни",
+                    "Что делать", "Отмена сценария"):
+        assert f"\n{section}\n" in text, f"spot screen lacks {section!r}"
+    # The futures numbering must not leak onto the spot screen.
+    assert "1. Состояние рынка" not in text
+    assert "4. Инвалидация" not in text
+
+
+def test_spot_forecast_never_renders_futures_only_fields():
+    """Spot has no margin, so futures risk sizing, position size and any
+    leverage wording describe a mechanic the holder does not have."""
+    from bot import formatting
+
+    for direction in ("long", "short"):
+        text = formatting.format_signal(_spot(direction=direction))
+        for banned in ["Объём при риске", "риске 1", "плечо", "Плечо",
+                       "leverage", "шорт", "ШОРТ", "Риск 1%"]:
+            assert banned not in text, \
+                f"futures-only {banned!r} rendered on the spot screen"
+        # position_size is set in the fixture — it must not be printed at all.
+        assert str(_spot()["position_size"]) not in text
+
+
+def test_spot_short_explains_instead_of_recommending_a_trade():
+    """The positional profile can emit SHORT, which does not exist on spot.
+    Relabelling it СПОТ without saying so would imply an impossible entry."""
+    from bot import formatting
+
+    text = formatting.format_signal(_spot(direction="short"))
+    assert ("На споте это не сигнал на продажу, а причина пока "
+            "не набирать позицию.") in text
+    assert "Не открывать позицию" in text
+    assert "Направление:" not in text  # no trade is being presented
+
+    long_text = formatting.format_signal(_spot(direction="long"))
+    assert "не сигнал на продажу" not in long_text
+    assert "Направление:" in long_text
+
+
+def test_spot_action_follows_direction_and_trend():
+    from bot import formatting
+
+    assert formatting.spot_action(
+        _spot(direction="short")) == "Не открывать позицию"
+    assert formatting.spot_action(
+        _spot(direction="long", htf_bias="bullish")) == "Покупать постепенно, частями"
+    assert formatting.spot_action(
+        _spot(direction="long", htf_bias="neutral")) == "Ждать подтверждения"
+
+
+def test_market_analysis_submenu_keeps_every_existing_screen():
+    """D1.3 follow-up: "📊 Анализ рынка" must not shrink functionality — the
+    overview, levels, funding and reversal screens all stay one tap away."""
+    markup = k.submenu_keyboard("market")
+    pairs = [(btn.text, btn.callback_data)
+             for row in markup.inline_keyboard for btn in row]
+    assert pairs == [
+        ("📊 Общий анализ", "cmd:market"),
+        ("📐 Уровни", "cmd:levels"),
+        ("💰 Funding", "cmd:funding"),
+        ("🔄 Reversal", "cmd:reversal"),
+        ("⬅️ Назад", "menu:main"),
+    ]
+    # The main-menu button opens this submenu rather than firing /market.
+    main = {btn.text: btn.callback_data
+            for row in k.main_inline_keyboard().inline_keyboard for btn in row}
+    assert main["📊 Анализ рынка"] == "menu:market"
+
+
 def test_signal_and_blocked_never_show_score_or_confidence():
     """D1.2 §3: the score and the fake AI-confidence number must not
     return to any user-facing screen."""

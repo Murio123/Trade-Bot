@@ -76,77 +76,160 @@ def format_error(exc: Exception | None = None) -> str:
     return "\n".join(lines)
 
 
-def format_signal(signal: dict[str, Any]) -> str:
+# D1.3: every forecast names the market it describes. This mapping lives at
+# the UX layer on purpose — signal_engine.profiles is a decision module, and
+# renaming a profile there would change what the engine computes, not just
+# what the user reads.
+FORECAST_KIND = {
+    "POSITIONAL": ("🟢", "СПОТ"),
+    "SWING": ("📈", "ФЬЮЧЕРСЫ · СВИНГ"),
+    "INTRADAY": ("⚡", "ФЬЮЧЕРСЫ · ИНТРАДЕЙ"),
+}
+
+
+def forecast_kind(signal: dict[str, Any]) -> tuple[str, str]:
+    """(emoji, label) for the forecast header, falling back to the profile's
+    own styling for any analysis type without a D1.3 market mapping."""
+    kind = FORECAST_KIND.get(str(signal.get("analysis_type") or "").upper())
+    if kind:
+        return kind
+    return signal.get("style_emoji", "🤖"), signal.get("style_label", "ПРОГНОЗ")
+
+
+def _signal_header(signal: dict[str, Any]) -> str:
     ts = signal.get("timestamp")
-    if isinstance(ts, datetime):
-        ts_str = fmt_display_time(ts)
-    else:
-        ts_str = str(ts or "")
+    ts_str = fmt_display_time(ts) if isinstance(ts, datetime) else str(ts or "")
+    emoji, kind = forecast_kind(signal)
+    return (f"{emoji} {config.SYMBOL_DISPLAY} · {kind} | "
+            f"{signal.get('timeframe', '').upper()} | {ts_str}")
 
-    direction = signal.get("direction", "")
-    style = signal.get("style_label", "СИГНАЛ")
-    emoji = signal.get("style_emoji", "🤖")
-    lines = [
-        f"{emoji} {config.SYMBOL_DISPLAY} {style} | {signal.get('timeframe', '').upper()} | {ts_str}",
-        f"📊 Направление: {DIRECTION_LABEL.get(direction, direction)}",
-    ]
+
+def _market_state_lines(signal: dict[str, Any]) -> list[str]:
+    """Shared by both renderers — nothing here is market-type specific."""
+    # Same price labels as format_blocked: the display/candle distinction is
+    # an anti-ambiguity rule shared by both screens, not per-screen styling.
+    out: list[str] = []
     if signal.get("display_price") is not None:
-        lines.append(f"💰 Текущая цена: {_fmt_price(signal.get('display_price'))}")
-    # D1.2 §2: these numbers are real structural facts (nearest swing, ATR
-    # distance), so they stay — but they are presented as descriptive
-    # reference points, not as a recommended trade plan built on a
-    # validated edge. No "Risk Management"/"План"/"Размер позиции" framing.
-    lines += [
-        f"🕯 Цена свечи: {_fmt_price(signal.get('entry_price'))}",
-        f"Тренд {signal.get('htf_tf', '1d').upper()}: "
-        f"{BIAS_LABEL.get(signal.get('htf_bias', 'neutral'))}",
-        "",
-        "Структурные ориентиры (не рекомендация):",
-        f"  Структурная граница: {_fmt_price(signal.get('stop_loss'))} "
-        f"({'за структурой HTF' if signal.get('stop_basis') == 'structure' else str(signal.get('atr_multiplier_used', config.ATR_MULTIPLIER)) + '×ATR ' + str(signal.get('stop_atr_tf', '')).upper()}"
-        f"{_stop_pct(signal)})",
-        f"  Ориентир 1: {_fmt_price(signal.get('target_1'))}"
-        f"{' (HTF-структура)' if signal.get('targets_structure') else ''}",
-        f"  Ориентир 2: {_fmt_price(signal.get('target_2'))}",
-        f"  Объём при риске {signal.get('risk_percent', config.RISK_PERCENT)}%: "
-        f"{signal.get('position_size')} {config.SYMBOL_DISPLAY}",
-        f"  Типичное время до ориентиров: ~{_fmt_duration(signal.get('hold_tp1_hours'))}–"
-        f"{_fmt_duration(signal.get('hold_tp2_hours'))}",
-    ]
-
-    reasons = signal.get("reasons", [])[:8]
-    if reasons:
-        lines.append("")
-        lines.append("Наблюдения:")
-    for reason in reasons:
-        lines.append(f"• {reason}")
-
-    mtf = signal.get("mtf") or {}
+        out.append(f"  💰 Текущая цена: {_fmt_price(signal.get('display_price'))}")
+    out.append(f"  🕯 Цена свечи: {_fmt_price(signal.get('entry_price'))}")
+    out.append(f"  Тренд {signal.get('htf_tf', '1d').upper()}: "
+               f"{BIAS_LABEL.get(signal.get('htf_bias', 'neutral'))}")
     agr = signal.get("mtf_agreement") or {}
+    mtf = signal.get("mtf") or {}
     if mtf and agr.get("total"):
         tf_str = " ".join(
             f"{tf}:{'🔼' if t == 'bullish' else '🔽' if t == 'bearish' else '⚪'}"
             for tf, t in mtf.items())
-        lines.append(f"• Согласие ТФ {agr.get('agree')}/{agr.get('total')} → {tf_str}")
+        out.append(f"  Согласие ТФ {agr.get('agree')}/{agr.get('total')} → {tf_str}")
+    return out
 
-    best = signal.get("session_best")
-    if best:
-        sessions = signal.get("sessions") or {}
-        vol = sessions.get(best, {}).get("avg_range_pct")
-        vol_str = f" (исторически +{vol}% волатильность)" if vol else ""
-        lines.append(f"⏰ Лучшая сессия: {best}{vol_str}")
 
-    ai_text = signal.get("ai_text")
-    if ai_text:
-        lines.append("")
-        lines.append(f"🧠 {ai_text}")
+def _invalidation_lines(signal: dict[str, Any]) -> list[str]:
+    basis = ("за структурой HTF" if signal.get("stop_basis") == "structure"
+             else f"{signal.get('atr_multiplier_used', config.ATR_MULTIPLIER)}"
+                  f"×ATR {str(signal.get('stop_atr_tf') or '').upper()}".rstrip())
+    return [f"  Структурная граница: {_fmt_price(signal.get('stop_loss'))} "
+            f"({basis}{_stop_pct(signal)})",
+            "  За ней описанная структура перестаёт действовать."]
+
+
+def spot_action(signal: dict[str, Any]) -> str:
+    """The "Что делать" line for the spot screen.
+
+    Derived entirely from fields the engine has ALREADY computed (direction
+    and the HTF bias) — this is a rendering choice, not a new decision rule,
+    and nothing here feeds back into the pipeline.
+    """
+    if signal.get("direction") == "short":
+        return "Не открывать позицию"
+    if signal.get("htf_bias") == "bullish":
+        return "Покупать постепенно, частями"
+    return "Ждать подтверждения"
+
+
+def _format_spot_signal(signal: dict[str, Any]) -> str:
+    """Spot screen: no leverage, no futures risk sizing, no short entries.
+
+    Spot has no margin, so "объём при риске 1%" and the position_size that
+    goes with it describe a futures mechanic the holder does not have. They
+    are dropped here rather than relabelled — a number that does not apply is
+    worse than a missing one.
+    """
+    lines = [_signal_header(signal), "", "Состояние рынка"]
+    lines += _market_state_lines(signal)
+
+    lines += ["", "Сценарий"]
+    if signal.get("direction") == "short":
+        # A positional SHORT has no spot equivalent. Presenting it as a trade
+        # would imply an entry the holder cannot take.
+        lines.append("  На споте это не сигнал на продажу, а причина пока "
+                     "не набирать позицию.")
+    else:
+        lines.append(f"  Направление: "
+                     f"{DIRECTION_LABEL.get(signal.get('direction', ''), '')}")
+    for reason in signal.get("reasons", [])[:6]:
+        lines.append(f"  • {reason}")
+    if signal.get("ai_text"):
+        lines.append(f"  {signal['ai_text']}")
+
+    lines += ["", "Ключевые уровни",
+              f"  Ориентир 1: {_fmt_price(signal.get('target_1'))}"
+              f"{' (HTF-структура)' if signal.get('targets_structure') else ''}",
+              f"  Ориентир 2: {_fmt_price(signal.get('target_2'))}",
+              f"  Типичное время до ориентиров: "
+              f"~{_fmt_duration(signal.get('hold_tp1_hours'))}–"
+              f"{_fmt_duration(signal.get('hold_tp2_hours'))}"]
+
+    lines += ["", "Что делать", f"  {spot_action(signal)}"]
+    lines += ["", "Отмена сценария"] + _invalidation_lines(signal)
 
     if signal.get("status") == "journal":
-        lines.append("")
-        lines.append("📒 Записано в журнал, доступно по /signal")
+        lines += ["", "📒 Записано в журнал, доступно по /signal"]
+    lines += ["", EVIDENTIARY_NOTE]
+    return "\n".join(lines)
 
-    lines.append("")
-    lines.append(EVIDENTIARY_NOTE)
+
+def format_signal(signal: dict[str, Any]) -> str:
+    """D1.3 forecast screen.
+
+    Spot renders its own spot-only layout (see _format_spot_signal); futures
+    keep the four numbered blocks — current state, primary scenario, key
+    levels, invalidation.
+
+    D1.2 §2 still governs the numbers themselves: they are real structural
+    facts (nearest swing, ATR distance), so they stay, but as descriptive
+    reference points rather than a trade plan resting on a validated edge.
+    """
+    if forecast_kind(signal)[1] == "СПОТ":
+        return _format_spot_signal(signal)
+
+    lines = [_signal_header(signal), "", "1. Состояние рынка"]
+    lines += _market_state_lines(signal)
+
+    lines += ["", "2. Основной сценарий",
+              f"  Направление: "
+              f"{DIRECTION_LABEL.get(signal.get('direction', ''), '')}"]
+    for reason in signal.get("reasons", [])[:6]:
+        lines.append(f"  • {reason}")
+    if signal.get("ai_text"):
+        lines.append(f"  {signal['ai_text']}")
+
+    lines += ["", "3. Ключевые уровни",
+              f"  Ориентир 1: {_fmt_price(signal.get('target_1'))}"
+              f"{' (HTF-структура)' if signal.get('targets_structure') else ''}",
+              f"  Ориентир 2: {_fmt_price(signal.get('target_2'))}",
+              f"  Объём при риске "
+              f"{signal.get('risk_percent', config.RISK_PERCENT)}%: "
+              f"{signal.get('position_size')} {config.SYMBOL_DISPLAY}",
+              f"  Типичное время до ориентиров: "
+              f"~{_fmt_duration(signal.get('hold_tp1_hours'))}–"
+              f"{_fmt_duration(signal.get('hold_tp2_hours'))}"]
+
+    lines += ["", "4. Инвалидация"] + _invalidation_lines(signal)
+
+    if signal.get("status") == "journal":
+        lines += ["", "📒 Записано в журнал, доступно по /signal"]
+    lines += ["", EVIDENTIARY_NOTE]
     return "\n".join(lines)
 
 
