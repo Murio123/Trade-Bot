@@ -10,3 +10,7 @@ env/
 .DS_Store
 .pytest_cache/
 .mypy_cache/
+
+# Exchange kline cache: ~20 MB, regenerable via tools/kline_cache.py and
+# rewritten on every refresh.
+data/
