@@ -52,6 +52,26 @@ def test_fold_majority_boundary():
     assert verdict == REJECTED and checks["fold_majority"] is False
 
 
+def test_fold_gate_fails_closed_when_the_fold_count_is_not_three():
+    """Codex audit finding: a bare >=2 is not "2 of the 3". With five folds
+    two positives would be a MINORITY, so the rule as written does not apply
+    and must fail rather than be silently reinterpreted."""
+    verdict, checks = _passing(fold_advantages=[0.05, 0.05, 0.05, -0.01, -0.01])
+    assert verdict == REJECTED and checks["fold_majority"] is False
+    assert checks["n_confident_folds"] == 5
+
+    verdict, checks = _passing(fold_advantages=[0.05, 0.05])
+    assert verdict == REJECTED and checks["fold_majority"] is False
+
+
+def test_two_qualifying_years_require_both_positive():
+    """The two-thirds ratio is STRICTER than 2-of-3 when only two years
+    qualify — one positive year out of two must not pass."""
+    assert _passing(year_advantages=[0.03, 0.03])[0] == CONFIRMED
+    verdict, checks = _passing(year_advantages=[0.03, -0.01])
+    assert verdict == REJECTED and checks["year_independence"] is False
+
+
 def test_pooled_must_be_strictly_higher():
     assert _passing(pooled_advantage=1e-9)[0] == CONFIRMED
     for bad in (0.0, -0.01, None):

@@ -126,6 +126,39 @@ def test_unprovable_holdout_exclusion_fails_the_gate():
     assert verdict == "RIDGE_RANKING_VALUE_REJECTED"
 
 
+def test_a_required_key_missing_from_BOTH_sides_is_still_drift():
+    """Codex audit finding: None == None let a vanished metric pass. If a
+    published metric disappears from both the old and new payload — say it
+    was renamed — the guard must object, not silently agree."""
+    pub = _published()
+    fresh = copy.deepcopy(pub)
+    for payload in (pub, fresh):
+        payload["folds"][0].pop("spearman")
+        payload["pooled"].pop("mae_model")
+    diffs = rrc.compare_to_published(fresh, pub)
+    assert any("fold 0.spearman" in d and "<missing>" in d for d in diffs)
+    assert any("pooled.mae_model" in d and "<missing>" in d for d in diffs)
+
+
+def test_a_key_present_on_one_side_only_is_drift():
+    pub = _published()
+    fresh = copy.deepcopy(pub)
+    fresh["pooled"].pop("spearman")
+    assert any("pooled.spearman" in d for d in rrc.compare_to_published(fresh, pub))
+
+
+def test_a_missing_val_lo_fails_the_gate_instead_of_raising():
+    """Codex audit finding: val_lo=None with val_hi past the holdout raised a
+    TypeError, so the 'cannot prove exclusion' path never ran."""
+    fresh = _published()
+    fresh["pooled"]["c43d"] = {"pooled": {"spearman_advantage": 0.02},
+                               "year_slices": {}}
+    for f in fresh["folds"]:
+        f["c43d"] = {"spearman_advantage": 0.01}
+    fresh["folds"][1]["val_idx_range"] = [None, 8300]
+    assert rrc.extract_ranking_inputs(fresh)["holdout_rows_used"] == -1
+
+
 def test_only_confident_folds_and_qualifying_years_feed_the_rule():
     fresh = _published()
     fresh["folds"][0]["c43d"] = {"spearman_advantage": 0.05}

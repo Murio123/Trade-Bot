@@ -54,7 +54,12 @@ class ReproductionMismatch(Exception):
     """Raised when a previously published Ridge number moved."""
 
 
+_MISSING = object()
+
+
 def _close(a: Any, b: Any) -> bool:
+    if a is _MISSING or b is _MISSING:
+        return False  # a required metric that vanished is drift, not a match
     if a is None or b is None:
         return a is b or a == b
     if isinstance(a, bool) or isinstance(b, bool):
@@ -63,6 +68,10 @@ def _close(a: Any, b: Any) -> bool:
         return math.isclose(float(a), float(b), rel_tol=0.0,
                             abs_tol=REPRODUCTION_TOLERANCE)
     return a == b
+
+
+def _show(value: Any) -> str:
+    return "<missing>" if value is _MISSING else repr(value)
 
 
 def compare_to_published(fresh: dict[str, Any], published: dict[str, Any]
@@ -77,16 +86,18 @@ def compare_to_published(fresh: dict[str, Any], published: dict[str, Any]
                      f"{sorted(new_folds)}")
     for fold in sorted(set(old_folds) & set(new_folds)):
         for key in REPRODUCED_FOLD_KEYS:
-            old, new = old_folds[fold].get(key), new_folds[fold].get(key)
+            old = old_folds[fold].get(key, _MISSING)
+            new = new_folds[fold].get(key, _MISSING)
             if not _close(old, new):
-                diffs.append(f"fold {fold}.{key}: {old!r} -> {new!r}")
+                diffs.append(f"fold {fold}.{key}: {_show(old)} -> {_show(new)}")
 
     old_pooled = published.get("pooled") or {}
     new_pooled = fresh.get("pooled") or {}
     for key in REPRODUCED_POOLED_KEYS:
-        old, new = old_pooled.get(key), new_pooled.get(key)
+        old = old_pooled.get(key, _MISSING)
+        new = new_pooled.get(key, _MISSING)
         if not _close(old, new):
-            diffs.append(f"pooled.{key}: {old!r} -> {new!r}")
+            diffs.append(f"pooled.{key}: {_show(old)} -> {_show(new)}")
 
     if published.get("verdict") != fresh.get("verdict"):
         diffs.append(f"verdict: {published.get('verdict')!r} -> "
@@ -128,7 +139,10 @@ def extract_ranking_inputs(fresh: dict[str, Any]) -> dict[str, Any]:
     else:
         for f in fresh.get("folds", []):
             val_lo, val_hi = (f.get("val_idx_range") or [None, None])[:2]
-            if val_hi is None:
+            # BOTH bounds are needed to size the overlap; either one missing
+            # means exclusion cannot be proven, which must fail the gate
+            # rather than raise.
+            if val_lo is None or val_hi is None:
                 holdout_rows = -1
                 break
             if val_hi > holdout_lo:

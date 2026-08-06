@@ -113,8 +113,13 @@ RANKING_DECISION_RULE = (
     "(d) no single fold contributes more than 50% of the aggregate ranking "
     "advantage; (e) no sealed-holdout row is used. Otherwise "
     "RIDGE_RANKING_VALUE_REJECTED. REPRODUCTION_FAILURE overrides both if "
-    "the previously published C4.3 Ridge metrics do not reproduce."
+    "the previously published C4.3 Ridge metrics do not reproduce. "
+    "Gate (a) presumes exactly three confident folds and fails closed at any "
+    "other count. Gate (c) requires at least two qualifying years and a "
+    "two-thirds ratio of them, so with exactly two qualifying years BOTH "
+    "must be positive — stricter than 2-of-3, never looser."
 )
+RANKING_EXPECTED_FOLDS = 3
 RANKING_FOLD_MAJORITY = 2
 RANKING_FOLD_DOMINANCE_MAX = 0.5
 
@@ -132,9 +137,14 @@ def decide_ranking_verdict(fold_advantages: list[float | None],
     if not reproduced:
         return "REPRODUCTION_FAILURE", {"reproduced": False}
 
+    # "2 of the 3 confident folds" presumes three. With any other count the
+    # rule as written does not apply, so fail closed rather than reinterpret
+    # a bare >=2 as a majority (with 5 folds it would be a minority).
     positive_folds = sum(1 for a in fold_advantages if a is not None and a > 0)
     checks: dict[str, Any] = {
-        "fold_majority": positive_folds >= RANKING_FOLD_MAJORITY,
+        "fold_majority": (len(fold_advantages) == RANKING_EXPECTED_FOLDS
+                          and positive_folds >= RANKING_FOLD_MAJORITY),
+        "n_confident_folds": len(fold_advantages),
         "pooled_higher": pooled_advantage is not None and pooled_advantage > 0,
     }
 
