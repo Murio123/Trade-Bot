@@ -113,6 +113,60 @@ def constant_mean_baseline(train_labels: pd.Series) -> float:
     return float(train_labels.mean()) if len(train_labels) else float("nan")
 
 
+def rolling_mean_series_baseline(source_idx, source_labels, query_idx, *,
+                                 window: int = 60, horizon_bars: int = 12,
+                                 max_source_idx: int | None = None
+                                 ) -> np.ndarray:
+    """Point-in-time trailing mean: ONE prediction per query row (C4.3d).
+
+    `rolling_mean_baseline` above collapses to a single scalar per fold, so
+    inside a fold it is constant and has no rank-order power by construction.
+    Comparing a model's Spearman against it is therefore vacuous — any
+    non-degenerate model "wins". This is the fair alternative: a trailing
+    average an observer could actually have tracked bar to bar.
+
+    Observability is the whole point. The label of bar u is computed from
+    bars u+1..u+horizon_bars, so it is only fully known at bar u+horizon_bars.
+    At query bar t the observer therefore knows label[u] exactly when
+    u <= t - horizon_bars, and this function admits no later label into the
+    window. Labels from the query row's own validation region are eligible
+    when they satisfy that inequality — that is legitimate point-in-time
+    knowledge, not leakage, and it is what makes the baseline time-varying.
+
+    `max_source_idx` hard-excludes anything at or beyond it (used to keep the
+    sealed holdout out even though fold geometry already places it out of
+    reach). Returns NaN for a query row with no observable history yet.
+
+    Both arrays must be ordered by idx; `source_idx` must be unique.
+    """
+    src_idx = np.asarray(source_idx, dtype=np.int64)
+    src_lab = np.asarray(source_labels, dtype=float)
+    q_idx = np.asarray(query_idx, dtype=np.int64)
+    if src_idx.shape != src_lab.shape:
+        raise ValueError("source_idx and source_labels must be the same length")
+    if src_idx.size and np.any(np.diff(src_idx) <= 0):
+        raise ValueError("source_idx must be strictly increasing and unique")
+    if window <= 0:
+        raise ValueError("window must be positive")
+
+    if max_source_idx is not None:
+        keep = src_idx < max_source_idx
+        src_idx, src_lab = src_idx[keep], src_lab[keep]
+
+    # Prefix sums make each query O(1) after one searchsorted, and keep the
+    # result independent of how the queries are batched.
+    csum = np.concatenate(([0.0], np.cumsum(src_lab)))
+    # 'right' => count of source rows with idx <= (t - horizon_bars).
+    cutoff = q_idx - horizon_bars
+    end = np.searchsorted(src_idx, cutoff, side="right")
+    start = np.maximum(end - window, 0)
+    count = end - start
+    out = np.full(q_idx.shape, np.nan, dtype=float)
+    ok = count > 0
+    out[ok] = (csum[end[ok]] - csum[start[ok]]) / count[ok]
+    return out
+
+
 def random_constant_baseline(y_true, train_labels, n_draws: int = 500,
                              seed: int = 42) -> dict[str, Any]:
     """Generic "random baseline": draw `n_draws` values from the TRAIN

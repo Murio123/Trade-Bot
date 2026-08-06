@@ -101,6 +101,70 @@ def decide_verdict(checks: dict[str, bool]) -> str:
     return "RIDGE_FAILS"
 
 
+# --- C4.3d frozen ranking decision rule -------------------------------------
+# Fixed here BEFORE the comparison was computed. A positive verdict would
+# establish RANKING utility only — it would not make Ridge a precise
+# volatility predictor, which C4.3c already rejected on MAE.
+RANKING_DECISION_RULE = (
+    "RIDGE_RANKING_VALUE_CONFIRMED only if ALL hold: (a) Ridge Spearman "
+    "exceeds the time-varying rolling baseline in at least 2 of the 3 "
+    "confident folds; (b) pooled Ridge Spearman is strictly higher; (c) the "
+    "advantage is present in at least 2 of 3 qualifying years (>=200 rows); "
+    "(d) no single fold contributes more than 50% of the aggregate ranking "
+    "advantage; (e) no sealed-holdout row is used. Otherwise "
+    "RIDGE_RANKING_VALUE_REJECTED. REPRODUCTION_FAILURE overrides both if "
+    "the previously published C4.3 Ridge metrics do not reproduce."
+)
+RANKING_FOLD_MAJORITY = 2
+RANKING_FOLD_DOMINANCE_MAX = 0.5
+
+
+def decide_ranking_verdict(fold_advantages: list[float | None],
+                           pooled_advantage: float | None,
+                           year_advantages: list[float | None],
+                           holdout_rows_used: int,
+                           reproduced: bool) -> tuple[str, dict[str, Any]]:
+    """Pure application of RANKING_DECISION_RULE.
+
+    Kept free of dataset/IO so the boundaries can be tested directly against
+    hand-built inputs, the same way decide_verdict already is.
+    """
+    if not reproduced:
+        return "REPRODUCTION_FAILURE", {"reproduced": False}
+
+    positive_folds = sum(1 for a in fold_advantages if a is not None and a > 0)
+    checks: dict[str, Any] = {
+        "fold_majority": positive_folds >= RANKING_FOLD_MAJORITY,
+        "pooled_higher": pooled_advantage is not None and pooled_advantage > 0,
+    }
+
+    qualifying = [a for a in year_advantages if a is not None]
+    positive_years = sum(1 for a in qualifying if a > 0)
+    checks["year_independence"] = bool(
+        len(qualifying) >= 2
+        and positive_years * YEAR_RATIO_DEN >= len(qualifying) * YEAR_RATIO_NUM)
+
+    gains = [a for a in fold_advantages if a is not None and a > 0]
+    total_gain = sum(gains)
+    max_fraction = max(gains) / total_gain if total_gain > 0 else None
+    checks["no_single_fold_dominance"] = bool(
+        total_gain > 0 and max_fraction is not None
+        and max_fraction <= RANKING_FOLD_DOMINANCE_MAX)
+    checks["max_fold_fraction"] = max_fraction
+
+    # A negative count means exclusion could not be proven at all, which must
+    # fail exactly as loudly as an actual holdout row.
+    checks["no_holdout_rows"] = holdout_rows_used == 0
+    checks["reproduced"] = True
+
+    gate = ("fold_majority", "pooled_higher", "year_independence",
+            "no_single_fold_dominance", "no_holdout_rows")
+    verdict = ("RIDGE_RANKING_VALUE_CONFIRMED"
+               if all(checks[name] for name in gate)
+               else "RIDGE_RANKING_VALUE_REJECTED")
+    return verdict, checks
+
+
 def _year_of(ts: str) -> int:
     return int(ts[:4])
 
@@ -117,6 +181,57 @@ def _fold_baselines(train_labels: pd.Series, n_val: int
     constant = np.full(n_val, ee.constant_mean_baseline(train_labels))
     return {"persistence": persistence, "rolling_mean_60": rolling,
            "train_mean": constant}
+
+
+def rolling_series_for_fold(all_idx: np.ndarray, all_labels: np.ndarray,
+                            val_idx: np.ndarray, holdout_lo: int) -> np.ndarray:
+    """C4.3d point-in-time trailing mean for one fold's validation rows.
+
+    Source pool is the whole dataset below the sealed holdout; the
+    observability rule inside rolling_mean_series_baseline (idx <= t - H) is
+    what actually restricts it, so no fold bookkeeping is needed and none is
+    applied. `holdout_lo` is belt-and-braces: fold geometry already puts
+    val_hi below it.
+    """
+    return ee.rolling_mean_series_baseline(
+        all_idx, all_labels, val_idx, window=ROLLING_MEAN_WINDOW,
+        horizon_bars=VOLATILITY_HORIZON_BARS, max_source_idx=holdout_lo)
+
+
+def _series_fold_metrics(y_true: np.ndarray, model_pred: np.ndarray,
+                         series_pred: np.ndarray) -> dict[str, Any]:
+    """Ridge vs the time-varying baseline on one slice.
+
+    Rows where the baseline has no observable history yet (NaN) are dropped
+    from BOTH sides, so the two are always scored on identical rows.
+    """
+    if len(y_true) == 0:
+        return {"n": 0, "n_dropped_no_history": 0}
+    model_pred = np.asarray(model_pred, dtype=float)
+    series_pred = np.asarray(series_pred, dtype=float)
+    ok = ~np.isnan(series_pred)
+    n_dropped = int((~ok).sum())
+    y, m, s = y_true[ok], model_pred[ok], series_pred[ok]
+    if len(y) == 0:
+        return {"n": 0, "n_dropped_no_history": n_dropped}
+    sp_model = ee.spearman_corr(y, m)
+    sp_series = ee.spearman_corr(y, s)
+    # The trailing mean turns out to be ANTI-correlated with this label at the
+    # observability lag, so a signed advantage flatters the model: an observer
+    # who simply inverted the baseline would score |rho|. Reported alongside
+    # so the signed number is never read on its own. Diagnostic only — the
+    # frozen decision rule uses the signed advantage and is not restated here.
+    abs_advantage = (None if sp_model is None or sp_series is None
+                     else abs(sp_model) - abs(sp_series))
+    return {
+        "n": int(len(y)), "n_dropped_no_history": n_dropped,
+        "spearman_model": sp_model, "spearman_rolling_series": sp_series,
+        "spearman_advantage": (None if sp_model is None or sp_series is None
+                               else sp_model - sp_series),
+        "spearman_advantage_vs_abs": abs_advantage,
+        "mae_model": ee.mae(y, m), "mae_rolling_series": ee.mae(y, s),
+        "rmse_model": ee.rmse(y, m), "rmse_rolling_series": ee.rmse(y, s),
+    }
 
 
 def run(dataset: str, exchange: str, symbol: str, bars: int = BARS,
@@ -140,11 +255,17 @@ def run(dataset: str, exchange: str, symbol: str, bars: int = BARS,
     feature_names = model_input_names()
     rows = df.to_dict("records")
 
+    # C4.3d: full ordered label series, the source pool for the point-in-time
+    # trailing mean. Built once; the observability rule does the restricting.
+    all_idx = df["idx"].to_numpy(dtype=np.int64)
+    all_labels = df["label"].to_numpy(dtype=float)
+
     fold_reports: list[dict[str, Any]] = []
     pooled_rows: list[dict[str, Any]] = []
     pooled_pred: list[float] = []
     pooled_baselines: dict[str, list[float]] = {"persistence": [], "rolling_mean_60": [],
-                                                "train_mean": []}
+                                                "train_mean": [],
+                                                "rolling_series_60": []}
 
     for fold in folds:
         train_rows, val_rows = partition_rows(rows, fold, VOLATILITY_HORIZON_BARS)
@@ -167,6 +288,12 @@ def run(dataset: str, exchange: str, symbol: str, bars: int = BARS,
                     if len(val_df) else {"persistence": np.array([]),
                                         "rolling_mean_60": np.array([]),
                                         "train_mean": np.array([])})
+        # C4.3d challenger: one prediction per validation row, not a constant.
+        baselines["rolling_series_60"] = (
+            rolling_series_for_fold(all_idx, all_labels,
+                                    val_df["idx"].to_numpy(dtype=np.int64),
+                                    holdout_lo)
+            if len(val_df) else np.array([]))
 
         fold_mae_model = ee.mae(val_df["label"], val_pred) if len(val_df) else None
         fold_mae_persistence = (ee.mae(val_df["label"], baselines["persistence"])
@@ -187,6 +314,12 @@ def run(dataset: str, exchange: str, symbol: str, bars: int = BARS,
             "mae_train_mean": fold_mae_constant,
             "rmse_model": ee.rmse(val_df["label"], val_pred) if len(val_df) else None,
             "spearman": ee.spearman_corr(val_df["label"], val_pred) if len(val_df) else None,
+            # --- C4.3d: additive only. Every key above is untouched so the
+            # published C4.3 numbers stay bit-comparable. ---
+            "c43d": _series_fold_metrics(val_df["label"].to_numpy(dtype=float)
+                                         if len(val_df) else np.array([]),
+                                         val_pred,
+                                         baselines["rolling_series_60"]),
         })
 
         if confident and len(val_df):
@@ -248,6 +381,16 @@ def run(dataset: str, exchange: str, symbol: str, bars: int = BARS,
                 "beats_persistence": ee.mae(y_year, pred_year) <= ee.mae(y_year, persistence_year),
             }
         pooled_metrics["year_slices"] = year_stats
+
+        # -- C4.3d: pooled + per-year Ridge vs the time-varying baseline --
+        series_arr = np.array(pooled_baselines["rolling_series_60"])
+        c43d_pooled = _series_fold_metrics(y_true, pooled_pred_arr, series_arr)
+        c43d_years: dict[str, Any] = {}
+        for year in year_stats:
+            mask = (years == int(year)).to_numpy()
+            c43d_years[year] = _series_fold_metrics(
+                y_true[mask], pooled_pred_arr[mask], series_arr[mask])
+        pooled_metrics["c43d"] = {"pooled": c43d_pooled, "year_slices": c43d_years}
 
         # -- volatility slices (tercile of volatility_atr_percentile) --
         vol_col = pooled["volatility_atr_percentile"].astype(float)
