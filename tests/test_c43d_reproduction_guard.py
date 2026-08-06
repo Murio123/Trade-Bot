@@ -147,16 +147,31 @@ def test_a_key_present_on_one_side_only_is_drift():
     assert any("pooled.spearman" in d for d in rrc.compare_to_published(fresh, pub))
 
 
-def test_a_missing_val_lo_fails_the_gate_instead_of_raising():
-    """Codex audit finding: val_lo=None with val_hi past the holdout raised a
-    TypeError, so the 'cannot prove exclusion' path never ran."""
+def test_any_malformed_val_idx_range_fails_the_gate_instead_of_raising():
+    """Codex audit finding: a crash here SKIPS the holdout check rather than
+    failing it, which is the opposite of fail-closed. Every shape the payload
+    could take must reach -1."""
+    for malformed in ([None, 8300], [8000, None], None, [], [1],
+                      [1, 2, 3], 5, {"lo": 1, "hi": 2}, "8000-8300",
+                      ["a", "b"], [1.5, "x"]):
+        fresh = _published()
+        fresh["pooled"]["c43d"] = {"pooled": {"spearman_advantage": 0.02},
+                                   "year_slices": {}}
+        for f in fresh["folds"]:
+            f["c43d"] = {"spearman_advantage": 0.01}
+        fresh["folds"][1]["val_idx_range"] = malformed
+        assert rrc.extract_ranking_inputs(fresh)["holdout_rows_used"] == -1, \
+            f"{malformed!r} did not fail closed"
+
+
+def test_well_formed_float_bounds_are_still_accepted():
     fresh = _published()
     fresh["pooled"]["c43d"] = {"pooled": {"spearman_advantage": 0.02},
                                "year_slices": {}}
     for f in fresh["folds"]:
         f["c43d"] = {"spearman_advantage": 0.01}
-    fresh["folds"][1]["val_idx_range"] = [None, 8300]
-    assert rrc.extract_ranking_inputs(fresh)["holdout_rows_used"] == -1
+    fresh["folds"][1]["val_idx_range"] = [8000.0, 8300.0]
+    assert rrc.extract_ranking_inputs(fresh)["holdout_rows_used"] == 101
 
 
 def test_only_confident_folds_and_qualifying_years_feed_the_rule():

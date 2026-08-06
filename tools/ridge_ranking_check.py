@@ -110,6 +110,23 @@ def compare_to_published(fresh: dict[str, Any], published: dict[str, Any]
     return diffs
 
 
+def _int_pair(value: Any) -> tuple[int, int] | None:
+    """(lo, hi) if `value` is exactly two integer-like bounds, else None.
+
+    Deliberately total: any shape this does not understand yields None so the
+    caller fails the holdout gate instead of raising.
+    """
+    if isinstance(value, (str, bytes, dict)) or not isinstance(value, (list, tuple)):
+        return None
+    if len(value) != 2:
+        return None
+    try:
+        lo, hi = int(value[0]), int(value[1])
+    except (TypeError, ValueError):
+        return None
+    return lo, hi
+
+
 def extract_ranking_inputs(fresh: dict[str, Any]) -> dict[str, Any]:
     """Pull the C4.3d comparison out of a completed run."""
     fold_adv: list[float | None] = []
@@ -138,13 +155,15 @@ def extract_ranking_inputs(fresh: dict[str, Any]) -> dict[str, Any]:
         holdout_rows = -1  # cannot prove exclusion -> fails the gate
     else:
         for f in fresh.get("folds", []):
-            val_lo, val_hi = (f.get("val_idx_range") or [None, None])[:2]
-            # BOTH bounds are needed to size the overlap; either one missing
-            # means exclusion cannot be proven, which must fail the gate
-            # rather than raise.
-            if val_lo is None or val_hi is None:
+            # Anything that is not a clean pair of integers means exclusion
+            # cannot be proven, which must fail the gate rather than raise —
+            # a crash here would skip the check entirely instead of failing
+            # it, which is the opposite of fail-closed.
+            bounds = _int_pair(f.get("val_idx_range"))
+            if bounds is None:
                 holdout_rows = -1
                 break
+            val_lo, val_hi = bounds
             if val_hi > holdout_lo:
                 holdout_rows += int(val_hi - max(val_lo, holdout_lo))
 
