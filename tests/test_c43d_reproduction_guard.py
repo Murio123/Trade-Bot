@@ -164,6 +164,33 @@ def test_any_malformed_val_idx_range_fails_the_gate_instead_of_raising():
             f"{malformed!r} did not fail closed"
 
 
+def test_tuples_and_numpy_bounds_are_valid_not_malformed():
+    """A third audit pass flagged these as "not failing closed". They are not
+    malformed: a tuple or a pair of numpy integers unambiguously denotes two
+    bounds, and accepting them hides nothing — a range that crosses the
+    holdout is still counted. Pinned so the distinction is not "fixed" later.
+
+    (In practice the payload is json.load'ed and only ever yields lists of
+    ints; these shapes exist only when the function is called directly.)
+    """
+    import numpy as np
+
+    fresh = _published()
+    fresh["pooled"]["c43d"] = {"pooled": {"spearman_advantage": 0.02},
+                               "year_slices": {}}
+    for f in fresh["folds"]:
+        f["c43d"] = {"spearman_advantage": 0.01}
+
+    for crossing in ((8000, 8300), [np.int64(8000), np.int64(8300)]):
+        fresh["folds"][1]["val_idx_range"] = crossing
+        assert rrc.extract_ranking_inputs(fresh)["holdout_rows_used"] == 101, \
+            f"{crossing!r} must still expose the overlap"
+
+    for clean in ((5476, 6830), [np.int64(5476), np.int64(6830)]):
+        fresh["folds"][1]["val_idx_range"] = clean
+        assert rrc.extract_ranking_inputs(fresh)["holdout_rows_used"] == 0
+
+
 def test_well_formed_float_bounds_are_still_accepted():
     fresh = _published()
     fresh["pooled"]["c43d"] = {"pooled": {"spearman_advantage": 0.02},
