@@ -124,6 +124,41 @@ def test_empty_inputs_cannot_pass():
     assert rs.decide_significance([], [])[0] == "ADVANTAGE_NOT_SIGNIFICANT"
 
 
+def test_a_missing_block_length_cannot_pass():
+    """Audit finding: "every tested block length" means the frozen set. A run
+    that dropped the inconvenient blocks and passed on the remainder would
+    otherwise look identical to a clean pass."""
+    partial_boot = [{"ci_lo": 0.05, "block": 12}]
+    partial_perm = [{"p_value": 0.001, "block": 12}]
+    verdict, checks = rs.decide_significance(partial_boot, partial_perm)
+    assert verdict == "ADVANTAGE_NOT_SIGNIFICANT"
+    assert checks["all_block_lengths_present"] is False
+
+    # an extra, unfrozen block length is also not the frozen set
+    extra_boot = [{"ci_lo": 0.05, "block": b} for b in (*rs.BLOCK_LENGTHS, 7)]
+    extra_perm = [{"p_value": 0.001, "block": b} for b in (*rs.BLOCK_LENGTHS, 7)]
+    assert rs.decide_significance(extra_boot, extra_perm)[0] == \
+        "ADVANTAGE_NOT_SIGNIFICANT"
+
+    # bootstrap complete but permutation missing one -> still fails
+    full_boot = [{"ci_lo": 0.05, "block": b} for b in rs.BLOCK_LENGTHS]
+    short_perm = [{"p_value": 0.001, "block": b} for b in rs.BLOCK_LENGTHS[:-1]]
+    assert rs.decide_significance(full_boot, short_perm)[0] == \
+        "ADVANTAGE_NOT_SIGNIFICANT"
+
+
+def test_permutation_refuses_a_sample_too_short_for_its_block():
+    """Audit finding: it used to fall back to shift=1, which is smaller than
+    the block and no longer respects the serial structure."""
+    y, good, useless = _linked(n=100)
+    with pytest.raises(ValueError, match="too short"):
+        rs.block_permutation_p(y, good, useless, block=60, n_resamples=10)
+
+    # comfortably long enough still works
+    out = rs.block_permutation_p(y, good, useless, block=12, n_resamples=50)
+    assert 0 < out["p_value"] <= 1
+
+
 def test_forward_requirement_scales_back_up_for_overlap():
     """The ledger records overlapping forecasts, so the row count needed is
     the effective count times the overlap factor."""

@@ -114,13 +114,20 @@ def block_permutation_p(y: np.ndarray, ridge: np.ndarray, base: np.ndarray,
     structure. The baseline stays aligned, so the null keeps whatever skill
     the baseline genuinely has.
     """
-    rng = np.random.default_rng(seed + 1)
     n = len(y)
+    if n < 3 * block:
+        # Below this a "shift of at least one block" has almost no room, and
+        # silently falling back to shift=1 would stop respecting the block
+        # structure the whole test exists to preserve.
+        raise ValueError(
+            f"sample of {n} rows is too short for a block permutation at "
+            f"block={block}; need at least {3 * block}")
+    rng = np.random.default_rng(seed + 1)
     observed = advantage(y, ridge, base)
     count = 0
     total = 0
     for _ in range(n_resamples):
-        shift = int(rng.integers(block, n - block)) if n > 2 * block else 1
+        shift = int(rng.integers(block, n - block))
         stat = advantage(y, np.roll(ridge, shift), base)
         if stat is None:
             continue
@@ -145,9 +152,17 @@ def effective_sample_size(y: np.ndarray, horizon: int = 12) -> dict[str, Any]:
 def decide_significance(bootstraps: list[dict[str, Any]],
                         permutations: list[dict[str, Any]]) -> tuple[str, dict]:
     """Pure application of SIGNIFICANCE_RULE."""
-    ci_ok = all(b["ci_lo"] > 0 for b in bootstraps) and bool(bootstraps)
-    perm_ok = all(p["p_value"] < 0.05 for p in permutations) and bool(permutations)
+    # "every tested block length" means the frozen set, not merely whatever
+    # happened to be passed in — otherwise a run that quietly dropped the
+    # inconvenient block lengths would still pass.
+    expected = set(BLOCK_LENGTHS)
+    complete = ({b.get("block") for b in bootstraps} == expected
+                and {p.get("block") for p in permutations} == expected)
+
+    ci_ok = complete and all(b["ci_lo"] > 0 for b in bootstraps)
+    perm_ok = complete and all(p["p_value"] < 0.05 for p in permutations)
     checks = {
+        "all_block_lengths_present": complete,
         "ci_lower_positive_at_every_block": ci_ok,
         "permutation_rejects_at_every_block": perm_ok,
         "worst_ci_lo": min((b["ci_lo"] for b in bootstraps), default=None),
