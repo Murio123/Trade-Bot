@@ -402,6 +402,17 @@ def run(dataset: str, exchange: str, symbol: str, bars: int = BARS,
                 y_true[mask], pooled_pred_arr[mask], series_arr[mask])
         pooled_metrics["c43d"] = {"pooled": c43d_pooled, "year_slices": c43d_years}
 
+        # Per-row dump for downstream significance testing. Deliberately NOT
+        # serialised into ridge_evaluation.json (4k rows would bloat the
+        # published artifact); the caller pops it off the returned dict.
+        c43d_per_row = {
+            "idx": pooled["idx"].astype(int).tolist(),
+            "prediction_timestamp_utc": pooled["prediction_timestamp_utc"].tolist(),
+            "label": y_true.tolist(),
+            "ridge_pred": pooled_pred_arr.tolist(),
+            "rolling_series_pred": series_arr.tolist(),
+        }
+
         # -- volatility slices (tercile of volatility_atr_percentile) --
         vol_col = pooled["volatility_atr_percentile"].astype(float)
         try:
@@ -488,6 +499,7 @@ def run(dataset: str, exchange: str, symbol: str, bars: int = BARS,
             checks["reproducible"] = False
     else:
         checks = {k: False for k in REQUIRED_CHECK_NAMES}
+        c43d_per_row = {}
 
     verdict = decide_verdict(checks)
 
@@ -566,6 +578,8 @@ def run(dataset: str, exchange: str, symbol: str, bars: int = BARS,
         registry_status = f"not_registered: {exc}"
     result["registry_status"] = registry_status
 
+    # Attached only to the returned object, never to the written artifacts.
+    result["c43d_per_row"] = c43d_per_row
     return result
 
 

@@ -193,6 +193,7 @@ def run(dataset: str, exchange: str, symbol: str, bars: int,
     fresh = ridge_run(dataset, exchange, symbol, bars, outdir=scratch,
                       registry_dir=os.path.join(scratch, "model_registry"))
 
+    per_row = fresh.pop("c43d_per_row", {})
     diffs = compare_to_published(fresh, published)
     reproduced = not diffs
 
@@ -230,6 +231,11 @@ def run(dataset: str, exchange: str, symbol: str, bars: int,
     }
 
     os.makedirs(outdir, exist_ok=True)
+    # Per-row dump so significance testing can run without rebuilding the
+    # dataset. Confident-fold validation rows only — the same population the
+    # pooled numbers are computed from.
+    with open(os.path.join(outdir, "per_row.json"), "w") as fh:
+        json.dump(per_row, fh, indent=2, default=str)
     with open(os.path.join(outdir, "ridge_vs_rolling_series.json"), "w") as fh:
         json.dump(result, fh, indent=2, default=str)
     with open(os.path.join(outdir, "ridge_vs_rolling_series.txt"), "w") as fh:
