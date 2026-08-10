@@ -234,13 +234,31 @@ def test_offline_tools_not_imported_by_production():
     используется production (analyzer/outcomes.py). Инвариант теперь: offline
     tools-слой (tools.realized_r / tools.forecast_metrics) НЕ импортируется
     runtime-кодом — аналитика не попадает в decision-path."""
+    import ast
+
     skip = {"tests", "tools", ".venv", ".git", "__pycache__", "scratchpad"}
     offenders = []
     for py in REPO.rglob("*.py"):
         if skip & set(py.parts):
             continue
         src = py.read_text(encoding="utf-8", errors="ignore")
-        if re.search(r"\b(import\s+tools|from\s+tools)\b", src):
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:  # pragma: no cover - not our code to fix here
+            continue
+        # Real imports only. A prose mention ("must never import tools.x") is
+        # documentation, not a dependency, and a text scan conflates the two.
+        for node in ast.walk(tree):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            if any(n == "tools" or n.startswith("tools.") for n in names):
+                offenders.append(str(py.relative_to(REPO)))
+                break
+        # importlib would slip past the AST check above.
+        if re.search(r"import_module\(\s*['\"]tools[.'\"]", src):
             offenders.append(str(py.relative_to(REPO)))
     assert not offenders, f"production импортирует offline tools: {offenders}"
 
