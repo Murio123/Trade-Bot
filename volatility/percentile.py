@@ -8,6 +8,7 @@ at all.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass
@@ -16,6 +17,17 @@ from typing import Any
 import numpy as np
 
 DISTRIBUTION_VERSION = "c44_ref_v1"
+
+
+def content_sha256(scores) -> str:
+    """Fingerprint of the reference itself.
+
+    The version string is a code constant, so it cannot tell a re-fitted
+    reference from the original — both come out as c44_ref_v1. Only the
+    content can. Callers that must not silently absorb a re-fit pin this.
+    """
+    arr = np.sort(np.asarray(scores, dtype=float))
+    return hashlib.sha256(arr.tobytes()).hexdigest()
 
 # Frozen cut points. Deliberately asymmetric: the interesting statements are
 # "unusually quiet" and "unusually busy", so the middle is wide.
@@ -70,16 +82,39 @@ def save_reference(ref: ReferenceDistribution, path: str) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as fh:
         json.dump({"version": ref.version, "source": ref.source,
+                   "content_sha256": content_sha256(ref.scores),
                    "scores": ref.scores.tolist()}, fh, indent=2, default=str)
 
 
-def load_reference(path: str) -> ReferenceDistribution:
+def load_reference(path: str, expected_sha256: str | None = None
+                   ) -> ReferenceDistribution:
+    """Load a frozen reference.
+
+    Three separate checks, because they catch different failures:
+      - version: the file was written by incompatible code;
+      - stored hash vs recomputed: the file was edited or truncated;
+      - `expected_sha256`: the file is a DIFFERENT reference than the caller
+        was built against. Only this one catches a re-fit, since a re-fit
+        keeps the same version string and its own hash is self-consistent.
+    """
     with open(path) as fh:
         payload = json.load(fh)
     if payload.get("version") != DISTRIBUTION_VERSION:
         raise ValueError(
             f"reference distribution version mismatch: file has "
             f"{payload.get('version')!r}, code expects "
-            f"{DISTRIBUTION_VERSION!r} — a silently re-fitted reference would "
-            f"change what every past category meant")
-    return build_reference(payload["scores"], payload.get("source", {}))
+            f"{DISTRIBUTION_VERSION!r}")
+
+    scores = payload["scores"]
+    actual = content_sha256(scores)
+    stored = payload.get("content_sha256")
+    if stored is not None and stored != actual:
+        raise ValueError(
+            f"reference distribution is corrupt: stored hash {stored} does "
+            f"not match its own contents ({actual})")
+    if expected_sha256 is not None and actual != expected_sha256:
+        raise ValueError(
+            f"reference distribution was re-fitted: expected {expected_sha256}, "
+            f"file contains {actual} — loading it would silently change what "
+            f"every category recorded in the ledger meant")
+    return build_reference(scores, payload.get("source", {}))

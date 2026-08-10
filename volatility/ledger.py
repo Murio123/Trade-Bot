@@ -17,9 +17,15 @@ Schema is symbol-keyed throughout so a second asset needs no migration.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 from typing import Any, Iterator
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX
+    fcntl = None  # type: ignore
 
 LEDGER_VERSION = "c44_ledger_v1"
 KIND_FORECAST = "forecast"
@@ -52,10 +58,66 @@ def read_all(path: str) -> list[dict[str, Any]]:
     return list(_read_lines(path))
 
 
+@contextlib.contextmanager
+def _exclusive(path: str):
+    """Hold an exclusive lock across the whole check-then-append.
+
+    Without it the duplicate guards are read-then-write races: two producers
+    firing on the same bar would both find nothing and both append. The lock
+    lives on a sidecar so it is unaffected by how the ledger itself is opened.
+    """
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    lock_path = path + ".lock"
+    with open(lock_path, "a+") as lock:
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def _append(path: str, record: dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "a") as fh:
         fh.write(json.dumps(record, sort_keys=True, default=str) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+
+
+def _forecast_index(path: str) -> dict[str, dict[str, Any]]:
+    """forecast_id -> row, refusing to collapse duplicates.
+
+    A dict comprehension would let the last duplicate win, which is exactly
+    how an append-only ledger stops being append-only: a second row for the
+    same id would silently override the first.
+    """
+    out: dict[str, dict[str, Any]] = {}
+    for rec in _read_lines(path):
+        if rec.get("kind") != KIND_FORECAST:
+            continue
+        fid = rec.get("forecast_id")
+        if fid in out:
+            raise LedgerError(
+                f"duplicate forecast {fid} in {path} — the ledger is "
+                "corrupt; it must contain each forecast exactly once")
+        out[fid] = rec
+    return out
+
+
+def _matured_ids(path: str) -> set[str]:
+    seen: set[str] = set()
+    for rec in _read_lines(path):
+        if rec.get("kind") != KIND_MATURATION:
+            continue
+        fid = rec.get("forecast_id")
+        if fid in seen:
+            raise LedgerError(
+                f"duplicate maturation for {fid} in {path} — the ledger is "
+                "corrupt; an outcome is recorded exactly once")
+        seen.add(fid)
+    return seen
 
 
 def forecast_id(symbol: str, bar_idx: int) -> str:
@@ -72,11 +134,22 @@ def append_forecast(path: str, *, symbol: str, bar_idx: int,
                     baselines: dict[str, Any] | None = None) -> dict[str, Any]:
     """Record one forecast. Refuses to overwrite an existing (symbol, bar)."""
     fid = forecast_id(symbol, bar_idx)
-    for rec in _read_lines(path):
-        if rec.get("kind") == KIND_FORECAST and rec.get("forecast_id") == fid:
+    with _exclusive(path):
+        existing = _forecast_index(path).get(fid)
+        if existing is not None:
             raise ImmutableRecordError(
-                f"forecast {fid} already recorded at {rec.get('created_at_utc')}; "
-                "the ledger is append-only and a forecast is never rewritten")
+                f"forecast {fid} already recorded at bar "
+                f"{existing.get('bar_idx')}; the ledger is append-only and a "
+                "forecast is never rewritten")
+        return _write_forecast(path, fid, symbol, bar_idx, bar_close_utc,
+                               horizon_bars, ranker_version,
+                               distribution_version, score, percentile,
+                               category, shadow, baselines)
+
+
+def _write_forecast(path, fid, symbol, bar_idx, bar_close_utc, horizon_bars,
+                    ranker_version, distribution_version, score, percentile,
+                    category, shadow, baselines) -> dict[str, Any]:
     record = {
         "ledger_version": LEDGER_VERSION,
         "kind": KIND_FORECAST,
@@ -108,57 +181,53 @@ def append_maturation(path: str, *, forecast_id_: str, at_bar_idx: int,
                       baseline_errors: dict[str, Any] | None = None
                       ) -> dict[str, Any]:
     """Record an outcome. The forecast row itself is left untouched."""
-    forecasts = {r["forecast_id"]: r for r in _read_lines(path)
-                 if r.get("kind") == KIND_FORECAST}
-    matured = {r["forecast_id"] for r in _read_lines(path)
-               if r.get("kind") == KIND_MATURATION}
-    if forecast_id_ not in forecasts:
-        raise LedgerError(f"no forecast {forecast_id_} to mature")
-    if forecast_id_ in matured:
-        raise ImmutableRecordError(
-            f"forecast {forecast_id_} is already matured; an outcome is "
-            "recorded exactly once")
+    with _exclusive(path):
+        forecasts = _forecast_index(path)
+        matured = _matured_ids(path)
+        if forecast_id_ not in forecasts:
+            raise LedgerError(f"no forecast {forecast_id_} to mature")
+        if forecast_id_ in matured:
+            raise ImmutableRecordError(
+                f"forecast {forecast_id_} is already matured; an outcome is "
+                "recorded exactly once")
 
-    fc = forecasts[forecast_id_]
-    if at_bar_idx < fc["matures_at_bar_idx"]:
-        raise LedgerError(
-            f"forecast {forecast_id_} matures at bar "
-            f"{fc['matures_at_bar_idx']}, not {at_bar_idx} — an outcome read "
-            f"before the horizon closes would be measuring an unfinished "
-            f"window")
+        fc = forecasts[forecast_id_]
+        if at_bar_idx < fc["matures_at_bar_idx"]:
+            raise LedgerError(
+                f"forecast {forecast_id_} matures at bar "
+                f"{fc['matures_at_bar_idx']}, not {at_bar_idx} — an outcome "
+                f"read before the horizon closes would be measuring an "
+                f"unfinished window")
 
-    record = {
-        "ledger_version": LEDGER_VERSION,
-        "kind": KIND_MATURATION,
-        "forecast_id": forecast_id_,
-        "symbol": fc["symbol"],
-        "at_bar_idx": at_bar_idx,
-        "realized_score": realized_score,
-        "realized_percentile": realized_percentile,
-        "realized_category": realized_category,
-        "rank_error": abs(realized_percentile - fc["percentile"]),
-        "category_hit": realized_category == fc["category"],
-        "shadow_errors": shadow_errors or {},
-        "baseline_errors": baseline_errors or {},
-    }
-    _append(path, record)
-    return record
+        record = {
+            "ledger_version": LEDGER_VERSION,
+            "kind": KIND_MATURATION,
+            "forecast_id": forecast_id_,
+            "symbol": fc["symbol"],
+            "at_bar_idx": at_bar_idx,
+            "realized_score": realized_score,
+            "realized_percentile": realized_percentile,
+            "realized_category": realized_category,
+            "rank_error": abs(realized_percentile - fc["percentile"]),
+            "category_hit": realized_category == fc["category"],
+            "shadow_errors": shadow_errors or {},
+            "baseline_errors": baseline_errors or {},
+        }
+        _append(path, record)
+        return record
 
 
 def pending(path: str, symbol: str | None = None) -> list[dict[str, Any]]:
-    matured = {r["forecast_id"] for r in _read_lines(path)
-               if r.get("kind") == KIND_MATURATION}
-    return [r for r in _read_lines(path)
-            if r.get("kind") == KIND_FORECAST
-            and r["forecast_id"] not in matured
+    matured = _matured_ids(path)
+    return [r for r in _forecast_index(path).values()
+            if r["forecast_id"] not in matured
             and (symbol is None or r["symbol"] == symbol)]
 
 
 def matured_pairs(path: str, symbol: str | None = None
                   ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """(forecast, maturation) for every settled forecast, in ledger order."""
-    forecasts = {r["forecast_id"]: r for r in _read_lines(path)
-                 if r.get("kind") == KIND_FORECAST}
+    forecasts = _forecast_index(path)
     out = []
     for rec in _read_lines(path):
         if rec.get("kind") != KIND_MATURATION:

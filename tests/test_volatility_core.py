@@ -127,6 +127,44 @@ def test_a_reference_from_another_version_is_refused(tmp_path):
         percentile.load_reference(path)
 
 
+def test_a_refit_with_the_same_version_is_caught_by_the_hash(tmp_path):
+    """Audit finding: the version is a code constant, so a re-fitted
+    reference carries the SAME version string and used to load silently.
+    Only the content can tell them apart."""
+    original = _ref()
+    path = str(tmp_path / "ref.json")
+    percentile.save_reference(original, path)
+    pinned = percentile.content_sha256(original.scores)
+
+    # pinning the original hash: loads fine
+    percentile.load_reference(path, expected_sha256=pinned)
+
+    # someone re-fits on newer data; same version, different content
+    refit = percentile.build_reference(np.linspace(0, 2, 1000), {"src": "refit"})
+    percentile.save_reference(refit, path)
+    assert refit.version == original.version, "the version cannot distinguish them"
+    with pytest.raises(ValueError, match="re-fitted"):
+        percentile.load_reference(path, expected_sha256=pinned)
+
+
+def test_an_edited_reference_file_is_caught_even_without_pinning(tmp_path):
+    path = str(tmp_path / "ref.json")
+    percentile.save_reference(_ref(), path)
+    with open(path) as fh:
+        payload = json.load(fh)
+    payload["scores"][0] = -999.0          # tamper, leave the stored hash
+    with open(path, "w") as fh:
+        json.dump(payload, fh)
+    with pytest.raises(ValueError, match="corrupt"):
+        percentile.load_reference(path)
+
+
+def test_content_hash_ignores_ordering_but_not_values():
+    a = percentile.content_sha256([3.0, 1.0, 2.0])
+    assert a == percentile.content_sha256([1.0, 2.0, 3.0])
+    assert a != percentile.content_sha256([1.0, 2.0, 3.5])
+
+
 def test_percentile_does_not_move_when_live_data_would():
     """The reference is frozen: feeding extreme new scores changes the
     percentile OF those scores, never the reference itself."""
@@ -255,6 +293,87 @@ def test_schema_is_symbol_keyed_so_a_second_asset_needs_no_migration(tmp_path):
                              realized_category="NORMAL")
     assert len(ledger.matured_pairs(path, "BTCUSDT")) == 0
     assert len(ledger.matured_pairs(path, "ETHUSDT")) == 1
+
+
+def test_concurrent_producers_cannot_both_write_the_same_forecast(tmp_path):
+    """Audit finding: the duplicate guard was read-then-append with no lock,
+    so two producers firing on the same bar would both find nothing and both
+    append. Exercised with real processes, not a mocked race."""
+    import subprocess
+    import sys
+    import textwrap
+    import time
+
+    path = str(tmp_path / "l.jsonl")
+    repo = str(__import__("pathlib").Path(__file__).resolve().parent.parent)
+    # A shared wall-clock start beats time.sleep: process startup jitter is
+    # larger than any fixed sleep, and without a tight barrier an unlocked
+    # implementation slips through most runs.
+    start_at = time.time() + 1.5
+    script = textwrap.dedent(f"""
+        import sys, time
+        sys.path.insert(0, {repo!r})
+        from volatility import ledger
+        while time.time() < {start_at!r}:
+            pass
+        try:
+            ledger.append_forecast({path!r}, symbol="BTCUSDT", bar_idx=100,
+                bar_close_utc="2026-08-10T00:00:00Z", horizon_bars=12,
+                ranker_version="v", distribution_version="v",
+                score=0.5, percentile=71.0, category="ELEVATED")
+            print("WROTE")
+        except ledger.ImmutableRecordError:
+            print("REFUSED")
+    """)
+    # Started together, not one after the other: subprocess.run in a loop
+    # would serialise them and the second would refuse for the trivial
+    # reason that the first had already finished.
+    # Started together, not one after the other: subprocess.run in a loop
+    # would serialise them and the later ones would refuse for the trivial
+    # reason that the first had already finished. Several workers rather than
+    # two, because with only two the collision window is narrow enough that
+    # an unlocked implementation still passes most runs.
+    procs = [subprocess.Popen([sys.executable, "-c", script],
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              text=True) for _ in range(6)]
+    results = [p.communicate() for p in procs]
+    outs = [out.strip() for out, _ in results]
+    assert outs.count("WROTE") == 1, (outs, [err for _, err in results])
+    assert outs.count("REFUSED") == 5, (outs, [err for _, err in results])
+
+    rows = [r for r in ledger.read_all(path) if r["kind"] == "forecast"]
+    assert len(rows) == 1, "the same forecast was written twice"
+
+
+def test_a_duplicated_row_is_reported_rather_than_silently_overriding(tmp_path):
+    """Dict views used to let the last duplicate win, which is how an
+    append-only ledger quietly stops being append-only."""
+    path = str(tmp_path / "l.jsonl")
+    first = _write(path)
+    with open(path, "a") as fh:                      # forge a second row
+        forged = dict(first, percentile=5.0, category="LOW")
+        fh.write(json.dumps(forged, sort_keys=True) + "\n")
+
+    for call in (lambda: ledger.pending(path),
+                 lambda: ledger.matured_pairs(path),
+                 lambda: ledger.latest_forecast(path, "BTCUSDT")
+                 and ledger.pending(path)):
+        with pytest.raises(ledger.LedgerError, match="duplicate forecast"):
+            call()
+
+
+def test_a_duplicated_maturation_is_reported(tmp_path):
+    path = str(tmp_path / "l.jsonl")
+    _write(path)
+    rec = ledger.append_maturation(path, forecast_id_="BTCUSDT:100",
+                                   at_bar_idx=112, realized_score=1.0,
+                                   realized_percentile=50.0,
+                                   realized_category="NORMAL")
+    with open(path, "a") as fh:
+        fh.write(json.dumps(dict(rec, realized_percentile=99.0),
+                            sort_keys=True) + "\n")
+    with pytest.raises(ledger.LedgerError, match="duplicate maturation"):
+        ledger.pending(path)
 
 
 def test_a_corrupt_line_is_reported_with_its_location(tmp_path):
