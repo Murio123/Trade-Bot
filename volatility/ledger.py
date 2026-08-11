@@ -55,8 +55,26 @@ def _read_lines(path: str) -> Iterator[dict[str, Any]]:
                 raise LedgerError(f"{path}:{n} is not valid JSON: {exc}") from exc
 
 
-def read_all(path: str) -> list[dict[str, Any]]:
+def read_raw(path: str) -> list[dict[str, Any]]:
+    """Every record as written, with no duplicate validation.
+
+    For inspecting a ledger you already suspect is damaged. Everything that
+    draws a conclusion from the ledger should use read_all instead.
+    """
     return list(_read_lines(path))
+
+
+def read_all(path: str) -> list[dict[str, Any]]:
+    """Every record, refusing to return a corrupt ledger.
+
+    The public reader validates: a caller that reads rows and acts on them
+    must not be the one path that stays quiet about a duplicated forecast or
+    a duplicated outcome.
+    """
+    records = list(_read_lines(path))
+    _forecast_index(path)
+    _matured_ids(path)
+    return records
 
 
 @contextlib.contextmanager

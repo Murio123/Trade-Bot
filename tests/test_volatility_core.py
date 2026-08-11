@@ -478,3 +478,27 @@ def test_a_ledger_path_colliding_with_a_sidecar_lock_is_refused(tmp_path):
     """`foo.lock` as a ledger would share a sidecar with the ledger `foo`."""
     with pytest.raises(ledger.LedgerError, match="must not end in"):
         _write(str(tmp_path / "ledger.lock"))
+
+
+def test_read_all_refuses_a_corrupt_ledger_but_read_raw_does_not(tmp_path):
+    """Audit finding: read_all was the one public reader that stayed quiet
+    about duplicates. A caller that reads rows and acts on them must not be
+    the path that misses corruption; read_raw is the deliberate escape for
+    inspecting a ledger you already suspect is damaged."""
+    path = str(tmp_path / "l.jsonl")
+    first = _write(path)
+    with open(path, "a") as fh:
+        fh.write(json.dumps(dict(first, percentile=5.0), sort_keys=True) + "\n")
+
+    with pytest.raises(ledger.LedgerError, match="duplicate forecast"):
+        ledger.read_all(path)
+    assert len(ledger.read_raw(path)) == 2, "read_raw must still show both rows"
+
+
+def test_appending_without_file_locking_is_refused(monkeypatch):
+    """Audit finding: fcntl was imported under try/except and the lock
+    degraded to a no-op without it. Silently unprotected is worse than
+    refusing, because the duplicate guards become read-then-write races."""
+    monkeypatch.setattr(ledger, "fcntl", None)
+    with pytest.raises(ledger.LedgerError, match="file locking is unavailable"):
+        _write("/tmp/never-created-by-this-test.jsonl")
