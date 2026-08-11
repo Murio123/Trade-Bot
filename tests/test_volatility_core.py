@@ -111,7 +111,8 @@ def test_reference_survives_a_round_trip(tmp_path):
     ref = _ref()
     path = str(tmp_path / "ref.json")
     percentile.save_reference(ref, path)
-    back = percentile.load_reference(path)
+    back = percentile.load_reference(
+        path, expected_sha256=percentile.content_sha256(ref.scores))
     assert np.array_equal(ref.scores, back.scores)
     assert back.version == percentile.DISTRIBUTION_VERSION
 
@@ -124,7 +125,7 @@ def test_a_reference_from_another_version_is_refused(tmp_path):
         json.dump({"version": "something_else", "scores": [1, 2, 3],
                    "source": {}}, fh)
     with pytest.raises(ValueError, match="version mismatch"):
-        percentile.load_reference(path)
+        percentile.load_reference(path, allow_unpinned=True)
 
 
 def test_a_refit_with_the_same_version_is_caught_by_the_hash(tmp_path):
@@ -156,7 +157,7 @@ def test_an_edited_reference_file_is_caught_even_without_pinning(tmp_path):
     with open(path, "w") as fh:
         json.dump(payload, fh)
     with pytest.raises(ValueError, match="corrupt"):
-        percentile.load_reference(path)
+        percentile.load_reference(path, allow_unpinned=True)
 
 
 def test_content_hash_ignores_ordering_but_not_values():
@@ -434,3 +435,46 @@ def test_volatility_package_places_no_orders():
         for banned in ("create_order", "place_order", "submit_order",
                        "ccxt", "api_key", "secret"):
             assert banned not in src, f"{path.name} references {banned}"
+
+
+def test_unpinned_reference_load_is_refused_by_default(tmp_path):
+    """Audit finding: an optional check nobody is obliged to use is not a
+    defence. Pinning is the default posture; skipping it must be explicit."""
+    path = str(tmp_path / "ref.json")
+    percentile.save_reference(_ref(), path)
+    with pytest.raises(ValueError, match="requires expected_sha256"):
+        percentile.load_reference(path)
+    percentile.load_reference(path, allow_unpinned=True)   # explicit opt-out
+
+
+def test_latest_forecast_reports_a_duplicate_rather_than_treating_it_as_newer(tmp_path):
+    """Audit finding: this read path scanned raw records and kept the last
+    match, so a duplicate row looked like a legitimate update."""
+    path = str(tmp_path / "l.jsonl")
+    first = _write(path)
+    with open(path, "a") as fh:
+        fh.write(json.dumps(dict(first, percentile=5.0, category="LOW"),
+                            sort_keys=True) + "\n")
+    with pytest.raises(ledger.LedgerError, match="duplicate forecast"):
+        ledger.latest_forecast(path, "BTCUSDT")
+
+
+def test_matured_pairs_also_rejects_a_duplicated_outcome(tmp_path):
+    """Audit finding: this path checked forecasts but not maturations."""
+    path = str(tmp_path / "l.jsonl")
+    _write(path)
+    rec = ledger.append_maturation(path, forecast_id_="BTCUSDT:100",
+                                   at_bar_idx=112, realized_score=1.0,
+                                   realized_percentile=50.0,
+                                   realized_category="NORMAL")
+    with open(path, "a") as fh:
+        fh.write(json.dumps(dict(rec, realized_percentile=99.0),
+                            sort_keys=True) + "\n")
+    with pytest.raises(ledger.LedgerError, match="duplicate maturation"):
+        ledger.matured_pairs(path)
+
+
+def test_a_ledger_path_colliding_with_a_sidecar_lock_is_refused(tmp_path):
+    """`foo.lock` as a ledger would share a sidecar with the ledger `foo`."""
+    with pytest.raises(ledger.LedgerError, match="must not end in"):
+        _write(str(tmp_path / "ledger.lock"))

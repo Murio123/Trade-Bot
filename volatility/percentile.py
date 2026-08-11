@@ -86,8 +86,8 @@ def save_reference(ref: ReferenceDistribution, path: str) -> None:
                    "scores": ref.scores.tolist()}, fh, indent=2, default=str)
 
 
-def load_reference(path: str, expected_sha256: str | None = None
-                   ) -> ReferenceDistribution:
+def load_reference(path: str, expected_sha256: str | None = None, *,
+                   allow_unpinned: bool = False) -> ReferenceDistribution:
     """Load a frozen reference.
 
     Three separate checks, because they catch different failures:
@@ -96,7 +96,18 @@ def load_reference(path: str, expected_sha256: str | None = None
       - `expected_sha256`: the file is a DIFFERENT reference than the caller
         was built against. Only this one catches a re-fit, since a re-fit
         keeps the same version string and its own hash is self-consistent.
+
+    Pinning is mandatory unless `allow_unpinned=True` is passed explicitly.
+    An optional check nobody is obliged to use is not a defence: the whole
+    point is that a re-fit must not be able to slip in quietly, and a
+    forgotten argument is exactly how it would.
     """
+    if expected_sha256 is None and not allow_unpinned:
+        raise ValueError(
+            "load_reference requires expected_sha256; a frozen reference that "
+            "nobody pins can be re-fitted without anything noticing. Pass "
+            "allow_unpinned=True only for exploratory reads that will not "
+            "produce a recorded forecast")
     with open(path) as fh:
         payload = json.load(fh)
     if payload.get("version") != DISTRIBUTION_VERSION:

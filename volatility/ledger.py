@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover - non-POSIX
 LEDGER_VERSION = "c44_ledger_v1"
 KIND_FORECAST = "forecast"
 KIND_MATURATION = "maturation"
+LOCK_SUFFIX = ".lock"
 
 
 class LedgerError(Exception):
@@ -66,16 +67,23 @@ def _exclusive(path: str):
     firing on the same bar would both find nothing and both append. The lock
     lives on a sidecar so it is unaffected by how the ledger itself is opened.
     """
+    if fcntl is None:  # pragma: no cover - POSIX only in practice
+        raise LedgerError(
+            "file locking is unavailable on this platform (no fcntl); "
+            "refusing to append, because without the lock the duplicate "
+            "guards are read-then-write races and the ledger could silently "
+            "gain two rows for the same forecast")
+    if path.endswith(LOCK_SUFFIX):
+        raise LedgerError(
+            f"ledger path must not end in {LOCK_SUFFIX!r}: its sidecar lock "
+            f"would collide with another ledger's")
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    lock_path = path + ".lock"
-    with open(lock_path, "a+") as lock:
-        if fcntl is not None:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+    with open(path + LOCK_SUFFIX, "a+") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         try:
             yield
         finally:
-            if fcntl is not None:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def _append(path: str, record: dict[str, Any]) -> None:
@@ -228,6 +236,7 @@ def matured_pairs(path: str, symbol: str | None = None
                   ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """(forecast, maturation) for every settled forecast, in ledger order."""
     forecasts = _forecast_index(path)
+    _matured_ids(path)  # rejects a duplicated outcome on this read path too
     out = []
     for rec in _read_lines(path):
         if rec.get("kind") != KIND_MATURATION:
@@ -241,8 +250,14 @@ def matured_pairs(path: str, symbol: str | None = None
 
 
 def latest_forecast(path: str, symbol: str) -> dict[str, Any] | None:
+    """Most recent forecast for `symbol`.
+
+    Goes through _forecast_index so a duplicated row raises here as well —
+    scanning raw records and keeping the last match would have made a
+    duplicate look like a legitimate update.
+    """
     found = None
-    for rec in _read_lines(path):
-        if rec.get("kind") == KIND_FORECAST and rec.get("symbol") == symbol:
+    for rec in _forecast_index(path).values():
+        if rec.get("symbol") == symbol:
             found = rec
     return found
