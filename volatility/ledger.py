@@ -72,8 +72,7 @@ def read_all(path: str) -> list[dict[str, Any]]:
     a duplicated outcome.
     """
     records = list(_read_lines(path))
-    _forecast_index(path)
-    _matured_ids(path)
+    _validated(path)
     return records
 
 
@@ -132,6 +131,19 @@ def _forecast_index(path: str) -> dict[str, dict[str, Any]]:
     return out
 
 
+def _validated(path: str) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    """The single entry point every public function goes through.
+
+    Four audit rounds in a row found the same shape of defect: a new check
+    was added to some read paths and not others, leaving the protection
+    documented as complete while being partial. Routing everything through
+    one function removes the class rather than the instance — a public
+    function either calls this, or it is deliberately raw (read_raw,
+    forecast_id) and says so.
+    """
+    return _forecast_index(path), _matured_ids(path)
+
+
 def _matured_ids(path: str) -> set[str]:
     seen: set[str] = set()
     for rec in _read_lines(path):
@@ -161,7 +173,8 @@ def append_forecast(path: str, *, symbol: str, bar_idx: int,
     """Record one forecast. Refuses to overwrite an existing (symbol, bar)."""
     fid = forecast_id(symbol, bar_idx)
     with _exclusive(path):
-        existing = _forecast_index(path).get(fid)
+        forecasts, _ = _validated(path)
+        existing = forecasts.get(fid)
         if existing is not None:
             raise ImmutableRecordError(
                 f"forecast {fid} already recorded at bar "
@@ -208,8 +221,7 @@ def append_maturation(path: str, *, forecast_id_: str, at_bar_idx: int,
                       ) -> dict[str, Any]:
     """Record an outcome. The forecast row itself is left untouched."""
     with _exclusive(path):
-        forecasts = _forecast_index(path)
-        matured = _matured_ids(path)
+        forecasts, matured = _validated(path)
         if forecast_id_ not in forecasts:
             raise LedgerError(f"no forecast {forecast_id_} to mature")
         if forecast_id_ in matured:
@@ -244,8 +256,8 @@ def append_maturation(path: str, *, forecast_id_: str, at_bar_idx: int,
 
 
 def pending(path: str, symbol: str | None = None) -> list[dict[str, Any]]:
-    matured = _matured_ids(path)
-    return [r for r in _forecast_index(path).values()
+    forecasts, matured = _validated(path)
+    return [r for r in forecasts.values()
             if r["forecast_id"] not in matured
             and (symbol is None or r["symbol"] == symbol)]
 
@@ -253,8 +265,7 @@ def pending(path: str, symbol: str | None = None) -> list[dict[str, Any]]:
 def matured_pairs(path: str, symbol: str | None = None
                   ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """(forecast, maturation) for every settled forecast, in ledger order."""
-    forecasts = _forecast_index(path)
-    _matured_ids(path)  # rejects a duplicated outcome on this read path too
+    forecasts, _ = _validated(path)
     out = []
     for rec in _read_lines(path):
         if rec.get("kind") != KIND_MATURATION:
@@ -274,8 +285,9 @@ def latest_forecast(path: str, symbol: str) -> dict[str, Any] | None:
     scanning raw records and keeping the last match would have made a
     duplicate look like a legitimate update.
     """
+    forecasts, _ = _validated(path)
     found = None
-    for rec in _forecast_index(path).values():
+    for rec in forecasts.values():
         if rec.get("symbol") == symbol:
             found = rec
     return found

@@ -502,3 +502,77 @@ def test_appending_without_file_locking_is_refused(monkeypatch):
     monkeypatch.setattr(ledger, "fcntl", None)
     with pytest.raises(ledger.LedgerError, match="file locking is unavailable"):
         _write("/tmp/never-created-by-this-test.jsonl")
+
+
+# --- the class of defect, not one instance of it ----------------------------
+
+def _corrupt_with_duplicate_maturation(path):
+    _write(path)
+    rec = ledger.append_maturation(path, forecast_id_="BTCUSDT:100",
+                                   at_bar_idx=112, realized_score=1.0,
+                                   realized_percentile=50.0,
+                                   realized_category="NORMAL")
+    with open(path, "a") as fh:
+        fh.write(json.dumps(dict(rec, realized_percentile=99.0),
+                            sort_keys=True) + "\n")
+
+
+def _corrupt_with_duplicate_forecast(path):
+    first = _write(path)
+    with open(path, "a") as fh:
+        fh.write(json.dumps(dict(first, percentile=5.0), sort_keys=True) + "\n")
+
+
+# Every public entry point, and whether it is allowed to ignore corruption.
+# read_raw exists precisely to inspect a damaged ledger; forecast_id never
+# reads one. Everything else must refuse.
+_RAW_BY_DESIGN = {"read_raw", "forecast_id"}
+
+
+def _public_ledger_functions():
+    import inspect
+    return {name: fn for name, fn in vars(ledger).items()
+            if inspect.isfunction(fn) and not name.startswith("_")
+            and fn.__module__ == ledger.__name__}
+
+
+def test_every_public_ledger_function_is_classified():
+    """If someone adds a public function, this fails until they decide
+    whether it validates — which is how the previous four rounds of
+    'you covered some paths but not others' happened."""
+    known = _RAW_BY_DESIGN | {"read_all", "append_forecast", "append_maturation",
+                              "pending", "matured_pairs", "latest_forecast"}
+    assert set(_public_ledger_functions()) == known
+
+
+@pytest.mark.parametrize("corrupt", [_corrupt_with_duplicate_forecast,
+                                     _corrupt_with_duplicate_maturation])
+def test_no_public_function_operates_on_a_corrupt_ledger(tmp_path, corrupt):
+    """The instance-by-instance fixes kept missing a path. This enumerates
+    them instead: every public function except the two raw ones must refuse
+    BOTH kinds of corruption."""
+    calls = {
+        "read_all": lambda p: ledger.read_all(p),
+        "pending": lambda p: ledger.pending(p),
+        "matured_pairs": lambda p: ledger.matured_pairs(p),
+        "latest_forecast": lambda p: ledger.latest_forecast(p, "BTCUSDT"),
+        "append_forecast": lambda p: _write(p, bar_idx=200),
+        "append_maturation": lambda p: ledger.append_maturation(
+            p, forecast_id_="BTCUSDT:100", at_bar_idx=999, realized_score=1.0,
+            realized_percentile=50.0, realized_category="NORMAL"),
+    }
+    assert set(calls) | _RAW_BY_DESIGN == set(_public_ledger_functions())
+
+    for name, call in calls.items():
+        path = str(tmp_path / f"{name}_{corrupt.__name__}.jsonl")
+        corrupt(path)
+        with pytest.raises(ledger.LedgerError, match="duplicate"):
+            call(path)
+
+
+@pytest.mark.parametrize("corrupt", [_corrupt_with_duplicate_forecast,
+                                     _corrupt_with_duplicate_maturation])
+def test_read_raw_still_works_on_a_corrupt_ledger(tmp_path, corrupt):
+    path = str(tmp_path / "raw.jsonl")
+    corrupt(path)
+    assert len(ledger.read_raw(path)) >= 2
