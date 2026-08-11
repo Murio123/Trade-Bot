@@ -1,7 +1,7 @@
 """C4.4: report-only 48h volatility RANKING.
 
 What this package is allowed to say: how the next 48 hours are expected to
-rank against history — LOW / NORMAL / ELEVATED / HIGH plus a percentile.
+rank against history — LOW / NORMAL / HIGH plus a percentile.
 Nothing else. It carries no direction, no entry, no stop, no target, no
 size, and it is not a trading signal. C4.3c rejected the underlying model as
 a point predictor of volatility MAGNITUDE and that rejection stands.

@@ -83,15 +83,17 @@ def test_percentile_and_categories_are_monotone():
     pcts = [ref.percentile_of(s) for s in (0.0, 0.25, 0.5, 0.75, 1.0)]
     assert pcts == sorted(pcts)
     assert [percentile.categorize(p) for p in (5, 40, 70, 95)] == \
-        ["LOW", "NORMAL", "ELEVATED", "HIGH"]
+        ["LOW", "NORMAL", "NORMAL", "HIGH"]
 
 
 def test_category_boundaries_are_exact():
+    """Three categories (C4.5). ELEVATED was merged into NORMAL because the
+    freeze showed their median outcomes were indistinguishable."""
+    assert percentile.CATEGORIES == ("LOW", "NORMAL", "HIGH")
+    assert percentile.categorize(0.0) == "LOW"
     assert percentile.categorize(24.999) == "LOW"
     assert percentile.categorize(25.0) == "NORMAL"
-    assert percentile.categorize(59.999) == "NORMAL"
-    assert percentile.categorize(60.0) == "ELEVATED"
-    assert percentile.categorize(84.999) == "ELEVATED"
+    assert percentile.categorize(84.999) == "NORMAL"
     assert percentile.categorize(85.0) == "HIGH"
     assert percentile.categorize(100.0) == "HIGH"
 
@@ -185,7 +187,7 @@ def _write(path, bar_idx=100, symbol="BTCUSDT", **kw):
     kw.setdefault("distribution_version", percentile.DISTRIBUTION_VERSION)
     kw.setdefault("score", 0.5)
     kw.setdefault("percentile", 71.0)
-    kw.setdefault("category", "ELEVATED")
+    kw.setdefault("category", "HIGH")
     return ledger.append_forecast(path, symbol=symbol, bar_idx=bar_idx, **kw)
 
 
@@ -201,7 +203,7 @@ def test_maturation_appends_and_leaves_the_forecast_untouched(tmp_path):
     original = _write(path)
     ledger.append_maturation(path, forecast_id_="BTCUSDT:100", at_bar_idx=112,
                              realized_score=0.9, realized_percentile=80.0,
-                             realized_category="ELEVATED")
+                             realized_category="NORMAL")
     stored = [r for r in ledger.read_all(path) if r["kind"] == "forecast"][0]
     assert stored == original, "the forecast row was modified after the fact"
 
@@ -259,7 +261,7 @@ def test_pending_and_matured_views(tmp_path):
 def test_shadow_is_recorded_from_the_first_forecast(tmp_path):
     """Ridge rides along as a shadow so the comparison needs no backfill."""
     path = str(tmp_path / "l.jsonl")
-    rec = _write(path, shadow={"ridge_percentile": 64.0, "ridge_category": "ELEVATED"},
+    rec = _write(path, shadow={"ridge_percentile": 64.0, "ridge_category": "NORMAL"},
                  baselines={"train_mean_percentile": 50.0})
     assert rec["shadow"]["ridge_percentile"] == 64.0
     assert rec["baselines"]["train_mean_percentile"] == 50.0
@@ -321,7 +323,7 @@ def test_concurrent_producers_cannot_both_write_the_same_forecast(tmp_path):
             ledger.append_forecast({path!r}, symbol="BTCUSDT", bar_idx=100,
                 bar_close_utc="2026-08-10T00:00:00Z", horizon_bars=12,
                 ranker_version="v", distribution_version="v",
-                score=0.5, percentile=71.0, category="ELEVATED")
+                score=0.5, percentile=71.0, category="NORMAL")
             print("WROTE")
         except ledger.ImmutableRecordError:
             print("REFUSED")

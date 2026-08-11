@@ -18,6 +18,12 @@ import numpy as np
 
 DISTRIBUTION_VERSION = "c44_ref_v1"
 
+# Versioned separately from the distribution: the reference SCORES are
+# unchanged, only where the lines between categories fall. Keeping them
+# apart means a category rethink does not invalidate the frozen artifact,
+# and a ledger row records which scheme produced it.
+CATEGORY_SCHEME_VERSION = "c45_three_v1"
+
 
 def content_sha256(scores) -> str:
     """Fingerprint of the reference itself.
@@ -29,10 +35,13 @@ def content_sha256(scores) -> str:
     arr = np.sort(np.asarray(scores, dtype=float))
     return hashlib.sha256(arr.tobytes()).hexdigest()
 
-# Frozen cut points. Deliberately asymmetric: the interesting statements are
-# "unusually quiet" and "unusually busy", so the middle is wide.
-CATEGORY_EDGES = ((25.0, "LOW"), (60.0, "NORMAL"), (85.0, "ELEVATED"),
-                  (100.1, "HIGH"))
+# Frozen cut points. Three categories, not four: the C4.4a freeze showed
+# NORMAL and ELEVATED had effectively the same median outcome (3.46 vs 3.47
+# ATR) and differed only in the tail, so showing a user two different words
+# there was precision the data does not support. They are merged. The
+# surviving split is real — median realized range runs 2.87 / ~3.46 / 3.99
+# ATR across LOW / NORMAL / HIGH.
+CATEGORY_EDGES = ((25.0, "LOW"), (85.0, "NORMAL"), (100.1, "HIGH"))
 CATEGORIES = tuple(name for _, name in CATEGORY_EDGES)
 
 

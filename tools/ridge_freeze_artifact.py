@@ -51,12 +51,75 @@ STAGE = "C4.4a"
 ARTIFACT_ID = "c44_ridge_frozen_v1"
 
 
+class FrozenArtifactError(DeepBacktestError):
+    """A frozen file would have been replaced by different content."""
+
+
 def _sha256_file(path: str) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
         for chunk in iter(lambda: fh.read(65536), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _write_frozen(path: str, render, *, expected_sha256: str | None = None
+                  ) -> tuple[str, str]:
+    """Write a frozen file, refusing to replace it with different content.
+
+    `render(tmp_path)` writes the candidate. It goes to a sidecar first so the
+    decision is made on the bytes that would land, not on a promise about them:
+    the model is deterministic, so a re-run on identical data produces an
+    identical file and is a no-op, while a re-run on different data is caught
+    before the old file is touched.
+
+    This ordering is the whole point. Saving first and checking the registry
+    afterwards is what let a re-run on a refreshed dataset overwrite
+    c44_ridge_frozen_v1 in place: the registry correctly refused to
+    re-register, but by then the artifact every ledger row was pinned to had
+    already been replaced on disk.
+
+    Returns (sha256, "created" | "unchanged").
+    """
+    tmp = path + ".new"
+    render(tmp)
+    try:
+        new_sha = _sha256_file(tmp)
+        if expected_sha256 is not None and new_sha != expected_sha256:
+            raise FrozenArtifactError(
+                f"{path} is registered with sha256 {expected_sha256} but this "
+                f"run produced {new_sha}. The inputs changed (dataset, code, "
+                f"or features), so this is a DIFFERENT model wearing a frozen "
+                f"model's id. Freeze it under a new model id instead — "
+                f"replacing this one would silently change what every "
+                f"forecast already recorded against it meant.")
+        if os.path.exists(path):
+            old_sha = _sha256_file(path)
+            if old_sha == new_sha:
+                return new_sha, "unchanged"
+            raise FrozenArtifactError(
+                f"{path} already holds sha256 {old_sha} and this run would "
+                f"write {new_sha}. A frozen file is never replaced in place. "
+                f"Freeze under a new model id, or delete the stale output "
+                f"deliberately if it was never published.")
+        os.replace(tmp, path)
+        tmp = None
+        return new_sha, "created"
+    finally:
+        if tmp is not None and os.path.exists(tmp):
+            os.remove(tmp)
+
+
+def registered_sha256(registry: ModelRegistry, model_id: str) -> str | None:
+    """The sha the registry pins `model_id` to, or None if unregistered.
+
+    Only a missing entry reads as None. A registry that exists but cannot be
+    parsed is a corrupt registry, and swallowing that would defeat the pin.
+    """
+    try:
+        return registry.get(model_id).evaluation_hash
+    except FileNotFoundError:
+        return None
 
 
 def training_region(span_lo: int, holdout_lo: int, horizon_bars: int
@@ -97,9 +160,15 @@ def run(dataset: str, exchange: str, symbol: str, bars: int = BARS,
     model.train()
 
     os.makedirs(outdir, exist_ok=True)
+    # The registry is consulted BEFORE anything is written: it is the record of
+    # what this id was frozen as, and a write that contradicts it must not
+    # happen at all rather than be reported after the fact.
+    registry = ModelRegistry(os.path.join(outdir, "model_registry"))
+    pinned_sha = registered_sha256(registry, ARTIFACT_ID)
+
     artifact_path = os.path.join(outdir, f"{ARTIFACT_ID}.json")
-    model.save(artifact_path)
-    artifact_sha = _sha256_file(artifact_path)
+    artifact_sha, artifact_status = _write_frozen(
+        artifact_path, model.save, expected_sha256=pinned_sha)
 
     # --- reference distributions, both from the TRAINING region only --------
     ridge_scores = model.predict(train_df)
@@ -122,13 +191,19 @@ def run(dataset: str, exchange: str, symbol: str, bars: int = BARS,
         ridge_scores, {"stage": STAGE, "kind": "ridge_frozen",
                        "n": int(len(ridge_scores)),
                        "train_idx_range": [lo, hi]})
-    pct.save_reference(ranker_ref, os.path.join(outdir, "reference_ranker.json"))
-    pct.save_reference(ridge_ref, os.path.join(outdir, "reference_ridge.json"))
+    # The references are frozen for the same reason the artifact is: C4.5 pins
+    # them by content hash, and a re-fit that kept the same version string
+    # would silently redefine what LOW/NORMAL/HIGH meant in every past row.
+    ranker_ref_sha, ranker_ref_status = _write_frozen(
+        os.path.join(outdir, "reference_ranker.json"),
+        lambda p: pct.save_reference(ranker_ref, p))
+    ridge_ref_sha, ridge_ref_status = _write_frozen(
+        os.path.join(outdir, "reference_ridge.json"),
+        lambda p: pct.save_reference(ridge_ref, p))
 
     # --- honest "scenarios": realized range per predicted rank bucket -------
     scenarios = realized_range_by_category(ranker_ref, -trailing[ok], labels[ok])
 
-    registry = ModelRegistry(os.path.join(outdir, "model_registry"))
     metadata = ModelMetadata(
         model_id=ARTIFACT_ID, code_commit=commit,
         dataset_version=build.manifest["dataset_version"],
@@ -140,17 +215,26 @@ def run(dataset: str, exchange: str, symbol: str, bars: int = BARS,
         training_window=(lo, hi), calibration_window=None,
         evaluation_hash=artifact_sha,
         created_at_utc=datetime.now(timezone.utc).isoformat())
-    try:
+    if pinned_sha is None:
         registry.register(metadata)
         registry_status = "registered"
-    except Exception as exc:  # already registered on a re-run
-        registry_status = f"not_registered: {exc}"
+    else:
+        # _write_frozen already proved the artifact matches this pin, so an
+        # existing entry is agreement, not a collision to be reported as one.
+        registry_status = "already_registered"
 
     result = {
         "stage": STAGE,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "code_commit": commit, "exchange": exchange, "symbol": symbol,
         "artifact_path": artifact_path, "artifact_sha256": artifact_sha,
+        "artifact_status": artifact_status,
+        # Published so C4.5 can pin them; load_reference refuses to load a
+        # reference the caller has not pinned.
+        "reference_ranker_sha256": ranker_ref_sha,
+        "reference_ranker_status": ranker_ref_status,
+        "reference_ridge_sha256": ridge_ref_sha,
+        "reference_ridge_status": ridge_ref_status,
         "chosen_alpha": model._chosen_alpha,
         "n_train_rows": int(len(train_df)),
         "train_idx_range": [lo, hi],
@@ -205,8 +289,12 @@ def format_report(r: dict[str, Any]) -> str:
     lines = [
         f"Frozen Ridge artifact ({r['stage']}) — {r['exchange']} {r['symbol']}",
         f"  commit        : {r['code_commit']}",
-        f"  artifact      : {r['artifact_path']}",
+        f"  artifact      : {r['artifact_path']} ({r['artifact_status']})",
         f"  sha256        : {r['artifact_sha256']}",
+        f"  ref ranker    : {r['reference_ranker_sha256']} "
+        f"({r['reference_ranker_status']})",
+        f"  ref ridge     : {r['reference_ridge_sha256']} "
+        f"({r['reference_ridge_status']})",
         f"  chosen_alpha  : {r['chosen_alpha']}",
         f"  train rows    : {r['n_train_rows']} over idx {r['train_idx_range']}",
         f"  holdout starts: {r['holdout_idx_lo']} (never touched)",

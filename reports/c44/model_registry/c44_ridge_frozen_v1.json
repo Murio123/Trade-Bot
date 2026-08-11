@@ -1,0 +1,27 @@
+{
+  "model_id": "c44_ridge_frozen_v1",
+  "code_commit": "8ad489ae46398a91ff44ca5af529f44e26c47f92",
+  "dataset_version": "98790821553d99286914fb18da20aac02df5c9f273bad25a82344da18a1d5cd4",
+  "feature_version": "c41_v1",
+  "label_version": "c41_volatility_range_v1",
+  "seed": 42,
+  "hyperparameters": {
+    "alpha_candidates": [
+      0.1,
+      1.0,
+      10.0
+    ],
+    "chosen_alpha": 10.0,
+    "train_idx_range": [
+      1400,
+      8187
+    ]
+  },
+  "training_window": [
+    1400,
+    8187
+  ],
+  "calibration_window": null,
+  "evaluation_hash": "a5013922c67248403d681d7307ff511dbc9e72ffcffd1b2a5b95c17efb1f05fd",
+  "created_at_utc": "2026-08-10T10:40:53.922783+00:00"
+}

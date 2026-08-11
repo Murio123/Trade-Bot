@@ -7,12 +7,24 @@ an empirical frequency rather than anything invented.
 """
 from __future__ import annotations
 
+import os
+
 import numpy as np
 import pytest
 
-from tools.ridge_freeze_artifact import (ARTIFACT_ID, realized_range_by_category,
-                                         training_region)
+from tools.forecast_platform.model_registry import ModelRegistry
+from tools.ridge_freeze_artifact import (ARTIFACT_ID, FrozenArtifactError,
+                                         _sha256_file, _write_frozen,
+                                         realized_range_by_category,
+                                         registered_sha256, training_region)
 from volatility import percentile as pct
+
+
+def _writer(text: str):
+    def render(path: str) -> None:
+        with open(path, "w") as fh:
+            fh.write(text)
+    return render
 
 
 def test_training_region_is_pulled_back_by_the_whole_horizon():
@@ -67,6 +79,86 @@ def test_scenarios_undo_the_frozen_log_transform():
     out = realized_range_by_category(ref, np.array([1.0]), np.array([label]))
     reported = [s for s in out.values() if s["n"]][0]
     assert reported["realized_atr_ratio_median"] == pytest.approx(ratio, abs=1e-6)
+
+
+class TestFrozenWriteGuard:
+    """The defect this class exists for: the freeze tool called model.save()
+    and only afterwards asked the registry whether the id was taken. A re-run
+    on a refreshed dataset therefore replaced an immutable artifact in place,
+    and the registry's correct refusal came too late to matter."""
+
+    def test_creates_when_absent(self, tmp_path):
+        path = str(tmp_path / "a.json")
+        sha, status = _write_frozen(path, _writer("one"))
+        assert status == "created"
+        assert sha == _sha256_file(path)
+        assert open(path).read() == "one"
+
+    def test_identical_rerun_is_a_no_op(self, tmp_path):
+        path = str(tmp_path / "a.json")
+        first, _ = _write_frozen(path, _writer("one"))
+        second, status = _write_frozen(path, _writer("one"))
+        assert (second, status) == (first, "unchanged")
+
+    def test_refuses_to_replace_different_content(self, tmp_path):
+        path = str(tmp_path / "a.json")
+        _write_frozen(path, _writer("one"))
+        with pytest.raises(FrozenArtifactError, match="never replaced"):
+            _write_frozen(path, _writer("two"))
+        assert open(path).read() == "one", "the original must survive intact"
+
+    def test_refused_write_leaves_no_sidecar(self, tmp_path):
+        """A stray .new next to a frozen artifact is its own hazard — the next
+        reader cannot tell which of the two is the real one."""
+        path = str(tmp_path / "a.json")
+        _write_frozen(path, _writer("one"))
+        with pytest.raises(FrozenArtifactError):
+            _write_frozen(path, _writer("two"))
+        assert os.listdir(tmp_path) == ["a.json"]
+
+    def test_registry_pin_is_enforced_even_when_the_file_is_gone(self, tmp_path):
+        """Deleting the artifact must not launder a re-freeze: the registry
+        still pins the hash, so a different model cannot take the id."""
+        path = str(tmp_path / "a.json")
+        sha, _ = _write_frozen(path, _writer("one"))
+        os.remove(path)
+        with pytest.raises(FrozenArtifactError, match="registered with sha256"):
+            _write_frozen(path, _writer("two"), expected_sha256=sha)
+        assert not os.path.exists(path)
+
+    def test_matching_pin_recreates_a_deleted_artifact(self, tmp_path):
+        path = str(tmp_path / "a.json")
+        sha, _ = _write_frozen(path, _writer("one"))
+        os.remove(path)
+        again, status = _write_frozen(path, _writer("one"), expected_sha256=sha)
+        assert (again, status) == (sha, "created")
+
+    def test_render_failure_does_not_touch_the_existing_file(self, tmp_path):
+        path = str(tmp_path / "a.json")
+        _write_frozen(path, _writer("one"))
+
+        def explode(p):
+            with open(p, "w") as fh:
+                fh.write("partial")
+            raise RuntimeError("boom")
+
+        with pytest.raises(RuntimeError):
+            _write_frozen(path, explode)
+        assert open(path).read() == "one"
+
+    def test_unregistered_id_reads_as_none(self, tmp_path):
+        registry = ModelRegistry(str(tmp_path / "reg"))
+        assert registered_sha256(registry, "nope") is None
+
+    def test_corrupt_registry_entry_is_not_silently_unpinned(self, tmp_path):
+        """Returning None on a damaged entry would drop the pin exactly when
+        it is most needed."""
+        registry = ModelRegistry(str(tmp_path / "reg"))
+        with open(os.path.join(registry.registry_dir, "x.json"), "w") as fh:
+            fh.write("{not json")
+        with pytest.raises(Exception) as exc:
+            registered_sha256(registry, "x")
+        assert not isinstance(exc.value, FileNotFoundError)
 
 
 def test_artifact_id_is_stable():

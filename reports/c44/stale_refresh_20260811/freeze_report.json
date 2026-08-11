@@ -1,0 +1,42 @@
+{
+  "stage": "C4.4a",
+  "generated_at_utc": "2026-08-11T13:25:10.745877+00:00",
+  "code_commit": "719f8622f655a49804ffefa3179b3487b7cd8e1a",
+  "exchange": "binance",
+  "symbol": "BTCUSDT",
+  "artifact_path": "reports/c44/c44_ridge_frozen_v1.json",
+  "artifact_sha256": "1d9bbe7cb67962046935440240077f02d86eb651ad0fa6b38ade35845ad45ad5",
+  "chosen_alpha": 10.0,
+  "n_train_rows": 6787,
+  "train_idx_range": [
+    1400,
+    8187
+  ],
+  "holdout_idx_lo": 8199,
+  "dataset_version": "7dbef2ab2a1f45a5ad126b623ffea13048bd155cbd12974461d444a48fa3cbf4",
+  "feature_version": "c41_v1",
+  "label_version": "c41_volatility_range_v1",
+  "registry_status": "not_registered: model_id 'c44_ridge_frozen_v1' is already registered at 'reports/c44/model_registry/c44_ridge_frozen_v1.json' \u2014 model versions are immutable, use a new model_id",
+  "scenarios_by_category": {
+    "LOW": {
+      "n": 1694,
+      "realized_atr_ratio_p10": 1.6009412591705376,
+      "realized_atr_ratio_median": 2.861660633330409,
+      "realized_atr_ratio_p90": 5.625991677657678
+    },
+    "NORMAL": {
+      "n": 4065,
+      "realized_atr_ratio_p10": 1.8708068377859153,
+      "realized_atr_ratio_median": 3.4739492492938626,
+      "realized_atr_ratio_p90": 6.729537878577592
+    },
+    "HIGH": {
+      "n": 1016,
+      "realized_atr_ratio_p10": 2.344762905067711,
+      "realized_atr_ratio_median": 4.007789458335022,
+      "realized_atr_ratio_p90": 8.239647370613662
+    }
+  },
+  "spec_hash": "e8a76108e5861e0ef52e94dbb2618921b7e5ee0b77c85a942d77e31e818c76b7",
+  "note": "Frozen fixation of an already-specified model. No new modelling decision, no tuning to any observed result. The label carries range SIZE only \u2014 there is no direction in it, so this artifact cannot express an up/down probability."
+}
