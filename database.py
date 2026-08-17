@@ -582,6 +582,11 @@ class Database:
         P1 bounds the funding retry to avoid starving unmeasured forecasts, which
         means some rows are given up on. Counting them turns that from silent
         data loss into a number the scheduler logs.
+
+        The predicate is the exact complement of the retry branch in
+        `forecasts_pending_outcomes`, `NO_TRADE` exclusion included: a forecast
+        that was never eligible for retry has not been abandoned, and counting it
+        would inflate the number that is supposed to prompt investigation.
         """
         retry_after = utcnow() - timedelta(days=FUNDING_RETRY_WINDOW_DAYS)
         if not self.pool:
@@ -594,6 +599,7 @@ class Database:
                 FROM forecasts f
                 JOIN forecast_outcomes o ON o.forecast_id = f.id
                 WHERE f.symbol = $1 AND f.candidate_direction IS NOT NULL
+                  AND f.analysis_status <> 'NO_TRADE'
                   AND o.return_72h IS NOT NULL
                   AND o.net_after_costs IS NULL
                   AND f.decision_time <= $2
@@ -1009,6 +1015,8 @@ class _MemoryStore:
         n = 0
         for f in self.forecasts:
             if f.get("symbol") != symbol or not f.get("candidate_direction"):
+                continue
+            if f.get("analysis_status") == "NO_TRADE":
                 continue
             o = self.outcomes.get(f["id"])
             if o is None or o.get("return_72h") is None:

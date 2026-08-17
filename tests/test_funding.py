@@ -744,3 +744,68 @@ def test_both_pending_implementations_use_one_cutoff_per_scan():
     body = src.split("for f in self.forecasts:", 1)[1]
     assert "utcnow() - timedelta" not in body, (
         "the retry cutoff is recomputed inside the row loop")
+
+
+def test_abandoned_count_is_the_exact_complement_of_the_retry_set():
+    """A forecast that was never eligible for retry has not been abandoned.
+    Counting NO_TRADE rows would inflate the number that is meant to prompt an
+    investigation."""
+    from datetime import timedelta
+
+    from database import FUNDING_RETRY_WINDOW_DAYS, _MemoryStore, utcnow
+
+    mem = _MemoryStore()
+    retry_after = utcnow() - timedelta(days=FUNDING_RETRY_WINDOW_DAYS)
+    stale = retry_after - timedelta(days=1)
+    mem.forecasts = [
+        {"id": 1, "symbol": "BTCUSDT", "candidate_direction": "long",
+         "analysis_status": "ENTER", "decision_time": stale},
+        {"id": 2, "symbol": "BTCUSDT", "candidate_direction": "long",
+         "analysis_status": "NO_TRADE", "decision_time": stale},
+    ]
+    failed = {"resolved": True, "return_72h": 4.2, "net_after_costs": None}
+    mem.outcomes = {1: dict(failed, forecast_id=1),
+                    2: dict(failed, forecast_id=2)}
+
+    pending = {f["id"] for f in mem.forecasts_pending_outcomes("BTCUSDT")}
+    assert pending == set()          # neither is retryable
+    # Only the one that WOULD have been retryable inside the window counts.
+    assert mem.count_abandoned_funding_outcomes("BTCUSDT", retry_after) == 1
+
+
+def test_abandonment_is_reported_even_when_nothing_is_pending():
+    """The steady state in which abandoned rows hide is the quiet cycle: nothing
+    pending, so an early return would skip the report entirely."""
+    import asyncio
+    import inspect
+    import logging
+
+    import scheduler
+
+    src = inspect.getsource(scheduler.outcome_tracking_job)
+    # Every early return after the pending query must report first.
+    assert src.count("_report_abandoned_funding()") >= 3
+
+    class _DB:
+        async def count_abandoned_funding_outcomes(self, symbol):
+            return 7
+
+    original = scheduler.db
+    scheduler.db = _DB()
+    try:
+        records = []
+
+        class _Handler(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        handler = _Handler()
+        scheduler.log.addHandler(handler)
+        try:
+            asyncio.run(scheduler._report_abandoned_funding())
+        finally:
+            scheduler.log.removeHandler(handler)
+    finally:
+        scheduler.db = original
+
+    assert any("7 outcome row(s)" in m for m in records)

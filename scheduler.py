@@ -252,6 +252,27 @@ async def resolve_trades_job(application) -> None:
             await alerts.send_signal_alert(application.bot, text)
 
 
+async def _report_abandoned_funding() -> None:
+    """Log outcome rows the bounded funding retry has given up on.
+
+    P1 caps the retry window to keep never-measured forecasts from being starved,
+    which means some rows are abandoned. Called from every exit path of the
+    outcome job, including the one where nothing is pending — that is precisely
+    the steady state in which abandoned rows would otherwise sit unnoticed.
+    """
+    import database as db_module
+    try:
+        abandoned = await db.count_abandoned_funding_outcomes(config.SYMBOL)
+    except Exception:  # noqa: BLE001 - observability must not break the job
+        log.debug("outcome_tracking_job: abandoned-funding count failed",
+                  exc_info=True)
+        return
+    if abandoned:
+        log.warning("outcome_tracking_job: %d outcome row(s) past the %d-day "
+                    "funding retry window still have no cost accounting",
+                    abandoned, db_module.FUNDING_RETRY_WINDOW_DAYS)
+
+
 async def outcome_tracking_job(application) -> None:
     """Measure what price did after every recorded forecast.
 
@@ -261,7 +282,6 @@ async def outcome_tracking_job(application) -> None:
     """
     if not config.ENABLE_FORECAST_LEDGER:
         return
-    import database as db_module
     from analyzer.outcomes import measure_outcome
     from validation.funding import series_from_binance_records
     binance = application.bot_data["binance"]
@@ -271,11 +291,13 @@ async def outcome_tracking_job(application) -> None:
         log.exception("outcome_tracking_job: pending query failed")
         return
     if not pending:
+        await _report_abandoned_funding()
         return
     try:
         df = await binance.klines("1h", limit=1000)
     except Exception:  # noqa: BLE001
         log.exception("outcome_tracking_job: failed to fetch 1h klines")
+        await _report_abandoned_funding()
         return
     # P1: realized funding over each forecast's measured horizon. One fetch
     # covers every pending row (72h horizons, 1000 settlements back). On
@@ -304,18 +326,7 @@ async def outcome_tracking_job(application) -> None:
             log.exception("outcome update failed for forecast #%s", fc.get("id"))
     if updated:
         log.info("outcome_tracking_job: updated %d forecast outcomes", updated)
-    # P1: the funding retry is bounded, so some rows are given up on. Report the
-    # count instead of letting them disappear quietly.
-    try:
-        abandoned = await db.count_abandoned_funding_outcomes(config.SYMBOL)
-    except Exception:  # noqa: BLE001 - observability must not break the job
-        log.debug("outcome_tracking_job: abandoned-funding count failed",
-                  exc_info=True)
-    else:
-        if abandoned:
-            log.warning("outcome_tracking_job: %d outcome row(s) past the "
-                        "%d-day funding retry window still have no cost "
-                        "accounting", abandoned, db_module.FUNDING_RETRY_WINDOW_DAYS)
+    await _report_abandoned_funding()
 
 
 async def _send_signal_chart(application, ctx: dict, signal: dict) -> None:
