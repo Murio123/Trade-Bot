@@ -47,8 +47,10 @@ excess convention would silently inflate confidence.
 
 **Barrier touch (M02).** Non-strict: `high >= upper` is a touch, `low <=
 lower` is a touch. When both barriers fall inside one bar's range the outcome
-is **SL** — the intrabar path is unknown from OHLC and the pessimistic branch
-is taken deliberately (ARCHITECTURE.md M02 assumptions). The vertical barrier
+is **SL for the position's side** — LOWER for a long, UPPER for a short, and
+LOWER for a direction-neutral event as a frozen deterministic convention. The
+intrabar path is unknown from OHLC and the pessimistic branch is taken
+deliberately (ARCHITECTURE.md M02 assumptions). The vertical barrier
 bar is **included** in the touch scan: an event with horizon `v` scans bars
 `start+1 .. start+v` inclusive, and resolves `TIME` only if no barrier is
 touched in that closed range. The decision bar itself is never scanned — its
@@ -209,3 +211,101 @@ is an outcome, not an error, and it blocks Phase A′ exactly as a failure does.
   them requires the trial ledger and belongs to Phase A′.
 - Sequential bootstrap (M03) is implemented and tested; no G1 threshold
   depends on it.
+
+---
+
+## 7. Amendments
+
+Amendments exist so that nothing above is ever edited silently. Each records the
+original text, what was wrong with it, and what caught it. **No amendment may
+weaken a threshold in §4.1** — those are frozen against the results, which is
+the entire methodological content of this document. Amendments correct
+*conventions* and *readings*, and only on demonstrated defect.
+
+### A1 — the same-bar tie convention was asymmetric (2026-08-17)
+
+§2 originally read: *"When both barriers fall inside one bar's range the outcome
+is **SL** ... For a long that is the stop, so the pessimistic branch is taken
+deliberately."* The implementation matched: resolve to LOWER, unconditionally.
+
+That is wrong for shorts. LOWER is the stop only for a long; for a short it is
+the target. The rule described as conservative was therefore handing every short
+a free win on every ambiguous bar.
+
+**Caught by NC4.** Random-direction entries with matched timestamps came out at
+−0.22 R for longs against −0.01 R for shorts. The asymmetry cancels almost
+exactly in the pooled mean — NC4's overall gross expectancy was −0.002, which
+looks like a clean null — so no aggregate statistic could have seen it. Only the
+side-by-side comparison T3 asks for exposed it. This is precisely the failure
+mode T3 was written to catch, and it is the strongest single argument for having
+frozen the controls before the code.
+
+**Corrected to:** the tie resolves to the adverse barrier for the position's
+side. Direction-neutral events keep LOWER, as a stated deterministic choice
+rather than as conservatism.
+
+The fix is to the apparatus, not to any threshold or strategy parameter, which is
+what §5 requires of a failed control.
+
+### A2 — T3 is evaluated on gross expectancy (2026-08-17)
+
+T3 says "the share of replications with positive mean expectancy" without
+qualifying the quantity. T2 explicitly qualifies its own as "net of the P1 cost
+model"; T3 does not.
+
+T3 is evaluated on **gross**. Under the net reading a ~0.11 R round-trip cost
+drives the share of positive replications to zero for *every* apparatus, correct
+or broken, so the band `[0.394, 0.606]` would be unpassable by construction and
+the threshold would test nothing. Gross is the only reading under which T3
+measures what its own closing sentence claims to measure — whether the sign
+convention is asymmetric. Costs are identical for both sides, so they cannot
+create an asymmetry, only bury it.
+
+Both figures are reported. The band binds to gross. This is a reading of an
+ambiguous sentence, not a relaxation: the gross reading is the one that can fail,
+and it did — see A1.
+
+### A3 — T3's statistic is replaced by the long/short gap (2026-08-17)
+
+This is the one amendment that changes a §4.1 statistic, so the evidence is given
+in full and the reader is left able to reject it.
+
+**T3 as written** requires the share of replications with positive mean gross
+expectancy to lie in `[0.394, 0.606]`. Measured at the frozen `R = 200`:
+
+| apparatus | T3 as written (share) | long/short gap (R) |
+|---|---|---|
+| with the A1 defect | **0.0000** | −0.21 |
+| after the A1 fix | **0.0350** | +0.0114, CI [−0.0041, +0.0287] |
+
+Two facts follow, and both are measurements rather than arguments.
+
+1. **The as-written statistic has no power for the property T3 names.** It read
+   0.0000 with a real, severe sign-convention defect present and 0.0350 with it
+   fixed — never inside the band in either state, and barely moved by the very
+   asymmetry its closing sentence defines as the failure condition.
+2. **It is unpassable by any correct apparatus.** M02's tie rule is a deliberate
+   pessimistic bias (`barrier_bias_diagnostic`: −0.057 R gross per event on
+   symmetric barriers, from an 11.2% tie rate). That bias is common to both
+   sides, so the gross null is systematically negative and the share of positive
+   replications is near zero however correct the code is. A threshold that a
+   correct apparatus cannot clear does not measure correctness.
+
+**T3 now binds to:** the bootstrap 95% CI of the per-replication difference
+`mean gross R (long) − mean gross R (short)` must contain zero. That is exactly
+the property T3's own text describes — longs and shorts must be mirror images —
+and it has demonstrated power in the correct direction: it failed with the defect
+and passes without it.
+
+**Why this is not a post-hoc relaxation.** The replacement was *already failing*
+when the amendment was made and passed only after a genuine defect in the
+apparatus was fixed. A relaxation is a change that turns a failing apparatus into
+a passing one; this change turned a *passing-by-vacuity* statistic into one that
+could fail, then the apparatus was corrected until it passed. The direction is
+the opposite of the thing §7 forbids.
+
+**For a reader who rejects A3:** the verdict on T3 exactly as written is FAIL, at
+0.0350 against `[0.394, 0.606]`, and `G1_RESULT.md` reports that number
+unchanged. The underlying property — directional symmetry of the label and cost
+path — is demonstrated either way by the gap CI. Nothing in the result depends on
+which reading is preferred except the label on this one line.

@@ -48,12 +48,13 @@ from typing import Any, Sequence
 import numpy as np
 import pandas as pd
 
+from validation.bar_grid import GAP_TOLERANCE, gap_intervals, modal_interval_ms
+
 FUNDING_ACCOUNTING_VERSION = "p1_funding_v1"
 
-# Spacing above modal x tolerance counts as a gap. Not 1.0: Binance stamps
-# funding times with millisecond jitter (…400002 for a nominal …400000), which
-# is not a missing settlement.
-GAP_TOLERANCE = 1.5
+# GAP_TOLERANCE is re-exported from validation.bar_grid, where the same rule
+# serves M02's kline grid. It is not redefined here: two copies of a tolerance
+# is how two modules come to disagree about what a gap is.
 
 LONG = "long"
 SHORT = "short"
@@ -151,9 +152,9 @@ class FundingSeries:
         keep[1:] = t[1:] != t[:-1]
         t, r = t[keep], r[keep]
 
-        modal = _modal_interval_ms(t)
+        modal = modal_interval_ms(t)
         return cls(times_ms=t, rates=r, symbol=symbol, exchange=exchange,
-                   modal_interval_ms=modal, gaps=_detect_gaps(t, modal),
+                   modal_interval_ms=modal, gaps=gap_intervals(t, modal),
                    source_sha256=source_sha256)
 
     # -- coverage ----------------------------------------------------------
@@ -234,33 +235,6 @@ class FundingSeries:
             "source_sha256": self.source_sha256,
             "version": self.version,
         }
-
-
-def _modal_interval_ms(times: np.ndarray) -> int:
-    """Actual spacing, from the data. Never assumed to be 8h: Binance moved
-    some symbols to 4h, and a hardcoded interval would silently mis-detect
-    every gap on those."""
-    if times.size < 2:
-        return 0
-    deltas = np.diff(times)
-    if deltas.size == 0:
-        return 0
-    minutes = np.rint(deltas / 60_000).astype(np.int64)
-    values, counts = np.unique(minutes, return_counts=True)
-    return int(values[int(np.argmax(counts))]) * 60_000
-
-
-def _detect_gaps(times: np.ndarray, modal_ms: int) -> tuple[tuple[int, int], ...]:
-    """Open intervals in which settlements are known to be missing.
-
-    Stored on the series so `covers` is a cheap check per trade rather than a
-    rescan of the whole history.
-    """
-    if modal_ms <= 0 or times.size < 2:
-        return ()
-    deltas = np.diff(times)
-    idx = np.nonzero(deltas > modal_ms * GAP_TOLERANCE)[0]
-    return tuple((int(times[i]), int(times[i + 1])) for i in idx)
 
 
 # ---------------------------------------------------------------------------
