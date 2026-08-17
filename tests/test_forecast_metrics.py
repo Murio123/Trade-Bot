@@ -172,8 +172,14 @@ def test_execution_slippage_and_costs(metrics):
     e = metrics["execution"]
     assert e["close_vs_executable"]["n"] == 8
     assert e["close_vs_executable"]["avg_signed_points"] == pytest.approx(9.375, abs=1e-3)
-    assert e["modeled_round_trip_cost_pct"] == 0.13
+    # P1 renamed this: the constant covers TRANSACTION cost only, because
+    # funding is per-trade and now lives in the per-forecast funding_pct column.
+    assert e["modeled_transaction_cost_pct"] == 0.13
     assert e["net_after_costs"]["n"] == 5
+    # Every fixture row predates P1 (no funding_pct key) — the metric must
+    # count them rather than treating a missing bill as zero.
+    assert e["realized_funding_pct"]["n"] == 0
+    assert e["realized_funding_pct"]["rows_without_funding"] > 0
 
 
 def test_execution_freshness_impact_buckets(metrics):

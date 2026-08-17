@@ -23,6 +23,7 @@ from database import Database
 from signal_engine.forecast_record import build_forecast_record
 from signal_engine.no_trade_gate import TP2_SOURCES, invalid_tp2
 from signal_engine.profiles import PROFILES, get_profile
+from validation.trade_costs import FUNDING_NOT_MODELLED
 
 UTC = timezone.utc
 
@@ -224,8 +225,12 @@ def test_outcome_returns_mfe_mae_and_reached():
           "stop_loss": 95_000.0, "take_profit_levels": [101_000.0, 106_000.0]}
     # +100/hour drift for 72h -> +7200 with wicks +-50.
     df = _klines(anchor, 80, 100_000.0, step=100.0)
+    # FUNDING_NOT_MODELLED: this test fixes the pre-P1 arithmetic, so the
+    # transaction-only net figure below must stay bit-identical. The
+    # funding-aware and fail-closed paths are covered in test_funding.py.
     out = measure_outcome(fc, df, anchor + timedelta(hours=80),
-                          taker_fee_pct=0.05, slippage_pct=0.03)
+                          taker_fee_pct=0.05, slippage_pct=0.03,
+                          funding=FUNDING_NOT_MODELLED)
     assert out["return_1h"] == pytest.approx(0.1, rel=0.1)
     assert out["return_24h"] > out["return_4h"] > 0
     assert out["return_72h"] is not None

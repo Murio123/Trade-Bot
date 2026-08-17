@@ -100,6 +100,26 @@ class BinanceClient:
             "next_funding_time": premium.get("nextFundingTime"),
         }
 
+    async def funding_history(self, symbol: str | None = None, *,
+                             start_time: int | None = None,
+                             end_time: int | None = None,
+                             limit: int = 1000) -> list[dict[str, Any]]:
+        """Raw settled funding records, oldest first.
+
+        Separate from `funding_rate` on purpose: that method answers "is
+        funding crowded right now" and collapses history into a z-score.
+        This one returns the settlements themselves, which is what realized
+        funding accounting needs (P1). `markPrice` is empty on older records,
+        so callers must not depend on it.
+        """
+        symbol = symbol or config.SYMBOL
+        params: dict[str, Any] = {"symbol": symbol, "limit": limit}
+        if start_time is not None:
+            params["startTime"] = int(start_time)
+        if end_time is not None:
+            params["endTime"] = int(end_time)
+        return await self._get("/fapi/v1/fundingRate", params)
+
     async def open_interest(self, symbol: str | None = None) -> float:
         symbol = symbol or config.SYMBOL
         data = await self._get("/fapi/v1/openInterest", {"symbol": symbol})

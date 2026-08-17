@@ -53,6 +53,7 @@ from tools.deep_backtest import (DeepBacktestError, EXCHANGES, WFConfig,
                                  fold_windows, partition_setups, prepare,
                                  walk_start)
 from tools.deep_discovery import build_feature_rows, record_walk
+from validation.funding import load_funding_series
 
 STAGE = "C2.1"
 
@@ -90,7 +91,8 @@ def gate_allows(variant: str, regime_current: str | None,
 
 def build_rows(dataset: str, exchange: str, symbol: str, profile_name: str,
               bars: int, max_gap_ratio: float = 0.001,
-              allow_estimated_cvd: bool = False
+              allow_estimated_cvd: bool = False,
+              funding_dir: str = "data/funding"
               ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any],
                         int, str]:
     """Return (rows, walk, profile, n_entry_bars, cvd_method).
@@ -106,7 +108,9 @@ def build_rows(dataset: str, exchange: str, symbol: str, profile_name: str,
     frames, profile, _table, cvd_method = prepare(
         dataset, exchange, symbol, profile_name, bars, max_gap_ratio,
         allow_estimated_cvd)
-    walk, records = record_walk(frames, profile, bars)
+    # P1: real funding over the actual holding interval; missing data raises.
+    funding = load_funding_series(funding_dir, exchange=exchange, symbol=symbol)
+    walk, records = record_walk(frames, profile, bars, funding=funding)
     rows = build_feature_rows(walk, records)
     n_entry_bars = len(frames[profile["entry"]].df)
     return rows, walk, profile, n_entry_bars, cvd_method

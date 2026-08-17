@@ -42,6 +42,8 @@ from tools.swing_hypothesis_simulator import (current_swing_baseline,
                                               random_direction_baseline,
                                               regime_direction_baseline,
                                               summarize, walk_hypothesis)
+from validation.funding import FundingSeries, load_funding_series
+from validation.trade_costs import transaction_cost_pct
 
 STAGE = "C2.2c"
 
@@ -172,12 +174,14 @@ def single_fold_dominance_ok(per_fold: list[dict[str, Any]],
 def random_direction_distribution(full_records: list[dict[str, Any]], entry_df,
                                   hold_bars: int, cost_pct: float,
                                   n_draws: int = N_RANDOM_DRAWS,
-                                  seed_base: int = RANDOM_SEED_BASE
+                                  seed_base: int = RANDOM_SEED_BASE,
+                                  *, funding: FundingSeries | Any
                                   ) -> list[float]:
     draws = []
     for i in range(n_draws):
         recs = random_direction_baseline(full_records, entry_df, hold_bars,
-                                         cost_pct, seed=seed_base + i)
+                                         cost_pct, seed=seed_base + i,
+                                         funding=funding)
         s = summarize(recs)
         if s["net_expectancy_r"] is not None:
             draws.append(s["net_expectancy_r"])
@@ -284,7 +288,8 @@ def evaluate_h1(records: list[dict[str, Any]], folds, hold_bars: int
 def evaluate_h2(records: list[dict[str, Any]],
                regime_records: list[dict[str, Any]],
                baseline_setups: list[dict[str, Any]], entry_df, hold_bars: int,
-               cost_pct: float, folds) -> dict[str, Any]:
+               cost_pct: float, folds,
+               *, funding: FundingSeries | Any) -> dict[str, Any]:
     """Every pooled/baseline/distribution figure below is built from the
     UNION of fold validation windows only (never the full input lists,
     which span the sealed holdout and non-validation train-only regions
@@ -324,7 +329,7 @@ def evaluate_h2(records: list[dict[str, Any]],
     dominance_ok, dominance_detail = single_fold_dominance_ok(per_fold)
 
     random_draws = random_direction_distribution(all_val, entry_df, hold_bars,
-                                                 cost_pct)
+                                                 cost_pct, funding=funding)
     random_p95 = float(np.percentile(random_draws, 95)) if random_draws else None
     random_rank = (percentile_rank(pooled["net_expectancy_r"], random_draws)
                   if pooled["net_expectancy_r"] is not None else None)
@@ -430,30 +435,40 @@ def run_walkforward(dataset: str, exchange: str, symbol: str,
                     max_gap_ratio: float = 0.001,
                     allow_estimated_cvd: bool = False,
                     holdout_frac: float = HOLDOUT_FRAC,
-                    min_folds: int = MIN_FOLDS) -> dict[str, Any]:
+                    min_folds: int = MIN_FOLDS,
+                    funding_dir: str = "data/funding") -> dict[str, Any]:
     frames, profile, _table, cvd_method = prepare(
         dataset, exchange, symbol, profile_name, bars, max_gap_ratio,
         allow_estimated_cvd)
     entry_df = frames[profile["entry"]].df
     n_entry_bars = len(entry_df)
     hold_bars = max_hold_bars(profile)
-    cost_pct = (2 * config.TAKER_FEE_PCT + config.SLIPPAGE_PCT) / 100
+    cost_pct = transaction_cost_pct(config.TAKER_FEE_PCT,
+                                    config.SLIPPAGE_PCT) / 100
+    # P1: real run, real funding. Missing data raises out of
+    # load_funding_series instead of silently reverting to a free hold.
+    funding = load_funding_series(funding_dir, exchange=exchange, symbol=symbol)
 
     wf, folds, span_lo, span_hi = build_geometry(profile, bars, n_entry_bars,
                                                  holdout_frac, min_folds)
     holdout = holdout_section(span_hi, wf.holdout_bars)
 
-    baseline_walk = current_swing_baseline(frames, profile, bars)
+    baseline_walk = current_swing_baseline(frames, profile, bars,
+                                          funding=funding)
     baseline_setups = [s for s in baseline_walk["setups"]
                       if s["outcome"] != "unresolved"]
 
-    h1_records = walk_hypothesis(frames, profile, bars, "H1", timing=True)
-    h2_records = walk_hypothesis(frames, profile, bars, "H2", timing=True)
-    h2_regime_records = regime_direction_baseline(frames, profile, bars, "H2")
+    h1_records = walk_hypothesis(frames, profile, bars, "H1", timing=True,
+                                funding=funding)
+    h2_records = walk_hypothesis(frames, profile, bars, "H2", timing=True,
+                                funding=funding)
+    h2_regime_records = regime_direction_baseline(frames, profile, bars, "H2",
+                                                 funding=funding)
 
     h1_report = evaluate_h1(h1_records, folds, hold_bars)
     h2_report = evaluate_h2(h2_records, h2_regime_records, baseline_setups,
-                            entry_df, hold_bars, cost_pct, folds)
+                            entry_df, hold_bars, cost_pct, folds,
+                            funding=funding)
 
     return {
         "stage": STAGE, "kind": "swing_hypothesis_walkforward",
@@ -467,6 +482,7 @@ def run_walkforward(dataset: str, exchange: str, symbol: str,
                      "n_folds": len(folds)},
         "holdout": holdout,
         "H1": h1_report, "H2": h2_report,
+        "funding_provenance": funding.provenance(),
         "limitations": list(LIMITATIONS),
     }
 

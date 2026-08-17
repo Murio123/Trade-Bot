@@ -28,10 +28,13 @@ building block it can to avoid duplicating pricing/cost/outcome logic:
     compute_equilibrium, analyzer.volatility.analyze_volatility,
     signal_engine.htf_filter.get_htf_bias — same analyzer calls deep_walk
     itself makes, called directly instead of through the score pipeline.
-  * The cost formula (cost_pct * price / risk) is the same one-line
-    formula already duplicated in tools/deep_backtest.py and
-    tools/deep_discovery.py — a third instance here follows the same
-    existing convention, not a new one.
+  * validation.trade_costs                — the ONE cost/net accounting layer
+                                            (P1). The one-line cost formula
+                                            that used to be duplicated here,
+                                            in deep_backtest and in
+                                            deep_discovery now lives there,
+                                            and funding is charged over the
+                                            actual holding interval.
 
 Neither hypothesis uses tools.deep_backtest.calculate_confluence_score,
 _build_htf_zones, detect_liquidity, detect_reversal, apply_htf_policy,
@@ -71,6 +74,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 import config
 import tools.deep_backtest as deep_backtest
@@ -84,6 +88,10 @@ from tools.deep_backtest import (DeepBacktestError, EXCHANGES, HTF_WINDOW,
                                  max_hold_bars, prepare, resolve, walk_start)
 from tools.deep_discovery import _ema_slope
 from tools.kline_dataset import ENTRY_WARMUP, HTF_WARMUP
+from validation.funding import FundingSeries, load_funding_series
+from validation.trade_costs import (FUNDING_NOT_MODELLED, cost_pct_to_r,
+                                    funding_summary, trade_costs,
+                                    transaction_cost_pct)
 
 STAGE = "C2.2b"
 HYPOTHESES = ("H1", "H2")
@@ -179,7 +187,15 @@ def _rolling_extremes(entry_df, i: int, window: int
 
 
 def _cost_r(cost_pct: float, price: float, risk: float) -> float:
-    return (cost_pct * price / risk) if risk else 0.0
+    """Transaction cost in R. `cost_pct` is a FRACTION of price (already /100),
+    which is the units the H1/H2 admission gates were frozen in.
+
+    A thin adapter over validation.trade_costs so no second copy of the formula
+    exists. Funding is deliberately absent: this quantity gates candidates
+    BEFORE the holding interval is known, and folding funding in would change
+    which historical trades were taken (P1 forbids that).
+    """
+    return cost_pct_to_r(cost_pct * 100.0, price, risk)
 
 
 # ---------------------------------------------------------------------------
@@ -324,15 +340,80 @@ def _record_reject(hyp: str, i: int, ctx: dict[str, Any], reason: str
         "volatility_percentile": ctx["volatility_atr_percentile"],
         "cost_r": None, "gross_r": None, "net_r": None, "outcome": None,
         "exit_idx": None, "holding_bars": None,
+        "funding_pct": None, "funding_r": None, "funding_settlements": None,
+        "funding_modelled": None,
         "rejection_reason": reason, "eligible": False,
     }
 
 
+def _close_time_ms(entry_df) -> np.ndarray:
+    """close_time in ms from a bare DataFrame.
+
+    tools.deep_backtest._close_ms takes a LoadedFrame; the random-direction
+    baseline only receives the frame's df. Same NaT strictness: pandas coerces
+    NaT to int64 min, which would silently land every settlement lookup in
+    1677.
+    """
+    if "close_time" not in entry_df.columns:
+        raise DeepBacktestError("close_time column is required for funding")
+    col = entry_df["close_time"]
+    if col.isna().any():
+        raise DeepBacktestError("close_time contains NaT")
+    return (pd.to_datetime(col, utc=True).astype("int64") // 1_000_000).to_numpy()
+
+
+def maybe_close_ms(entry_df, funding: Any) -> np.ndarray | None:
+    """close_time array, or None when funding is not being modelled.
+
+    Synthetic frames in the test suite have no close_time and no real funding
+    history; demanding the column from them would make FUNDING_NOT_MODELLED
+    useless for exactly the callers it exists for.
+    """
+    if isinstance(funding, type(FUNDING_NOT_MODELLED)):
+        return None
+    return _close_time_ms(entry_df)
+
+
+def _funding_terms(entry_close_ms: np.ndarray | None, entry_idx: int,
+                   exit_idx: int | None, direction: str, pos: dict[str, Any],
+                   risk: float, funding: Any) -> dict[str, Any]:
+    """Realized funding for one resolved trade, in percent and in R (P1).
+
+    The holding interval runs from the CLOSE of the entry bar — the bar the
+    decision is made on, and the price `pos["entry_price"]` comes from — to the
+    close of the exit bar. Settlements are charged half-open on `(entry, exit]`
+    by validation.funding.
+
+    An unresolved trade (`exit_idx is None`) has no interval and therefore no
+    funding: it is excluded from every aggregate anyway.
+    """
+    if exit_idx is None:
+        return {"funding_pct": None, "funding_r": None,
+                "funding_settlements": None, "funding_modelled": None}
+    if entry_close_ms is None:
+        # FUNDING_NOT_MODELLED: zero, and said out loud on every record.
+        return {"funding_pct": 0.0, "funding_r": 0.0,
+                "funding_settlements": 0, "funding_modelled": False}
+    costs = trade_costs(entry_price=pos["entry_price"], risk_distance=risk,
+                        side=direction,
+                        entry_time=int(entry_close_ms[entry_idx]),
+                        exit_time=int(entry_close_ms[exit_idx]),
+                        funding=funding)
+    return {"funding_pct": costs.funding_pct, "funding_r": costs.funding_r,
+            "funding_settlements": costs.funding_settlements,
+            "funding_modelled": costs.funding_modelled}
+
+
 def walk_hypothesis(frames: dict[str, Any], profile: dict[str, Any],
-                    bars: int, hypothesis: str, timing: bool = True
-                    ) -> list[dict[str, Any]]:
+                    bars: int, hypothesis: str, timing: bool = True,
+                    *, funding: FundingSeries | Any) -> list[dict[str, Any]]:
     """One independent pass over entry bars for ONE hypothesis. timing=False
     runs the regime-direction baseline variant (see h1_evaluate/h2_evaluate).
+
+    `funding` is required and has no default: a walk that forgot to charge
+    funding is exactly the defect P1 fixes. Pass a FundingSeries, or
+    FUNDING_NOT_MODELLED for synthetic frames whose timestamps carry no real
+    funding history — the choice is then recorded on every trade.
     """
     if hypothesis not in _EVALUATORS:
         raise ValueError(f"unknown hypothesis: {hypothesis!r}")
@@ -342,8 +423,10 @@ def walk_hypothesis(frames: dict[str, Any], profile: dict[str, Any],
     entry_df = frames[entry_tf].df
     n = len(entry_df)
     hold_bars = max_hold_bars(profile)
-    cost_pct = (2 * config.TAKER_FEE_PCT + config.SLIPPAGE_PCT) / 100
+    cost_pct = transaction_cost_pct(config.TAKER_FEE_PCT,
+                                    config.SLIPPAGE_PCT) / 100
     close_ms = {tf: _close_ms(f) for tf, f in frames.items()}
+    entry_close_ms = maybe_close_ms(entry_df, funding)
     cache = _IndicatorCache()
     start = walk_start(n, bars)
 
@@ -361,8 +444,12 @@ def walk_hypothesis(frames: dict[str, Any], profile: dict[str, Any],
         risk, rr, cost_r = payload["risk"], payload["rr"], payload["cost_r"]
         outcome = resolve(entry_df, i, direction, pos, hold_bars)
         gross_r = outcome["r"]
-        net_r = round(gross_r - cost_r, 2) if gross_r is not None else None
         exit_idx = outcome.get("exit_idx")
+        fund = _funding_terms(entry_close_ms, i, exit_idx, direction, pos,
+                              risk, funding)
+        funding_r = fund["funding_r"] or 0.0
+        net_r = (round(gross_r - cost_r - funding_r, 2)
+                 if gross_r is not None else None)
         records.append({
             "hypothesis": hypothesis, "idx": i, "timestamp": _iso(ctx["open_time"]),
             "direction": direction, "entry": round(pos["entry_price"], 6),
@@ -373,6 +460,7 @@ def walk_hypothesis(frames: dict[str, Any], profile: dict[str, Any],
             "cost_r": round(cost_r, 4), "gross_r": gross_r, "net_r": net_r,
             "outcome": outcome["outcome"], "exit_idx": exit_idx,
             "holding_bars": (exit_idx - i) if exit_idx is not None else None,
+            **fund,
             "rejection_reason": None, "eligible": True,
         })
     return records
@@ -383,33 +471,46 @@ def walk_hypothesis(frames: dict[str, Any], profile: dict[str, Any],
 # ---------------------------------------------------------------------------
 
 def current_swing_baseline(frames: dict[str, Any], profile: dict[str, Any],
-                           bars: int) -> dict[str, Any]:
+                           bars: int, *, funding: FundingSeries | Any
+                           ) -> dict[str, Any]:
     """Unmodified tools.deep_backtest.deep_walk — the CURRENT swing setups,
-    untouched, for comparison only."""
-    return deep_backtest.deep_walk(frames, profile, bars)
+    untouched, for comparison only. Same funding series as the hypotheses:
+    comparing a funding-charged hypothesis against a funding-free baseline
+    would attribute the difference to the hypothesis."""
+    return deep_backtest.deep_walk(frames, profile, bars, funding=funding)
 
 
 def regime_direction_baseline(frames: dict[str, Any], profile: dict[str, Any],
-                              bars: int, hypothesis: str
+                              bars: int, hypothesis: str,
+                              *, funding: FundingSeries | Any
                               ) -> list[dict[str, Any]]:
     """Same regime/volatility/RR/cost gates and same stop/target
     construction as the hypothesis, but with the pullback/extreme TIMING
     condition removed — isolates whether the specific entry timing (not
     just being in the right regime) adds anything."""
-    return walk_hypothesis(frames, profile, bars, hypothesis, timing=False)
+    return walk_hypothesis(frames, profile, bars, hypothesis, timing=False,
+                          funding=funding)
 
 
 def random_direction_baseline(records: list[dict[str, Any]], entry_df,
                               hold_bars: int, cost_pct: float,
-                              seed: int = RANDOM_SEED) -> list[dict[str, Any]]:
+                              seed: int = RANDOM_SEED,
+                              *, funding: FundingSeries | Any
+                              ) -> list[dict[str, Any]]:
     """For every ELIGIBLE trade the hypothesis actually took, resolve an
     otherwise-identical trade (same idx, same absolute stop/target
     distances) with an independently random direction. Deterministic given
-    `seed`."""
+    `seed`.
+
+    The random direction flips the SIGN of the funding bill as well as of the
+    price move: a random-direction control that kept the hypothesis's funding
+    would be comparing against something that never existed.
+    """
     rng = np.random.RandomState(seed)
     out = []
     taken = [r for r in records if r["eligible"]]
     directions = rng.choice(["long", "short"], size=len(taken))
+    entry_close_ms = maybe_close_ms(entry_df, funding)
     for rec, direction in zip(taken, directions):
         price = rec["entry"]
         stop_dist = abs(rec["entry"] - rec["stop"])
@@ -423,8 +524,11 @@ def random_direction_baseline(records: list[dict[str, Any]], entry_df,
         gross_r = outcome["r"]
         risk = abs(price - stop)
         cost_r = _cost_r(cost_pct, price, risk)
-        net_r = round(gross_r - cost_r, 2) if gross_r is not None else None
         exit_idx = outcome.get("exit_idx")
+        fund = _funding_terms(entry_close_ms, rec["idx"], exit_idx, direction,
+                              pos, risk, funding)
+        net_r = (round(gross_r - cost_r - (fund["funding_r"] or 0.0), 2)
+                 if gross_r is not None else None)
         out.append({
             "hypothesis": rec["hypothesis"], "idx": rec["idx"],
             "timestamp": rec["timestamp"], "direction": direction,
@@ -434,6 +538,7 @@ def random_direction_baseline(records: list[dict[str, Any]], entry_df,
             "cost_r": round(cost_r, 4), "gross_r": gross_r, "net_r": net_r,
             "outcome": outcome["outcome"], "exit_idx": exit_idx,
             "holding_bars": (exit_idx - rec["idx"]) if exit_idx is not None else None,
+            **fund,
             "rejection_reason": None, "eligible": True,
         })
     return out
@@ -476,6 +581,7 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
             "gross_expectancy_r": None, "net_expectancy_r": None,
             "median_r": None, "win_rate": None, "timeout_share": None,
             "sum_r": None, "avg_cost_r": None, "max_losing_streak": None,
+            "funding": funding_summary([]),
             "rejection_counts": dict(rejection_counts),
         }
     net_rs = [r["net_r"] for r in taken]
@@ -493,6 +599,9 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
         "sum_r": round(float(np.sum(net_rs)), 4),
         "avg_cost_r": round(float(np.mean([r["cost_r"] for r in taken])), 4),
         "max_losing_streak": _max_losing_streak(taken),
+        # P1: funding is reported as its own term, never folded into
+        # avg_cost_r — the transaction cost is what the admission gate saw.
+        "funding": funding_summary(taken),
         "rejection_counts": dict(rejection_counts),
     }
 
@@ -500,15 +609,24 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
 def run_simulation(dataset: str, exchange: str, symbol: str,
                    profile_name: str, bars: int,
                    max_gap_ratio: float = 0.001,
-                   allow_estimated_cvd: bool = False) -> dict[str, Any]:
+                   allow_estimated_cvd: bool = False,
+                   funding_dir: str = "data/funding") -> dict[str, Any]:
     frames, profile, _table, cvd_method = prepare(
         dataset, exchange, symbol, profile_name, bars, max_gap_ratio,
         allow_estimated_cvd)
     entry_df = frames[profile["entry"]].df
     hold_bars = max_hold_bars(profile)
-    cost_pct = (2 * config.TAKER_FEE_PCT + config.SLIPPAGE_PCT) / 100
+    cost_pct = transaction_cost_pct(config.TAKER_FEE_PCT,
+                                    config.SLIPPAGE_PCT) / 100
 
-    baseline_walk = current_swing_baseline(frames, profile, bars)
+    # P1: a real run charges real funding. FUNDING_NOT_MODELLED is not
+    # reachable from here — a research artifact with an un-modelled funding
+    # term is the thing this prerequisite exists to prevent. Missing data
+    # raises out of load_funding_series rather than degrading quietly.
+    funding = load_funding_series(funding_dir, exchange=exchange, symbol=symbol)
+
+    baseline_walk = current_swing_baseline(frames, profile, bars,
+                                          funding=funding)
     baseline_resolved = [s for s in baseline_walk["setups"]
                         if s["outcome"] != "unresolved"]
 
@@ -533,15 +651,22 @@ def run_simulation(dataset: str, exchange: str, symbol: str,
             "net_expectancy_r": (round(float(np.mean(
                 [s["r"] for s in baseline_resolved])), 4)
                 if baseline_resolved else None),
+            "gross_expectancy_r": (round(float(np.mean(
+                [s["gross_r"] for s in baseline_resolved])), 4)
+                if baseline_resolved else None),
+            "funding": funding_summary(baseline_resolved),
         },
+        "funding_provenance": funding.provenance(),
         "limitations": list(LIMITATIONS),
     }
 
     for hyp in HYPOTHESES:
-        full = walk_hypothesis(frames, profile, bars, hyp, timing=True)
-        regime_only = regime_direction_baseline(frames, profile, bars, hyp)
+        full = walk_hypothesis(frames, profile, bars, hyp, timing=True,
+                              funding=funding)
+        regime_only = regime_direction_baseline(frames, profile, bars, hyp,
+                                               funding=funding)
         random_dir = random_direction_baseline(full, entry_df, hold_bars,
-                                              cost_pct)
+                                              cost_pct, funding=funding)
         result[hyp] = {
             "trades": full,
             "summary": summarize(full),

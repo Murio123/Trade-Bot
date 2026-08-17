@@ -215,6 +215,13 @@ ALTER TABLE forecasts ADD COLUMN IF NOT EXISTS context_version TEXT;
 -- new forecasts resolve. Pure analytics ledger; never read by any decision.
 ALTER TABLE forecast_outcomes ADD COLUMN IF NOT EXISTS realized_r DOUBLE PRECISION;
 
+-- P1: additive nullable realized funding on forecast_outcomes, in percent of
+-- notional (positive = the position paid, negative = it was credited). No
+-- backfill: rows written before P1 keep funding_pct NULL, which is exactly how
+-- a pre-P1 net_after_costs (fees + slippage only, funding never charged) stays
+-- distinguishable from a post-P1 one.
+ALTER TABLE forecast_outcomes ADD COLUMN IF NOT EXISTS funding_pct DOUBLE PRECISION;
+
 -- Stage 15B: additive nullable setup-lifecycle metadata on forecasts. All
 -- nullable, no defaults, no backfill — old rows stay NULL and read back as
 -- "unknown". Pure analytics; never consulted by any trading decision or score.
@@ -687,7 +694,8 @@ _OUTCOME_COLS = [
     "forecast_id", "anchor_time", "reference_price",
     "return_1h", "return_4h", "return_12h", "return_24h", "return_72h",
     "mfe_points", "mae_points", "reached_500", "reached_1500", "reached_3000",
-    "tp1_hit", "tp2_hit", "stop_hit", "net_after_costs", "realized_r", "resolved",
+    "tp1_hit", "tp2_hit", "stop_hit", "net_after_costs", "funding_pct",
+    "realized_r", "resolved",
 ]
 
 

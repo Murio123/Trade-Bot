@@ -8,8 +8,10 @@ and gates. Each qualified setup is resolved with the same lifecycle the live
 journal uses (stop / TP1->breakeven / TP2), net of trading costs, and results
 are aggregated over a score-threshold sweep with the profile cooldown.
 
-Note: funding / on-chain / liquidation-map history is unavailable, so the
-macro points and the wait-for-sweep gate are not reproduced. The MTF
+Note: on-chain / liquidation-map history is unavailable, so the macro points
+and the wait-for-sweep gate are not reproduced. Funding history IS fetched and
+charged over each trade's actual holding interval (P1); when the fetch fails
+the report says so instead of quietly holding positions for free. The MTF
 confidence modifier only affects the reported confidence in live (never the
 score or the outcome), so it is irrelevant here. Everything price-based —
 including the structural stop/targets and the multi-TF trend-aligned
@@ -41,6 +43,9 @@ from signal_engine.profiles import get_profile
 from signal_engine.regime import detect_regime, weighted_total
 from signal_engine.no_trade_gate import effective_expected_move
 from signal_engine.vetoes import TF_HOURS, abnormal_volatility, dead_zone
+from validation.funding import (FundingDataUnavailable, FundingError,
+                                FundingSeries, series_from_binance_records)
+from validation.trade_costs import FUNDING_NOT_MODELLED, trade_costs
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +72,60 @@ async def _fetch_history(binance, interval: str, target: int) -> "pd.DataFrame":
     full = (pd.concat(frames).drop_duplicates("open_time")
             .sort_values("open_time").reset_index(drop=True))
     return full.iloc[-target:].reset_index(drop=True)
+
+
+def _close_ms(df: "pd.DataFrame"):
+    """close_time in epoch ms — the holding-interval clock for funding.
+
+    NaT is refused rather than coerced: pandas turns NaT into int64 min, which
+    would place every settlement lookup in 1677 and silently zero the bill.
+    """
+    import pandas as pd
+
+    if "close_time" not in df.columns:
+        raise ValueError("close_time column is required for funding accounting")
+    col = df["close_time"]
+    if col.isna().any():
+        raise ValueError("close_time contains NaT")
+    return (pd.to_datetime(col, utc=True).astype("int64") // 1_000_000).to_numpy()
+
+
+async def _fetch_funding(binance: BinanceClient, entry_df: "pd.DataFrame"):
+    """Funding settlements covering the walked window, or a loud opt-out.
+
+    Paged forward from one settlement interval BEFORE the first entry bar so the
+    series brackets every holding interval the walk can produce; the coverage
+    check in validation.funding is strict at the left edge.
+
+    On any failure this returns FUNDING_NOT_MODELLED, which propagates into the
+    report as an explicit "funding not charged" line. That is deliberately not
+    the same thing as charging zero silently: the reader is told the number is
+    optimistic and by which term.
+    """
+    try:
+        close_ms = _close_ms(entry_df)
+        start = int(close_ms[0]) - 12 * 3_600_000
+        end = int(close_ms[-1]) + 12 * 3_600_000
+        records: list[dict[str, Any]] = []
+        cursor = start
+        for _ in range(12):  # safety cap on pages, as in _fetch_history
+            page = await binance.funding_history(start_time=cursor, end_time=end,
+                                                 limit=1000)
+            if not page:
+                break
+            records.extend(page)
+            if len(page) < 1000:
+                break
+            cursor = int(page[-1]["fundingTime"]) + 1
+        return series_from_binance_records(records, symbol=config.SYMBOL)
+    except (FundingDataUnavailable, FundingError, ValueError, KeyError,
+            IndexError) as exc:
+        log.warning("backtest: funding history unavailable (%s); "
+                    "net numbers will exclude funding", exc)
+        return FUNDING_NOT_MODELLED
+    except Exception:  # noqa: BLE001 - a bot command must not die on this
+        log.exception("backtest: funding fetch failed")
+        return FUNDING_NOT_MODELLED
 
 
 def _htf_policy_ctx(rev: dict[str, Any], bull_tfs: int, bear_tfs: int,
@@ -118,20 +177,25 @@ async def run_backtest(binance: BinanceClient, profile_name: str = "swing",
     dfs = {entry_tf: entry_df}
     dfs.update(dict(zip(other_tfs, other_frames)))
 
+    # P1: funding over the real holding interval. Fetched here because the walk
+    # runs off the event loop and cannot await. A failure degrades LOUDLY — the
+    # report prints that funding was not charged — rather than reverting to the
+    # free-hold accounting this prerequisite removes.
+    funding = await _fetch_funding(binance, entry_df)
+
     # The bar-by-bar walk is CPU-heavy pandas work (~10s); run it off the event
     # loop so Telegram handlers and the scheduler stay responsive.
-    return await asyncio.to_thread(_walk, dfs, profile, warmup)
+    return await asyncio.to_thread(_walk, dfs, profile, warmup, funding)
 
 
-def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
+def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int,
+          funding: FundingSeries | Any) -> str:
     entry_tf = profile["entry"]
     htf = profile["htf"]
     zone_tfs = profile["zone_tfs"]
     entry_df = dfs[entry_tf]
     n = len(entry_df)
-
-    # Round-trip trading cost as a fraction of price (entry+exit fees + slippage).
-    cost_pct = (2 * config.TAKER_FEE_PCT + config.SLIPPAGE_PCT) / 100
+    entry_close_ms = _close_ms(entry_df)
 
     setups: list[dict[str, Any]] = []
     start = max(warmup, n - MAX_BARS)
@@ -298,14 +362,24 @@ def _walk(dfs: dict[str, Any], profile: dict[str, Any], warmup: int) -> str:
         outcome = _resolve(entry_df, i, direction, pos)
         if outcome is None:
             continue
-        # Net result: subtract the round-trip cost expressed in R.
+        # Net result: fees + slippage + realized funding, all in R, through the
+        # one canonical accounting layer (P1).
         risk_dist = abs(price - pos["stop_loss"])
-        cost_r = (cost_pct * price / risk_dist) if risk_dist else 0.0
-        outcome["r"] = round(outcome["r"] - cost_r, 2)
-        setups.append({"idx": i, "score": total, "direction": direction, **outcome})
+        costs = trade_costs(entry_price=price, risk_distance=risk_dist,
+                            side=direction,
+                            entry_time=int(entry_close_ms[i]),
+                            exit_time=int(entry_close_ms[outcome["exit_idx"]]),
+                            funding=funding, gross_r=outcome["r"])
+        outcome["r"] = round(costs.net_r, 2)
+        setups.append({"idx": i, "score": total, "direction": direction,
+                       "funding_r": costs.funding_r,
+                       "funding_settlements": costs.funding_settlements,
+                       **outcome})
 
     cooldown_bars = max(1, int(round(profile["cooldown_hours"] / TF_HOURS.get(entry_tf, 1))))
-    return _report(setups, profile, cooldown_bars, n - start)
+    return _report(setups, profile, cooldown_bars, n - start,
+                   funding_modelled=not isinstance(funding, type(
+                       FUNDING_NOT_MODELLED)))
 
 
 def _resolve(df, entry_idx: int, direction: str, pos: dict[str, Any]) -> dict[str, Any] | None:
@@ -330,7 +404,7 @@ def _resolve(df, entry_idx: int, direction: str, pos: dict[str, Any]) -> dict[st
             stop_hit = (low <= stop) if long else (high >= stop)
             tp1_hit = (high >= tp1) if long else (low <= tp1)
             if stop_hit:
-                return {"outcome": "loss", "r": -1.0}
+                return {"outcome": "loss", "r": -1.0, "exit_idx": j}
             if tp1_hit:
                 hit_tp1 = True
                 # Same rule as bot/journal.evaluate_trade: the breakeven stop
@@ -341,10 +415,10 @@ def _resolve(df, entry_idx: int, direction: str, pos: dict[str, Any]) -> dict[st
             be_hit = (low <= entry) if long else (high >= entry)
             tp2_hit = (high >= tp2) if long else (low <= tp2)
             if be_hit:
-                return {"outcome": "breakeven", "r": 0.0}
+                return {"outcome": "breakeven", "r": 0.0, "exit_idx": j}
             if tp2_hit:
                 r = round(abs(tp2 - entry) / risk, 2) if risk else 0.0
-                return {"outcome": "win", "r": r}
+                return {"outcome": "win", "r": r, "exit_idx": j}
     return None
 
 
@@ -364,8 +438,25 @@ def _aggregate(setups: list[dict[str, Any]], threshold: int, cooldown_bars: int)
             "total_r": total_r, "avg_r": total_r / total}
 
 
+def _funding_line(setups: list[dict[str, Any]], funding_modelled: bool) -> str:
+    """One honest clause about the funding term in the NET numbers above.
+
+    When funding could not be fetched the reader is told outright, because a
+    net number that skipped funding is optimistic and the size of the omission
+    is not something the reader can infer.
+    """
+    if not funding_modelled:
+        return " | funding НЕ начислен (нет истории) — NET завышен"
+    paid = [s["funding_r"] for s in setups if s.get("funding_r") is not None]
+    if not paid:
+        return " + funding"
+    avg = sum(paid) / len(paid)
+    return f" + funding (в среднем {avg:+.3f}R/сделку)"
+
+
 def _report(setups: list[dict[str, Any]], profile: dict[str, Any],
-            cooldown_bars: int, bars: int) -> str:
+            cooldown_bars: int, bars: int, *,
+            funding_modelled: bool = True) -> str:
     label = profile["label"]
     entry = profile["entry"].upper()
     if not setups:
@@ -376,7 +467,8 @@ def _report(setups: list[dict[str, Any]], profile: dict[str, Any],
     lines = [
         f"📊 Бэктест {label} | вход {entry}, зоны {'/'.join(t.upper() for t in profile['zone_tfs'])}",
         f"История: ~{bars} свечей {entry} | NET: комиссии 2×{config.TAKER_FEE_PCT:g}% "
-        f"+ проскальзывание {config.SLIPPAGE_PCT:g}%",
+        f"+ проскальзывание {config.SLIPPAGE_PCT:g}%" + _funding_line(
+            setups, funding_modelled),
         "",
         "Порог │ Сделок │ Винрейт │   Σ R  │ Ср.R",
         "──────┼────────┼─────────┼────────┼──────",

@@ -13,6 +13,8 @@ from typing import Any
 import pandas as pd
 
 from analyzer.realized_r import realized_r
+from validation.funding import FundingDataUnavailable, FundingSeries
+from validation.trade_costs import trade_costs
 
 # Measured horizons (hours). 72h closes the tracking window: after it the
 # outcome row is final even if neither TP nor stop was ever touched.
@@ -23,11 +25,21 @@ REACH_POINTS = (500, 1500, 3000)
 
 def measure_outcome(forecast: dict[str, Any], df: pd.DataFrame,
                     now: datetime, taker_fee_pct: float,
-                    slippage_pct: float) -> dict[str, Any] | None:
+                    slippage_pct: float,
+                    funding: FundingSeries | Any = None
+                    ) -> dict[str, Any] | None:
     """Compute the outcome row for one forecast from 1H klines.
 
     Returns None when the measurement cannot anchor (no reference price /
     no candles after the decision yet).
+
+    P1: `net_after_costs` now charges realized funding over the measured
+    holding interval — a 72h horizon crosses nine settlements, and charging
+    none of them overstated every net figure this column ever produced. When
+    funding for that interval is unavailable, `net_after_costs` and
+    `funding_pct` are both None: an unknown funding bill is not zero. Rows
+    written before P1 keep a NULL `funding_pct`, which is how pre-P1 semantics
+    stay identifiable — there is no backfill.
     """
     anchor = _ts(forecast.get("decision_time"))
     ref = (forecast.get("executable_price_at_decision")
@@ -62,6 +74,10 @@ def measure_outcome(forecast: dict[str, Any], df: pd.DataFrame,
 
     # Directional % return at each ELAPSED horizon (None = censored).
     now_ts = _ts(now)
+    # The close_time the FINAL horizon was measured at — the exit stamp funding
+    # is charged to. Taken from the candle actually used, not from the nominal
+    # cutoff: the two differ whenever the last bar is still forming.
+    final_exit_ts = None
     for h in HORIZONS_H:
         col = f"return_{h}h"
         cutoff = anchor + timedelta(hours=h)
@@ -74,6 +90,8 @@ def measure_outcome(forecast: dict[str, Any], df: pd.DataFrame,
             continue
         price_h = float(upto["close"].iloc[-1])
         out[col] = round(sign * (price_h - ref) / ref * 100, 4)
+        if h == FINAL_HORIZON_H:
+            final_exit_ts = _ts(upto["close_time"].iloc[-1])
 
     tp1, tp2, stop = _levels(forecast)
     tp1_hit = tp2_hit = stop_hit = False
@@ -96,9 +114,22 @@ def measure_outcome(forecast: dict[str, Any], df: pd.DataFrame,
     final_elapsed = now_ts >= anchor + timedelta(hours=FINAL_HORIZON_H)
     out["resolved"] = bool(tp2_hit or stop_hit or final_elapsed)
     r72 = out.get("return_72h")
-    out["net_after_costs"] = (
-        round(r72 - (2 * taker_fee_pct + slippage_pct), 4)
-        if r72 is not None else None)
+    out["funding_pct"] = None
+    out["net_after_costs"] = None
+    if r72 is not None and final_exit_ts is not None:
+        try:
+            costs = trade_costs(
+                entry_price=1.0, risk_distance=0.0, side=direction,
+                entry_time=anchor, exit_time=final_exit_ts, funding=funding,
+                gross_r=None, taker_fee_pct=taker_fee_pct,
+                slippage_pct=slippage_pct)
+        except FundingDataUnavailable:
+            # Fail closed: the horizon crossed settlements whose rates are not
+            # observable, so the net figure is unknown, not cost-free.
+            pass
+        else:
+            out["net_after_costs"] = round(r72 - costs.total_pct, 4)
+            out["funding_pct"] = round(costs.funding_pct, 6)
     # Per-forecast realized R (raw float, без округления): единый источник —
     # analyzer.realized_r. Аналитическая колонка, не влияет на решения; None для
     # не-ENTER / unresolved / неполных уровней. Старые resolved-строки остаются

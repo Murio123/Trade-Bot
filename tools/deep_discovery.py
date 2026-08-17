@@ -44,6 +44,8 @@ import tools.deep_backtest as deep_backtest
 from analyzer.indicators import ema
 from tools.deep_backtest import DeepBacktestError, EXCHANGES, prepare
 from signal_engine.profiles import PROFILES
+from validation.funding import FundingSeries, load_funding_series
+from validation.trade_costs import transaction_cost_r
 
 STAGE = "C1.8"
 
@@ -106,7 +108,8 @@ def _ema_slope(htf_slice: pd.DataFrame, price: float) -> float | None:
 
 
 def record_walk(frames: dict[str, Any], profile: dict[str, Any],
-                bars: int) -> tuple[dict[str, Any], dict[int, dict[str, Any]]]:
+                bars: int, *, funding: FundingSeries | Any
+                ) -> tuple[dict[str, Any], dict[int, dict[str, Any]]]:
     """Один deep_walk с расширенным рекордером (не только resolve, как в C1.6).
 
     deep_walk обращается к этим семи именам как к module-global в своём теле
@@ -186,7 +189,7 @@ def record_walk(frames: dict[str, Any], profile: dict[str, Any],
     deep_backtest.get_htf_bias = rec_htf_bias
     deep_backtest.resolve = rec_resolve
     try:
-        walk = deep_backtest.deep_walk(frames, profile, bars)
+        walk = deep_backtest.deep_walk(frames, profile, bars, funding=funding)
     finally:
         for name, fn in originals.items():
             setattr(deep_backtest, name, fn)
@@ -273,8 +276,13 @@ def _snapshot(df: pd.DataFrame, entry_idx: int, direction: str,
     atr = flat.get("atr")
     bull = direction == "long"
 
-    cost_pct = (2 * config.TAKER_FEE_PCT + config.SLIPPAGE_PCT) / 100
-    cost_r = (cost_pct * price / risk) if risk else 0.0
+    # P1: one canonical formula (validation.trade_costs), not a local copy.
+    # Deliberately the TRANSACTION cost only: `cost_r` is a discovery FEATURE,
+    # and a feature has to be observable at the decision bar. Realized funding
+    # depends on how long the trade turns out to last, so admitting it here
+    # would be look-ahead. The funding term lives on the setup's net `r`, which
+    # deep_walk computes after resolve.
+    cost_r = transaction_cost_r(price, risk)
     gross_r = outcome["r"]
 
     box, zone_kind = (_nearest_zone_box(zones, direction)
@@ -1003,11 +1011,14 @@ LIVE_COMPUTABILITY_NOTES: dict[str, dict[str, Any]] = {
 def run_discovery(dataset: str, exchange: str, symbol: str, profile_name: str,
                   bars: int, max_gap_ratio: float = 0.001,
                   allow_estimated_cvd: bool = False,
-                  include_redundancy: bool = False) -> dict[str, Any]:
+                  include_redundancy: bool = False,
+                  funding_dir: str = "data/funding") -> dict[str, Any]:
     frames, profile, _table, cvd_method = prepare(
         dataset, exchange, symbol, profile_name, bars, max_gap_ratio,
         allow_estimated_cvd)
-    walk, records = record_walk(frames, profile, bars)
+    # P1: real run, real funding; missing data raises rather than degrading.
+    funding = load_funding_series(funding_dir, exchange=exchange, symbol=symbol)
+    walk, records = record_walk(frames, profile, bars, funding=funding)
     rows = build_feature_rows(walk, records)
     features = run_single_feature_attribution(rows)
     resolved = [s for s in walk["setups"] if s["outcome"] != "unresolved"]

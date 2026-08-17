@@ -17,6 +17,7 @@ import tools.deep_backtest as deep_backtest
 import tools.swing_hypothesis_walkforward as swf
 from tests.test_deep_discovery import SWING_BARS, _build_swing_dataset
 from tools import kline_cache
+from validation.trade_costs import FUNDING_NOT_MODELLED
 
 ROOT = Path(__file__).resolve().parent.parent
 SIM_SOURCE = (ROOT / "tools" / "swing_hypothesis_simulator.py").read_text()
@@ -259,9 +260,11 @@ def test_random_direction_distribution_deterministic(tmp_path):
                       "close": [100.0] * 200})
     records = [_rec(100, net_r=1.0)]
     a = swf.random_direction_distribution(records, df, hold_bars=5,
-                                         cost_pct=0.001, n_draws=10)
+                                         cost_pct=0.001, n_draws=10,
+                                         funding=FUNDING_NOT_MODELLED)
     b = swf.random_direction_distribution(records, df, hold_bars=5,
-                                         cost_pct=0.001, n_draws=10)
+                                         cost_pct=0.001, n_draws=10,
+                                         funding=FUNDING_NOT_MODELLED)
     assert a == b
 
 
@@ -355,7 +358,8 @@ def test_evaluate_h2_pooled_stats_exclude_records_outside_validation_windows():
     entry_df = pd.DataFrame({"low": [90.0] * 30, "high": [110.0] * 30,
                              "close": [100.0] * 30})
     h2 = swf.evaluate_h2(records, regime_records, baseline_setups, entry_df,
-                        hold_bars=2, cost_pct=0.001, folds=folds)
+                        hold_bars=2, cost_pct=0.001, folds=folds,
+                        funding=FUNDING_NOT_MODELLED)
 
     assert h2["pooled_summary"]["n"] == 5
     assert h2["pooled_summary"]["net_expectancy_r"] == pytest.approx(1.0)

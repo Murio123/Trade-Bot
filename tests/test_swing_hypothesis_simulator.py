@@ -18,6 +18,7 @@ import tools.deep_backtest as deep_backtest
 import tools.swing_hypothesis_simulator as shs
 from tests.test_deep_discovery import SWING_BARS, _build_swing_dataset
 from tools import kline_cache
+from validation.trade_costs import FUNDING_NOT_MODELLED
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = (ROOT / "tools" / "swing_hypothesis_simulator.py").read_text()
@@ -293,15 +294,18 @@ def test_random_direction_baseline_is_deterministic_given_seed():
                "timestamp": "t", "regime": "trend_up",
                "volatility_percentile": 50}]
     a = shs.random_direction_baseline(records, df, hold_bars=24,
-                                      cost_pct=COST_PCT, seed=7)
+                                      cost_pct=COST_PCT, seed=7,
+                                      funding=FUNDING_NOT_MODELLED)
     b = shs.random_direction_baseline(records, df, hold_bars=24,
-                                      cost_pct=COST_PCT, seed=7)
+                                      cost_pct=COST_PCT, seed=7,
+                                      funding=FUNDING_NOT_MODELLED)
     assert a == b
 
 
 def test_walk_hypothesis_rejects_unknown_hypothesis_name():
     with pytest.raises(ValueError):
-        shs.walk_hypothesis({}, {}, 100, "H3")
+        shs.walk_hypothesis({}, {}, 100, "H3",
+                            funding=FUNDING_NOT_MODELLED)
 
 
 def test_module_never_monkeypatches_deep_backtest():

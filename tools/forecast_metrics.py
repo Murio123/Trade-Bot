@@ -30,9 +30,16 @@ import sys
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
-# Модельная round-trip стоимость (из config, но без побочных импортов runtime).
-TAKER_FEE_PCT = 0.05
-SLIPPAGE_PCT = 0.03
+import config
+from validation.trade_costs import transaction_cost_pct
+
+# Модельная TRANSACTION-стоимость round-trip. P1: числа больше не копируются —
+# они берутся из config через validation.trade_costs, единственный слой
+# издержек. Funding сюда не входит по определению: он зависит от длительности
+# КАЖДОЙ сделки и потому живёт в per-forecast колонке funding_pct, а не в одной
+# константе на всю выборку.
+TAKER_FEE_PCT = config.TAKER_FEE_PCT
+SLIPPAGE_PCT = config.SLIPPAGE_PCT
 
 ENTER, WAIT, NO_TRADE = "ENTER", "WAIT", "NO_TRADE"
 
@@ -355,6 +362,8 @@ def execution_metrics(forecasts: list[dict[str, Any]],
 
     net = [o.get("net_after_costs") for o in outcomes
            if o.get("net_after_costs") is not None]
+    funding = [o.get("funding_pct") for o in outcomes
+               if o.get("funding_pct") is not None]
 
     return {
         "close_vs_executable": {
@@ -363,7 +372,17 @@ def execution_metrics(forecasts: list[dict[str, Any]],
             "avg_abs_slippage_pct": _mean(abs_pct),
             "median_abs_slippage_pct": _median(abs_pct),
         },
-        "modeled_round_trip_cost_pct": round(2 * TAKER_FEE_PCT + SLIPPAGE_PCT, 4),
+        "modeled_transaction_cost_pct": round(
+            transaction_cost_pct(TAKER_FEE_PCT, SLIPPAGE_PCT), 4),
+        "realized_funding_pct": {
+            "n": len(funding),
+            "avg_pct": _mean(funding),
+            "median_pct": _median(funding),
+            # Строки, записанные до P1, имеют funding_pct NULL: их
+            # net_after_costs не включает funding и потому не сопоставим.
+            "rows_without_funding": sum(
+                1 for o in outcomes if o.get("funding_pct") is None),
+        },
         "stale_freshness_impact": {k: {"n": v["n"], "win_rate_pct": v["win_rate_pct"]}
                                    for k, v in fresh.items()},
         "decision_latency_impact": {k: {"n": v["n"], "win_rate_pct": v["win_rate_pct"]}
@@ -473,7 +492,8 @@ _SQL_FORECASTS = (
 _SQL_OUTCOMES = (
     "SELECT o.forecast_id, o.mfe_points, o.mae_points, o.reached_500, o.reached_1500, "
     "o.reached_3000, o.tp1_hit, o.tp2_hit, o.stop_hit, o.return_1h, o.return_4h, "
-    "o.return_12h, o.return_24h, o.return_72h, o.net_after_costs, o.resolved "
+    "o.return_12h, o.return_24h, o.return_72h, o.net_after_costs, "
+    "o.funding_pct, o.resolved "
     "FROM forecast_outcomes o JOIN forecasts f ON f.id = o.forecast_id "
     "WHERE f.symbol = $1"
 )

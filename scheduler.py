@@ -262,6 +262,7 @@ async def outcome_tracking_job(application) -> None:
     if not config.ENABLE_FORECAST_LEDGER:
         return
     from analyzer.outcomes import measure_outcome
+    from validation.funding import series_from_binance_records
     binance = application.bot_data["binance"]
     try:
         pending = await db.forecasts_pending_outcomes(config.SYMBOL)
@@ -275,12 +276,26 @@ async def outcome_tracking_job(application) -> None:
     except Exception:  # noqa: BLE001
         log.exception("outcome_tracking_job: failed to fetch 1h klines")
         return
+    # P1: realized funding over each forecast's measured horizon. One fetch
+    # covers every pending row (72h horizons, 1000 settlements back). On
+    # failure `funding` stays None and measure_outcome fails closed — it writes
+    # NULL for net_after_costs rather than a funding-free number, and the
+    # remaining columns (returns, MFE/MAE, TP/stop touches) still update.
+    funding = None
+    try:
+        records = await binance.funding_history(config.SYMBOL, limit=1000)
+        funding = series_from_binance_records(records, symbol=config.SYMBOL)
+    except Exception:  # noqa: BLE001
+        log.warning("outcome_tracking_job: funding history unavailable; "
+                    "net_after_costs will be left NULL this cycle",
+                    exc_info=True)
     now = datetime.now(timezone.utc)
     updated = 0
     for fc in pending:
         try:
             out = measure_outcome(fc, df, now,
-                                  config.TAKER_FEE_PCT, config.SLIPPAGE_PCT)
+                                  config.TAKER_FEE_PCT, config.SLIPPAGE_PCT,
+                                  funding)
             if out:
                 await db.upsert_outcome(out)
                 updated += 1

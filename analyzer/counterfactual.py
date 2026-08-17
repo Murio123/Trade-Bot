@@ -28,14 +28,18 @@ from typing import Any
 
 import pandas as pd
 
+import config
 from analyzer.journal_classify import AVOIDED_LOSS, MISSED_OPPORTUNITY, NONE, classify
 from analyzer.outcomes import measure_outcome
+from validation.trade_costs import FUNDING_NOT_MODELLED
 
-# Модельная round-trip стоимость (совпадает с config по умолчанию). На
-# counterfactual-исход НЕ влияет — measure_outcome использует её только для
-# net_after_costs, который здесь не выводится; параметры оставлены для parity.
-_TAKER_FEE_PCT = 0.05
-_SLIPPAGE_PCT = 0.03
+# Модельная round-trip стоимость. На counterfactual-исход НЕ влияет —
+# measure_outcome использует её только для net_after_costs, который здесь не
+# выводится; параметры оставлены для parity. P1: берутся из config, а не
+# копируются числами — две частные копии констант и были одним из девяти мест,
+# где стоимость жила своей жизнью.
+_TAKER_FEE_PCT = config.TAKER_FEE_PCT
+_SLIPPAGE_PCT = config.SLIPPAGE_PCT
 
 ENTER = "ENTER"
 
@@ -115,7 +119,11 @@ def counterfactual_outcome(forecast: dict[str, Any], df: pd.DataFrame,
 
     # measure_outcome требует forecast['id'] — не мутируем исходный dict.
     fc = forecast if "id" in forecast else {**forecast, "id": 0}
-    outcome = measure_outcome(fc, df, now, _TAKER_FEE_PCT, _SLIPPAGE_PCT)
+    # FUNDING_NOT_MODELLED, explicitly: this path consumes the TOUCH outcome
+    # (stop/TP/censoring), never net_after_costs, so there is no funding bill to
+    # charge — and the sentinel records that rather than implying zero.
+    outcome = measure_outcome(fc, df, now, _TAKER_FEE_PCT, _SLIPPAGE_PCT,
+                              FUNDING_NOT_MODELLED)
     if outcome is None:
         # Нет свечей после decision_time (окно пустое) — censored, не провал.
         return _result(UNRESOLVED, HINT_UNRESOLVED,

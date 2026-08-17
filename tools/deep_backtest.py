@@ -108,6 +108,9 @@ from tools.kline_dataset import (ENTRY_WARMUP, HTF_WARMUP, REGIME_1D_WARMUP,
                                  REGIME_TF, DatasetError, LoadedFrame,
                                  aux_depth, aux_depth_deficits, load_frames,
                                  required_timeframes)
+from validation.funding import FundingSeries, load_funding_series
+from validation.trade_costs import (FUNDING_NOT_MODELLED, funding_summary,
+                                    trade_costs, transaction_cost_pct)
 
 log = logging.getLogger(__name__)
 
@@ -415,11 +418,17 @@ def walk_start(n: int, bars: int) -> int:
 
 
 def deep_walk(frames: dict[str, LoadedFrame], profile: dict[str, Any],
-              bars: int) -> dict[str, Any]:
+              bars: int, *, funding: FundingSeries | Any) -> dict[str, Any]:
     """Копия воронки backtest._walk с skip-ledger и двойным тегом режима.
 
     Порядок гейтов и семантика скоринга не менялись. Единственные добавления —
     измерительные: счётчики, теневой режим, timeout/unresolved.
+
+    P1: `funding` обязателен и без default — прогон, забывший начислить funding,
+    и есть тот дефект, который P1 закрывает. Передавайте FundingSeries либо
+    FUNDING_NOT_MODELLED для синтетических фреймов; выбор попадает в каждый
+    setup полем `funding_modelled`. Состав сделок funding НЕ меняет: он
+    начисляется после resolve, а гейты остаются на транзакционных издержках.
     """
     entry_tf = profile["entry"]
     htf = profile["htf"]
@@ -429,7 +438,8 @@ def deep_walk(frames: dict[str, LoadedFrame], profile: dict[str, Any],
     n = len(entry_df)
     hold_bars = max_hold_bars(profile)
 
-    cost_pct = (2 * config.TAKER_FEE_PCT + config.SLIPPAGE_PCT) / 100
+    cost_pct = transaction_cost_pct(config.TAKER_FEE_PCT,
+                                    config.SLIPPAGE_PCT) / 100
 
     close_ms = {tf: _close_ms(f) for tf, f in frames.items()}
     entry_close_ms = close_ms[entry_tf]
@@ -626,8 +636,21 @@ def deep_walk(frames: dict[str, LoadedFrame], profile: dict[str, Any],
             continue
 
         risk_dist = abs(price - pos["stop_loss"])
-        cost_r = (cost_pct * price / risk_dist) if risk_dist else 0.0
-        setup["r"] = round(outcome["r"] - cost_r, 2)
+        # P1: одна каноническая декомпозиция вместо локальной формулы. Интервал
+        # удержания — от закрытия бара входа (цена сделки = его close) до
+        # закрытия бара выхода; сеттлменты начисляются полуоткрыто (entry, exit].
+        costs = trade_costs(entry_price=price, risk_distance=risk_dist,
+                            side=direction,
+                            entry_time=int(entry_close_ms[i]),
+                            exit_time=int(entry_close_ms[outcome["exit_idx"]]),
+                            funding=funding, gross_r=outcome["r"])
+        setup["gross_r"] = outcome["r"]
+        setup["cost_r"] = costs.transaction_r
+        setup["funding_r"] = costs.funding_r
+        setup["funding_pct"] = costs.funding_pct
+        setup["funding_settlements"] = costs.funding_settlements
+        setup["funding_modelled"] = costs.funding_modelled
+        setup["r"] = round(costs.net_r, 2)
         qualified.append(setup)
 
     resolved = [s for s in qualified if s["outcome"] != "unresolved"]
@@ -645,6 +668,9 @@ def deep_walk(frames: dict[str, LoadedFrame], profile: dict[str, Any],
         "ledger": ledger,
         "regime_pairs": regime_pairs,
         "cooldown_bars": cooldown_bars(profile),
+        # P1: funding отдельным блоком, а не растворённым в r — иначе величину
+        # поправки нельзя предъявить.
+        "funding": funding_summary(resolved),
     }
 
 
@@ -1063,7 +1089,8 @@ def _wf_warnings(folds: list[Fold], validation_aggregate: dict[str, Any],
 
 def walk_forward(frames: dict[str, LoadedFrame], profile: dict[str, Any],
                  bars: int, wf: WFConfig,
-                 walk: dict[str, Any] | None = None) -> dict[str, Any]:
+                 walk: dict[str, Any] | None = None,
+                 *, funding: FundingSeries | Any = None) -> dict[str, Any]:
     """Собрать walk_forward-секцию: один deep_walk, нарезка по фолдам, агрегаты.
 
     ``walk`` можно передать заранее посчитанным (run() так и делает), чтобы
@@ -1073,7 +1100,11 @@ def walk_forward(frames: dict[str, LoadedFrame], profile: dict[str, Any],
     entry_df = frames[profile["entry"]].df
     n = len(entry_df)
     if walk is None:
-        walk = deep_walk(frames, profile, bars)
+        if funding is None:
+            raise DeepBacktestError(
+                "walk_forward needs a funding series when it has to run "
+                "deep_walk itself; pass funding= or a precomputed walk")
+        walk = deep_walk(frames, profile, bars, funding=funding)
     setups = walk["setups"]
     cooldown = walk["cooldown_bars"]
     hold_bars = walk["max_hold_bars"]
@@ -1381,14 +1412,20 @@ def build_report(frames: dict[str, LoadedFrame], profile: dict[str, Any],
 def run(dataset: str, exchange: str, symbol: str, profile_name: str, bars: int,
         max_gap_ratio: float = 0.001,
         allow_estimated_cvd: bool = False,
-        wf_overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+        wf_overrides: dict[str, Any] | None = None,
+        funding_dir: str = "data/funding") -> dict[str, Any]:
     frames, profile, table, cvd_method = prepare(
         dataset, exchange, symbol, profile_name, bars, max_gap_ratio,
         allow_estimated_cvd)
     alignment = aux_alignment(frames, profile, bars)
-    walk = deep_walk(frames, profile, bars)
+    # P1: настоящий прогон начисляет настоящий funding. FUNDING_NOT_MODELLED
+    # отсюда недостижим; отсутствие датасета — ошибка, а не тихий ноль.
+    funding = load_funding_series(funding_dir, exchange=exchange, symbol=symbol)
+    walk = deep_walk(frames, profile, bars, funding=funding)
     report = build_report(frames, profile, profile_name, exchange, symbol, bars,
                           table, alignment, cvd_method, walk)
+    report["funding_provenance"] = funding.provenance()
+    report["funding"] = walk["funding"]
     if wf_overrides is not None:
         # WF-режим: тот же single-run отчёт ПЛЮС ключ walk_forward. Конфиг
         # разрешается здесь, где известна длина entry-фрейма (walked-бары).

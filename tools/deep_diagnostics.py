@@ -40,6 +40,9 @@ import config
 import tools.deep_backtest as deep_backtest
 from tools.deep_backtest import DeepBacktestError, EXCHANGES, prepare
 from signal_engine.profiles import PROFILES
+from tools.swing_hypothesis_simulator import maybe_close_ms
+from validation.funding import FundingSeries, load_funding_series
+from validation.trade_costs import trade_costs, transaction_cost_r
 
 STAGE = "C1.6"
 
@@ -238,7 +241,8 @@ def classify_disposition(tables: dict[str, dict[str, dict[str, Any]]],
 # ---------------------------------------------------------------------------
 
 def walk_with_positions(frames: dict[str, Any], profile: dict[str, Any],
-                        bars: int) -> tuple[dict[str, Any],
+                        bars: int, *, funding: FundingSeries | Any
+                        ) -> tuple[dict[str, Any],
                                             dict[int, dict[str, Any]]]:
     """Один deep_walk, попутно захватив pos (stop/targets) каждого сетапа.
 
@@ -256,31 +260,42 @@ def walk_with_positions(frames: dict[str, Any], profile: dict[str, Any],
 
     deep_backtest.resolve = recording_resolve
     try:
-        walk = deep_backtest.deep_walk(frames, profile, bars)
+        walk = deep_backtest.deep_walk(frames, profile, bars, funding=funding)
     finally:
         deep_backtest.resolve = original
     return walk, positions
 
 
 def _cost_r(pos: dict[str, Any]) -> float:
-    """Издержки в R — та же формула, что в deep_walk (deep_backtest.py:432)."""
-    cost_pct = (2 * config.TAKER_FEE_PCT + config.SLIPPAGE_PCT) / 100
+    """Транзакционные издержки в R — канонический validation.trade_costs.
+
+    P1: funding сюда НЕ входит, потому что здесь он был бы посчитан по
+    контрфактическому горизонту; его начисляет _counterfactual_net_r, где
+    известен новый exit_idx.
+    """
     price = pos["entry_price"]
     risk_dist = abs(price - pos["stop_loss"])
-    return (cost_pct * price / risk_dist) if risk_dist else 0.0
+    return transaction_cost_r(price, risk_dist)
 
 
 def timeout_counterfactual(entry_df: pd.DataFrame,
                            setups: list[dict[str, Any]],
                            positions: dict[int, dict[str, Any]],
                            hold_bars: int,
-                           multipliers: tuple[int, ...] = (2, 4)) -> dict[str, Any]:
+                           multipliers: tuple[int, ...] = (2, 4),
+                           *, funding: FundingSeries | Any) -> dict[str, Any]:
     """Что стало бы с timeout-сетапами при 2x/4x горизонте. Только измерение.
 
     Горизонт профиля НЕ меняется — мы пере-решаем те же входы тем же resolve
     на удлинённом hold_bars и считаем конверсии и дельту mean_r. Ставшие
     unresolved (история кончилась) из дельты исключаются и считаются отдельно.
+
+    P1: удлинённый горизонт держит позицию через БОЛЬШЕ сеттлментов, поэтому
+    funding пересчитывается на новом интервале. Оставить здесь funding
+    базового горизонта означало бы бесплатное удержание — ровно тот перекос,
+    который делает «подержать подольше» выгодным на бумаге.
     """
+    entry_close_ms = maybe_close_ms(entry_df, funding)
     timeouts = [s for s in setups if s["outcome"] == "timeout"]
     result: dict[str, Any] = {
         "n_timeouts": len(timeouts),
@@ -308,7 +323,17 @@ def timeout_counterfactual(entry_df: pd.DataFrame,
             key = ("still_timeout" if new["outcome"] == "timeout"
                    else f"timeout_to_{new['outcome']}")
             conv[key] += 1
-            new_r = round(new["r"] - _cost_r(pos), 2)
+            if entry_close_ms is None:
+                new_r = round(new["r"] - _cost_r(pos), 2)
+            else:
+                costs = trade_costs(
+                    entry_price=pos["entry_price"],
+                    risk_distance=abs(pos["entry_price"] - pos["stop_loss"]),
+                    side=s["direction"],
+                    entry_time=int(entry_close_ms[s["idx"]]),
+                    exit_time=int(entry_close_ms[new["exit_idx"]]),
+                    funding=funding, gross_r=new["r"])
+                new_r = round(costs.net_r, 2)
             deltas.append(new_r - s["r"])
         result["horizons"][f"x{m}"] = {
             "hold_bars": extended,
@@ -346,11 +371,15 @@ def build_tables(setups: list[dict[str, Any]]) -> dict[str, Any]:
 def run_diagnostics(dataset: str, exchange: str, symbol: str,
                     profile_name: str, bars: int,
                     max_gap_ratio: float = 0.001,
-                    allow_estimated_cvd: bool = False) -> dict[str, Any]:
+                    allow_estimated_cvd: bool = False,
+                    funding_dir: str = "data/funding") -> dict[str, Any]:
     frames, profile, _table, cvd_method = prepare(
         dataset, exchange, symbol, profile_name, bars, max_gap_ratio,
         allow_estimated_cvd)
-    walk, positions = walk_with_positions(frames, profile, bars)
+    # P1: real funding over the actual holding interval; missing data raises.
+    funding = load_funding_series(funding_dir, exchange=exchange, symbol=symbol)
+    walk, positions = walk_with_positions(frames, profile, bars,
+                                          funding=funding)
     setups = walk["setups"]
     resolved = resolved_only(setups)
 
@@ -377,7 +406,10 @@ def run_diagnostics(dataset: str, exchange: str, symbol: str,
     if profile_name == "swing":
         entry_df = frames[profile["entry"]].df
         report["timeout_counterfactual"] = timeout_counterfactual(
-            entry_df, setups, positions, walk["max_hold_bars"])
+            entry_df, setups, positions, walk["max_hold_bars"],
+            funding=funding)
+    report["funding_provenance"] = funding.provenance()
+    report["funding"] = walk["funding"]
     return report
 
 

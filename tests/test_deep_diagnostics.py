@@ -17,6 +17,7 @@ import pytest
 import tools.deep_backtest as deep_backtest
 import tools.deep_diagnostics as dd
 from tests.test_deep_backtest import WF_BARS, WF_DEPTHS, _build_random_walk_dataset
+from validation.trade_costs import FUNDING_NOT_MODELLED
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = (ROOT / "tools" / "deep_diagnostics.py").read_text()
@@ -212,7 +213,8 @@ def test_timeout_counterfactual_converts_to_win():
     cost = dd._cost_r(POS)
     setup = S(idx=0, outcome="timeout", r=round(0.2 - cost, 2), hit_tp1=False)
     cf = dd.timeout_counterfactual(df, [setup], {0: POS}, hold_bars=2,
-                                   multipliers=(2,))
+                                   multipliers=(2,),
+                                   funding=FUNDING_NOT_MODELLED)
     assert cf["n_timeouts"] == 1
     assert cf["hit_tp1_share"] == 0.0
     hz = cf["horizons"]["x2"]
@@ -234,7 +236,8 @@ def test_timeout_counterfactual_counts_unresolved_extension():
 
     setup = S(idx=0, outcome="timeout", r=0.2, hit_tp1=False)
     cf = dd.timeout_counterfactual(df, [setup], {0: POS}, hold_bars=2,
-                                   multipliers=(2,))
+                                   multipliers=(2,),
+                                   funding=FUNDING_NOT_MODELLED)
     hz = cf["horizons"]["x2"]
     assert hz["conversions"]["became_unresolved"] == 1
     assert hz["n_re_resolved"] == 0
@@ -243,7 +246,8 @@ def test_timeout_counterfactual_counts_unresolved_extension():
 
 def test_timeout_counterfactual_empty_when_no_timeouts():
     cf = dd.timeout_counterfactual(_entry_df([(100.0, 100.0, 100.0)]),
-                                   [S(outcome="win", r=1.0)], {}, hold_bars=2)
+                                   [S(outcome="win", r=1.0)], {}, hold_bars=2,
+                                   funding=FUNDING_NOT_MODELLED)
     assert cf["n_timeouts"] == 0
     assert cf["baseline_mean_r"] is None
     assert cf["horizons"]["x2"]["delta_mean_r"] is None
@@ -306,7 +310,8 @@ def test_walk_with_positions_covers_setups_and_restores(tmp_path):
     original = deep_backtest.resolve
     frames, profile, _t, _cvd = deep_backtest.prepare(
         outdir, "binance", "BTCUSDT", "intraday", WF_BARS, 0.001, False)
-    walk, positions = dd.walk_with_positions(frames, profile, WF_BARS)
+    walk, positions = dd.walk_with_positions(frames, profile, WF_BARS,
+                                             funding=FUNDING_NOT_MODELLED)
     assert deep_backtest.resolve is original          # рекордер снят
     idxs = {s["idx"] for s in walk["setups"]}
     assert idxs and idxs <= set(positions)

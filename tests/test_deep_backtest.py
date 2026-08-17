@@ -20,6 +20,7 @@ from signal_engine.profiles import get_profile
 from tools import deep_backtest, kline_cache
 from tools.deep_backtest import DeepBacktestError
 from tools.kline_dataset import DatasetError
+from validation.trade_costs import FUNDING_NOT_MODELLED
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SOURCE = (ROOT / "tools" / "deep_backtest.py").read_text()
@@ -800,7 +801,8 @@ def _run_backtest_walk(monkeypatch, dfs, profile, resolve_stub=None):
                         lambda setups, *args, **kwargs: setups)
     if resolve_stub is not None:
         monkeypatch.setattr(backtest, "_resolve", resolve_stub)
-    return backtest._walk(dfs, profile, warmup=deep_backtest.ENTRY_WARMUP)
+    return backtest._walk(dfs, profile, deep_backtest.ENTRY_WARMUP,
+                          FUNDING_NOT_MODELLED)
 
 
 def test_deep_walk_gate_decisions_match_backtest_walk(parity_inputs, monkeypatch):
@@ -817,7 +819,9 @@ def test_deep_walk_gate_decisions_match_backtest_walk(parity_inputs, monkeypatch
 
     def bt_resolve(df, idx, direction, pos):
         bt_calls.append((idx, direction, dict(pos)))
-        return {"outcome": "win", "r": 1.0}
+        # exit_idx is part of backtest._resolve's contract since P1: the walk
+        # needs the exit bar to charge funding over the real holding interval.
+        return {"outcome": "win", "r": 1.0, "exit_idx": idx + 1}
 
     def dp_resolve(df, idx, direction, pos, hold_bars):
         dp_calls.append((idx, direction, dict(pos)))
@@ -825,7 +829,8 @@ def test_deep_walk_gate_decisions_match_backtest_walk(parity_inputs, monkeypatch
 
     monkeypatch.setattr(deep_backtest, "resolve", dp_resolve)
     bt_setups = _run_backtest_walk(monkeypatch, dfs, profile, bt_resolve)
-    deep = deep_backtest.deep_walk(frames, profile, PARITY_BARS)
+    deep = deep_backtest.deep_walk(frames, profile, PARITY_BARS,
+                                   funding=FUNDING_NOT_MODELLED)
 
     assert bt_calls, "ни один бар не прошёл гейты — тест был бы вакуумным"
 
@@ -849,14 +854,15 @@ def test_deep_walk_skips_exactly_the_bars_backtest_skips(parity_inputs, monkeypa
     frames, dfs, profile = parity_inputs
 
     def bt_resolve(df, idx, direction, pos):
-        return {"outcome": "win", "r": 1.0}
+        return {"outcome": "win", "r": 1.0, "exit_idx": idx + 1}
 
     def dp_resolve(df, idx, direction, pos, hold_bars):
         return {"outcome": "win", "r": 1.0, "hit_tp1": False, "exit_idx": idx + 1}
 
     monkeypatch.setattr(deep_backtest, "resolve", dp_resolve)
     bt_setups = _run_backtest_walk(monkeypatch, dfs, profile, bt_resolve)
-    deep = deep_backtest.deep_walk(frames, profile, PARITY_BARS)
+    deep = deep_backtest.deep_walk(frames, profile, PARITY_BARS,
+                                   funding=FUNDING_NOT_MODELLED)
 
     n = len(dfs["15m"])
     walked = n - 1 - deep_backtest.ENTRY_WARMUP
@@ -880,7 +886,8 @@ def test_deep_walk_resolved_outcomes_match_backtest_on_comparable_subset(
     frames, dfs, profile = parity_resolved_inputs
 
     bt_setups = _run_backtest_walk(monkeypatch, dfs, profile)
-    deep = deep_backtest.deep_walk(frames, profile, PARITY_BARS)
+    deep = deep_backtest.deep_walk(frames, profile, PARITY_BARS,
+                                   funding=FUNDING_NOT_MODELLED)
 
     bt_by_idx = {s["idx"]: s for s in bt_setups}
     comparable = [s for s in deep["setups"]
@@ -957,14 +964,15 @@ def test_deep_walk_feeds_indicators_the_same_slices_as_backtest(parity_inputs,
     spy(deep_backtest, dp_seen)
 
     def noop_bt(df, idx, direction, pos):
-        return {"outcome": "win", "r": 1.0}
+        return {"outcome": "win", "r": 1.0, "exit_idx": idx + 1}
 
     def noop_dp(df, idx, direction, pos, hold_bars):
         return {"outcome": "win", "r": 1.0, "hit_tp1": False, "exit_idx": idx + 1}
 
     monkeypatch.setattr(deep_backtest, "resolve", noop_dp)
     _run_backtest_walk(monkeypatch, dfs, profile, noop_bt)
-    deep_backtest.deep_walk(frames, profile, PARITY_BARS)
+    deep_backtest.deep_walk(frames, profile, PARITY_BARS,
+                                   funding=FUNDING_NOT_MODELLED)
 
     assert bt_seen and dp_seen
 
@@ -994,7 +1002,7 @@ def test_deep_walk_parity_survives_a_changed_predicate(parity_inputs, monkeypatc
     frames, dfs, profile = parity_inputs
 
     def bt_resolve(df, idx, direction, pos):
-        return {"outcome": "win", "r": 1.0}
+        return {"outcome": "win", "r": 1.0, "exit_idx": idx + 1}
 
     def dp_resolve(df, idx, direction, pos, hold_bars):
         return {"outcome": "win", "r": 1.0, "hit_tp1": False, "exit_idx": idx + 1}
@@ -1003,7 +1011,8 @@ def test_deep_walk_parity_survives_a_changed_predicate(parity_inputs, monkeypatc
     # Порог min(THRESHOLDS) = 5 -> 999: ни один сетап не должен пройти.
     monkeypatch.setattr(deep_backtest, "THRESHOLDS", [999])
     bt_setups = _run_backtest_walk(monkeypatch, dfs, profile, bt_resolve)
-    deep = deep_backtest.deep_walk(frames, profile, PARITY_BARS)
+    deep = deep_backtest.deep_walk(frames, profile, PARITY_BARS,
+                                   funding=FUNDING_NOT_MODELLED)
 
     assert bt_setups, "фикстура обязана давать сетапы у backtest"
     assert deep["setups"] == [], "изменённый порог не повлиял — тест слеп"

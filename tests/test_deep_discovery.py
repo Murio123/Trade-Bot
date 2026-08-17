@@ -20,6 +20,7 @@ import tools.deep_backtest as deep_backtest
 import tools.deep_discovery as dd
 from tools import kline_cache
 from tools.deep_backtest import prepare
+from validation.trade_costs import FUNDING_NOT_MODELLED
 
 ROOT = Path(__file__).resolve().parent.parent
 SOURCE = (ROOT / "tools" / "deep_discovery.py").read_text()
@@ -131,15 +132,18 @@ def test_recorder_restores_all_wrapped_originals(swing_walk_inputs):
                      "_build_htf_zones", "compute_cvd_from_klines",
                      "analyze_volatility", "get_htf_bias", "resolve")
     before = {name: getattr(deep_backtest, name) for name in wrapped_names}
-    dd.record_walk(frames, profile, SWING_BARS)
+    dd.record_walk(frames, profile, SWING_BARS,
+                              funding=FUNDING_NOT_MODELLED)
     after = {name: getattr(deep_backtest, name) for name in wrapped_names}
     assert before == after
 
 
 def test_recorder_output_matches_unwrapped_walk_bit_for_bit(swing_walk_inputs):
     frames, profile = swing_walk_inputs
-    walk_plain = deep_backtest.deep_walk(frames, profile, SWING_BARS)
-    walk_rec, records = dd.record_walk(frames, profile, SWING_BARS)
+    walk_plain = deep_backtest.deep_walk(frames, profile, SWING_BARS,
+                                          funding=FUNDING_NOT_MODELLED)
+    walk_rec, records = dd.record_walk(frames, profile, SWING_BARS,
+                              funding=FUNDING_NOT_MODELLED)
 
     assert walk_plain["bars_walked"] == walk_rec["bars_walked"]
     assert walk_plain["bars_evaluated"] == walk_rec["bars_evaluated"]
@@ -149,7 +153,8 @@ def test_recorder_output_matches_unwrapped_walk_bit_for_bit(swing_walk_inputs):
 
 def test_recorder_captures_a_record_for_every_resolved_setup(swing_walk_inputs):
     frames, profile = swing_walk_inputs
-    walk, records = dd.record_walk(frames, profile, SWING_BARS)
+    walk, records = dd.record_walk(frames, profile, SWING_BARS,
+                              funding=FUNDING_NOT_MODELLED)
     resolved = [s for s in walk["setups"] if s["outcome"] != "unresolved"]
     assert resolved  # датасет должен давать хотя бы один resolved сетап
     for s in resolved:
@@ -166,7 +171,8 @@ def test_recorder_restores_originals_even_if_deep_walk_raises(monkeypatch,
 
     monkeypatch.setattr(deep_backtest, "deep_walk", boom)
     with pytest.raises(RuntimeError):
-        dd.record_walk(frames, profile, SWING_BARS)
+        dd.record_walk(frames, profile, SWING_BARS,
+                              funding=FUNDING_NOT_MODELLED)
     assert deep_backtest.resolve is original_resolve
     assert dd._recording is False
 
@@ -177,12 +183,14 @@ def test_recorder_rejects_reentrant_calls(monkeypatch, swing_walk_inputs):
 
     def nested_call(*args, **kwargs):
         with pytest.raises(RuntimeError, match="not reentrant"):
-            dd.record_walk(frames, profile, SWING_BARS)
+            dd.record_walk(frames, profile, SWING_BARS,
+                              funding=FUNDING_NOT_MODELLED)
         raise RuntimeError("outer aborted after nested attempt")
 
     monkeypatch.setattr(deep_backtest, "deep_walk", nested_call)
     with pytest.raises(RuntimeError, match="outer aborted"):
-        dd.record_walk(frames, profile, SWING_BARS)
+        dd.record_walk(frames, profile, SWING_BARS,
+                              funding=FUNDING_NOT_MODELLED)
     # guard and originals both cleaned up after the (failed) outer call
     assert dd._recording is False
     assert deep_backtest.resolve is original_resolve
@@ -194,7 +202,8 @@ def test_recorder_rejects_reentrant_calls(monkeypatch, swing_walk_inputs):
 
 def test_build_feature_rows_only_covers_resolved_setups(swing_walk_inputs):
     frames, profile = swing_walk_inputs
-    walk, records = dd.record_walk(frames, profile, SWING_BARS)
+    walk, records = dd.record_walk(frames, profile, SWING_BARS,
+                              funding=FUNDING_NOT_MODELLED)
     rows = dd.build_feature_rows(walk, records)
     resolved = [s for s in walk["setups"] if s["outcome"] != "unresolved"]
     assert len(rows) == len(resolved)
@@ -695,7 +704,8 @@ def test_contingency_counts_cooccurrence():
 
 def test_run_redundancy_analysis_structure(swing_walk_inputs):
     frames, profile = swing_walk_inputs
-    walk, records = dd.record_walk(frames, profile, SWING_BARS)
+    walk, records = dd.record_walk(frames, profile, SWING_BARS,
+                              funding=FUNDING_NOT_MODELLED)
     rows = dd.build_feature_rows(walk, records)
     features = dd.run_single_feature_attribution(rows)
     red = dd.run_redundancy_analysis(rows, features)
