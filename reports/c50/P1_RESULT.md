@@ -243,8 +243,8 @@ conclusion is unchanged.
 
 | check | result |
 |---|---|
-| targeted suite (`tests/test_funding.py`) | 54 passed |
-| full suite | **1613 passed, 0 failed** (1559 at the anchor + 54 new) |
+| targeted suite (`tests/test_funding.py`) | 55 passed |
+| full suite | **1614 passed, 0 failed** (1559 at the anchor + 55 new) |
 | `git diff --check` | clean |
 | duplicated legacy formula re-search | 0 occurrences outside its owner |
 | frozen M00 pin | `1cd4db9fe8e8`, unchanged |
@@ -276,13 +276,22 @@ excluded it from every later cycle — so one transient outage permanently cost
 that forecast its cost accounting. Fixed in `database.py` by retrying rows where
 `return_72h IS NOT NULL AND net_after_costs IS NULL`, a predicate that cannot
 select a pre-P1 row (those always carry a non-NULL net once the horizon
-elapsed), so it is a retry and not the backfill P1 refuses. Regression test
-added.
+elapsed), so it is a retry and not the backfill P1 refuses.
 
-**Declined — the strict right edge of `covers()` is the intended behaviour.**
+**Accepted and fixed — the retry itself could starve new work.** A re-audit of
+that fix found the regression it introduced: pending rows are served
+oldest-first under `LIMIT 200`, so rows whose funding is permanently out of the
+live fetch's reach (it reads the last 1000 settlements, ~333 days) would refill
+the window on every cycle and block forecasts that had never been measured at
+all. The retry is now bounded to `FUNDING_RETRY_WINDOW_DAYS = 30`, far inside
+the fetch reach and far beyond any transient outage the retry exists to absorb.
+Both fixes carry regression tests.
+
+**Raised, then withdrawn by the reviewer — the strict right edge of `covers()`.**
 The reviewer notes that a trade exiting one hour after the last observed
 settlement is refused even though the settlement inside its interval is known.
-That is correct and deliberate: concluding that no settlement exists between
+On re-audit the reviewer accepted this as intended fail-closed behaviour rather
+than a defect. Concluding that no settlement exists between
 `last_ms` and the exit requires assuming the cadence continued, and this module
 refuses that assumption at both edges for the same reason. The alternative —
 charging only what happens to be in the snapshot — is silent undercharging,

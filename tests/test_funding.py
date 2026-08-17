@@ -652,11 +652,14 @@ def test_a_row_whose_funding_fetch_failed_is_retried_not_stranded():
     a NULL net forever, so one transient outage would permanently cost that
     forecast its cost accounting.
     """
-    from database import _MemoryStore
+    from datetime import timedelta
+
+    from database import _MemoryStore, utcnow
 
     mem = _MemoryStore()
     base = {"symbol": "BTCUSDT", "candidate_direction": "long",
-            "analysis_status": "ENTER"}
+            "analysis_status": "ENTER",
+            "decision_time": utcnow() - timedelta(days=4)}
     mem.forecasts = [dict(base, id=1), dict(base, id=2), dict(base, id=3)]
     mem.outcomes = {
         # Resolved, funding fetch failed -> must come back.
@@ -673,3 +676,29 @@ def test_a_row_whose_funding_fetch_failed_is_retried_not_stranded():
     }
     pending = {f["id"] for f in mem.forecasts_pending_outcomes("BTCUSDT")}
     assert pending == {1}
+
+
+def test_the_retry_cannot_starve_forecasts_that_were_never_measured():
+    """Pending rows are served oldest-first under a LIMIT. A row whose funding is
+    permanently out of the live fetch's reach must drop out of the retry set, or
+    it refills that window every cycle and newer forecasts are never measured.
+    """
+    from datetime import timedelta
+
+    from database import FUNDING_RETRY_WINDOW_DAYS, _MemoryStore, utcnow
+
+    mem = _MemoryStore()
+    base = {"symbol": "BTCUSDT", "candidate_direction": "long",
+            "analysis_status": "ENTER"}
+    stale = utcnow() - timedelta(days=FUNDING_RETRY_WINDOW_DAYS + 1)
+    fresh = utcnow() - timedelta(days=1)
+    mem.forecasts = [dict(base, id=1, decision_time=stale),
+                     dict(base, id=2, decision_time=fresh),
+                     dict(base, id=3, decision_time=fresh)]
+    failed = {"resolved": True, "return_72h": 4.2, "net_after_costs": None}
+    mem.outcomes = {1: dict(failed, forecast_id=1),
+                    2: dict(failed, forecast_id=2)}
+    pending = {f["id"] for f in mem.forecasts_pending_outcomes("BTCUSDT")}
+    # 1 is past repair and abandoned; 2 is still repairable; 3 has never been
+    # measured and must never be blocked by either.
+    assert pending == {2, 3}

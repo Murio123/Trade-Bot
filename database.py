@@ -24,6 +24,15 @@ except Exception:  # pragma: no cover
     asyncpg = None  # type: ignore
 
 
+# P1: how far back a funding-failed outcome row is retried. The live fetch reads
+# the last 1000 settlements (~333 days at 8h), so a row older than this window
+# cannot be repaired by another attempt — and because pending rows are served
+# oldest-first under a LIMIT, retrying it forever would crowd out forecasts that
+# have never been measured. 30 days is far inside the fetch reach and far beyond
+# any transient outage this retry exists to absorb.
+FUNDING_RETRY_WINDOW_DAYS = 30
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -530,13 +539,20 @@ class Database:
         transient outage would permanently cost that forecast its cost
         accounting.
 
-        The retry predicate is deliberately narrow. A pre-P1 row that reached
-        the 72h horizon always has a non-NULL `net_after_costs` (it was computed
-        from fees and slippage alone), so it is never selected — this is a
-        retry, not the backfill that P1 explicitly does not do.
+        The retry predicate is deliberately narrow in two ways. A pre-P1 row that
+        reached the 72h horizon always has a non-NULL `net_after_costs` (it was
+        computed from fees and slippage alone), so it is never selected — this is
+        a retry, not the backfill that P1 explicitly does not do. And the retry
+        is bounded to `FUNDING_RETRY_WINDOW_DAYS`, because rows are returned
+        oldest-first under a LIMIT: without the bound, rows whose funding is
+        permanently out of reach would refill the window on every cycle and
+        starve newer forecasts that have never been measured at all. Beyond that
+        window the retry cannot succeed anyway — the live fetch only reaches back
+        so far — so retrying forever would be waste that costs new work.
         """
         if not self.pool:
             return self._mem.forecasts_pending_outcomes(symbol, limit)
+        retry_after = utcnow() - timedelta(days=FUNDING_RETRY_WINDOW_DAYS)
         async with self.pool.acquire() as conn:
             rows = await conn.fetch(
                 """
@@ -548,11 +564,12 @@ class Database:
                   AND (o.forecast_id IS NULL
                        OR o.resolved = FALSE
                        OR (o.return_72h IS NOT NULL
-                           AND o.net_after_costs IS NULL))
+                           AND o.net_after_costs IS NULL
+                           AND f.decision_time > $3))
                 ORDER BY f.decision_time
                 LIMIT $2
                 """,
-                symbol, limit,
+                symbol, limit, retry_after,
             )
             return [_row_to_signal(r) for r in rows]
 
@@ -940,10 +957,15 @@ class _MemoryStore:
                 continue
             o = self.outcomes.get(f["id"])
             # Same three cases as the SQL above: absent, unresolved, or resolved
-            # with the cost columns left NULL by a funding fetch that failed.
+            # with the cost columns left NULL by a funding fetch that failed —
+            # the last one bounded to the same retry window.
+            dt = _coerce_dt(f.get("decision_time"))
+            in_retry_window = dt is not None and dt > (
+                utcnow() - timedelta(days=FUNDING_RETRY_WINDOW_DAYS))
             costs_missing = (o is not None
                              and o.get("return_72h") is not None
-                             and o.get("net_after_costs") is None)
+                             and o.get("net_after_costs") is None
+                             and in_retry_window)
             if o is None or not o.get("resolved") or costs_missing:
                 out.append(dict(f))
         out.sort(key=lambda f: f.get("decision_time") or utcnow())
