@@ -243,8 +243,8 @@ conclusion is unchanged.
 
 | check | result |
 |---|---|
-| targeted suite (`tests/test_funding.py`) | 55 passed |
-| full suite | **1614 passed, 0 failed** (1559 at the anchor + 55 new) |
+| targeted suite (`tests/test_funding.py`) | 57 passed |
+| full suite | **1616 passed, 0 failed** (1559 at the anchor + 57 new) |
 | `git diff --check` | clean |
 | duplicated legacy formula re-search | 0 occurrences outside its owner |
 | frozen M00 pin | `1cd4db9fe8e8`, unchanged |

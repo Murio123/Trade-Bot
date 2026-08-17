@@ -24,12 +24,19 @@ except Exception:  # pragma: no cover
     asyncpg = None  # type: ignore
 
 
-# P1: how far back a funding-failed outcome row is retried. The live fetch reads
-# the last 1000 settlements (~333 days at 8h), so a row older than this window
-# cannot be repaired by another attempt — and because pending rows are served
-# oldest-first under a LIMIT, retrying it forever would crowd out forecasts that
-# have never been measured. 30 days is far inside the fetch reach and far beyond
-# any transient outage this retry exists to absorb.
+# P1: how far back a funding-failed outcome row is retried.
+#
+# This is a starvation trade-off, NOT a reachability limit — the honest framing
+# matters. The live fetch reads the last 1000 settlements (~333 days at 8h), so a
+# row between this window and that reach is still technically repairable and is
+# abandoned anyway. The reason is that pending rows are served oldest-first under
+# a LIMIT: an unbounded retry lets rows that keep failing refill the window every
+# cycle and block forecasts that have never been measured at all, and a forecast
+# with no measurement is a worse loss than one missing its funding term.
+#
+# 30 days is far beyond the transient outage this retry exists to absorb. Rows
+# that fall past it are counted by `count_abandoned_funding_outcomes` and logged,
+# so the abandonment is observable rather than silent.
 FUNDING_RETRY_WINDOW_DAYS = 30
 
 
@@ -543,12 +550,8 @@ class Database:
         reached the 72h horizon always has a non-NULL `net_after_costs` (it was
         computed from fees and slippage alone), so it is never selected — this is
         a retry, not the backfill that P1 explicitly does not do. And the retry
-        is bounded to `FUNDING_RETRY_WINDOW_DAYS`, because rows are returned
-        oldest-first under a LIMIT: without the bound, rows whose funding is
-        permanently out of reach would refill the window on every cycle and
-        starve newer forecasts that have never been measured at all. Beyond that
-        window the retry cannot succeed anyway — the live fetch only reaches back
-        so far — so retrying forever would be waste that costs new work.
+        is bounded to `FUNDING_RETRY_WINDOW_DAYS` — see that constant for why the
+        bound is a starvation trade-off rather than a reachability limit.
         """
         if not self.pool:
             return self._mem.forecasts_pending_outcomes(symbol, limit)
@@ -572,6 +575,31 @@ class Database:
                 symbol, limit, retry_after,
             )
             return [_row_to_signal(r) for r in rows]
+
+    async def count_abandoned_funding_outcomes(self, symbol: str) -> int:
+        """Rows past the retry window that still have no cost accounting.
+
+        P1 bounds the funding retry to avoid starving unmeasured forecasts, which
+        means some rows are given up on. Counting them turns that from silent
+        data loss into a number the scheduler logs.
+        """
+        retry_after = utcnow() - timedelta(days=FUNDING_RETRY_WINDOW_DAYS)
+        if not self.pool:
+            return self._mem.count_abandoned_funding_outcomes(symbol,
+                                                              retry_after)
+        async with self.pool.acquire() as conn:
+            return int(await conn.fetchval(
+                """
+                SELECT count(*)
+                FROM forecasts f
+                JOIN forecast_outcomes o ON o.forecast_id = f.id
+                WHERE f.symbol = $1 AND f.candidate_direction IS NOT NULL
+                  AND o.return_72h IS NOT NULL
+                  AND o.net_after_costs IS NULL
+                  AND f.decision_time <= $2
+                """,
+                symbol, retry_after,
+            ) or 0)
 
     async def upsert_outcome(self, outcome: dict[str, Any]) -> None:
         if not self.pool:
@@ -950,6 +978,10 @@ class _MemoryStore:
 
     def forecasts_pending_outcomes(self, symbol: str, limit: int = 200):
         out = []
+        # One cutoff for the whole scan, matching the SQL path, which computes it
+        # once per query. Re-reading the clock per row would classify a forecast
+        # sitting exactly on the boundary differently in the two implementations.
+        retry_after = utcnow() - timedelta(days=FUNDING_RETRY_WINDOW_DAYS)
         for f in self.forecasts:
             if f.get("symbol") != symbol or not f.get("candidate_direction"):
                 continue
@@ -960,8 +992,10 @@ class _MemoryStore:
             # with the cost columns left NULL by a funding fetch that failed —
             # the last one bounded to the same retry window.
             dt = _coerce_dt(f.get("decision_time"))
-            in_retry_window = dt is not None and dt > (
-                utcnow() - timedelta(days=FUNDING_RETRY_WINDOW_DAYS))
+            # A missing or unparseable decision_time cannot be placed in the
+            # window, so it is treated as outside it — the same fail-closed
+            # reading the SQL gives a NULL comparison.
+            in_retry_window = dt is not None and dt > retry_after
             costs_missing = (o is not None
                              and o.get("return_72h") is not None
                              and o.get("net_after_costs") is None
@@ -970,6 +1004,21 @@ class _MemoryStore:
                 out.append(dict(f))
         out.sort(key=lambda f: f.get("decision_time") or utcnow())
         return out[:limit]
+
+    def count_abandoned_funding_outcomes(self, symbol: str, retry_after) -> int:
+        n = 0
+        for f in self.forecasts:
+            if f.get("symbol") != symbol or not f.get("candidate_direction"):
+                continue
+            o = self.outcomes.get(f["id"])
+            if o is None or o.get("return_72h") is None:
+                continue
+            if o.get("net_after_costs") is not None:
+                continue
+            dt = _coerce_dt(f.get("decision_time"))
+            if dt is None or dt <= retry_after:
+                n += 1
+        return n
 
     def upsert_outcome(self, outcome: dict[str, Any]) -> None:
         fid = outcome["forecast_id"]

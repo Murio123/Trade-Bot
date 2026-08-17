@@ -261,6 +261,7 @@ async def outcome_tracking_job(application) -> None:
     """
     if not config.ENABLE_FORECAST_LEDGER:
         return
+    import database as db_module
     from analyzer.outcomes import measure_outcome
     from validation.funding import series_from_binance_records
     binance = application.bot_data["binance"]
@@ -303,6 +304,18 @@ async def outcome_tracking_job(application) -> None:
             log.exception("outcome update failed for forecast #%s", fc.get("id"))
     if updated:
         log.info("outcome_tracking_job: updated %d forecast outcomes", updated)
+    # P1: the funding retry is bounded, so some rows are given up on. Report the
+    # count instead of letting them disappear quietly.
+    try:
+        abandoned = await db.count_abandoned_funding_outcomes(config.SYMBOL)
+    except Exception:  # noqa: BLE001 - observability must not break the job
+        log.debug("outcome_tracking_job: abandoned-funding count failed",
+                  exc_info=True)
+    else:
+        if abandoned:
+            log.warning("outcome_tracking_job: %d outcome row(s) past the "
+                        "%d-day funding retry window still have no cost "
+                        "accounting", abandoned, db_module.FUNDING_RETRY_WINDOW_DAYS)
 
 
 async def _send_signal_chart(application, ctx: dict, signal: dict) -> None:

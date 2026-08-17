@@ -702,3 +702,45 @@ def test_the_retry_cannot_starve_forecasts_that_were_never_measured():
     # 1 is past repair and abandoned; 2 is still repairable; 3 has never been
     # measured and must never be blocked by either.
     assert pending == {2, 3}
+
+
+def test_abandoned_rows_are_counted_so_the_loss_is_not_silent():
+    """The retry bound gives up on some rows. That is a deliberate trade-off, so
+    it has to be reportable — an unmeasured cost that nobody can see is the kind
+    of quiet loss P1 exists to remove."""
+    from datetime import timedelta
+
+    from database import FUNDING_RETRY_WINDOW_DAYS, _MemoryStore, utcnow
+
+    mem = _MemoryStore()
+    base = {"symbol": "BTCUSDT", "candidate_direction": "long",
+            "analysis_status": "ENTER"}
+    retry_after = utcnow() - timedelta(days=FUNDING_RETRY_WINDOW_DAYS)
+    stale = retry_after - timedelta(days=1)
+    fresh = utcnow() - timedelta(days=1)
+    mem.forecasts = [dict(base, id=1, decision_time=stale),
+                     dict(base, id=2, decision_time=fresh),
+                     dict(base, id=3, decision_time=stale)]
+    mem.outcomes = {
+        1: {"forecast_id": 1, "resolved": True, "return_72h": 4.2,
+            "net_after_costs": None},                      # abandoned
+        2: {"forecast_id": 2, "resolved": True, "return_72h": 4.2,
+            "net_after_costs": None},                      # still retryable
+        3: {"forecast_id": 3, "resolved": True, "return_72h": 4.2,
+            "net_after_costs": 4.07},                      # fully accounted
+    }
+    assert mem.count_abandoned_funding_outcomes("BTCUSDT", retry_after) == 1
+
+
+def test_both_pending_implementations_use_one_cutoff_per_scan():
+    """The SQL path computes the retry cutoff once per query. The in-memory path
+    must too, or a forecast sitting on the boundary is classified differently by
+    the two implementations depending on microsecond timing."""
+    import inspect
+
+    from database import _MemoryStore
+
+    src = inspect.getsource(_MemoryStore.forecasts_pending_outcomes)
+    body = src.split("for f in self.forecasts:", 1)[1]
+    assert "utcnow() - timedelta" not in body, (
+        "the retry cutoff is recomputed inside the row loop")
