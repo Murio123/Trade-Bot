@@ -644,3 +644,32 @@ def test_measured_funding_is_two_sided_on_real_data():
     s = load_funding_series()
     assert (s.rates < 0).mean() > 0.05
     assert (s.rates > 0).mean() > 0.5
+
+
+def test_a_row_whose_funding_fetch_failed_is_retried_not_stranded():
+    """P1 split resolution from cost availability: a row can resolve on price
+    while its funding fetch fails. Without a retry it would keep `resolved` and
+    a NULL net forever, so one transient outage would permanently cost that
+    forecast its cost accounting.
+    """
+    from database import _MemoryStore
+
+    mem = _MemoryStore()
+    base = {"symbol": "BTCUSDT", "candidate_direction": "long",
+            "analysis_status": "ENTER"}
+    mem.forecasts = [dict(base, id=1), dict(base, id=2), dict(base, id=3)]
+    mem.outcomes = {
+        # Resolved, funding fetch failed -> must come back.
+        1: {"forecast_id": 1, "resolved": True, "return_72h": 4.2,
+            "net_after_costs": None, "funding_pct": None},
+        # Fully accounted -> must not come back.
+        2: {"forecast_id": 2, "resolved": True, "return_72h": 4.2,
+            "net_after_costs": 4.07, "funding_pct": 0.0},
+        # Pre-P1 shape: stopped out before the 72h horizon elapsed, so the net
+        # was never due. This is the row the retry must NOT mistake for a
+        # funding failure — recomputing it would be the backfill P1 refuses.
+        3: {"forecast_id": 3, "resolved": True, "return_72h": None,
+            "net_after_costs": None},
+    }
+    pending = {f["id"] for f in mem.forecasts_pending_outcomes("BTCUSDT")}
+    assert pending == {1}

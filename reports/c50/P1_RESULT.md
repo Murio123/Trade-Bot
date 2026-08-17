@@ -243,8 +243,8 @@ conclusion is unchanged.
 
 | check | result |
 |---|---|
-| targeted suite (`tests/test_funding.py`) | 53 passed |
-| full suite | **1612 passed, 0 failed** (1559 at the anchor + 53 new) |
+| targeted suite (`tests/test_funding.py`) | 54 passed |
+| full suite | **1613 passed, 0 failed** (1559 at the anchor + 54 new) |
 | `git diff --check` | clean |
 | duplicated legacy formula re-search | 0 occurrences outside its owner |
 | frozen M00 pin | `1cd4db9fe8e8`, unchanged |
@@ -260,7 +260,41 @@ stamp, and the integration guards.
 
 ---
 
-## 9. Next blocker
+## 9. Independent audit
+
+Codex audited commit `90bcf60` against the seven risk areas P1 defines. Clean on
+five: funding sign, the half-open boundary, look-ahead, the sentinel's
+reachability from research entry points, and the invariant that trade
+population, entries, exits, directions and gross R are untouched. Two findings:
+
+**Accepted and fixed — a resolved row could be stranded without its costs.**
+P1 split two things that used to be one: resolution is about price (stop,
+target, or the 72h horizon), while `net_after_costs` additionally needs funding,
+which comes from a fetch that can fail. A row resolved during such a failure
+kept `resolved = TRUE` with a NULL net, and `forecasts_pending_outcomes`
+excluded it from every later cycle — so one transient outage permanently cost
+that forecast its cost accounting. Fixed in `database.py` by retrying rows where
+`return_72h IS NOT NULL AND net_after_costs IS NULL`, a predicate that cannot
+select a pre-P1 row (those always carry a non-NULL net once the horizon
+elapsed), so it is a retry and not the backfill P1 refuses. Regression test
+added.
+
+**Declined — the strict right edge of `covers()` is the intended behaviour.**
+The reviewer notes that a trade exiting one hour after the last observed
+settlement is refused even though the settlement inside its interval is known.
+That is correct and deliberate: concluding that no settlement exists between
+`last_ms` and the exit requires assuming the cadence continued, and this module
+refuses that assumption at both edges for the same reason. The alternative —
+charging only what happens to be in the snapshot — is silent undercharging,
+which is precisely the defect P1 exists to remove. The practical cost is nil:
+research datasets are built with margin at both ends (funding from 2022-04-01
+against klines from 2022-04-28), and on the live path the affected rows are
+those whose horizon ended within the last settlement interval, which the retry
+above picks up on the next cycle once that settlement lands.
+
+---
+
+## 10. Next blocker
 
 P1 is closed. Phase A′ (`ARCHITECTURE.md` §3.2) is now unblocked: re-evaluate
 H1, H2, the confluence score and C4.3e under the corrected apparatus. Per §3.2
