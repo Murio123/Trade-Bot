@@ -452,6 +452,41 @@ A count that is *large* is not a failure. A count that is *unjustifiable* is.
 
 ---
 
+## 10.1 Amendments
+
+Recorded, never silently applied. Neither amendment changes a threshold, a
+count, or a definition — both strengthen a requirement that was already
+frozen.
+
+**A1 — record chaining (added 2026-08-18, after the independent audit).**
+§5 required corruption to be detectable. As first implemented it was not,
+for one case the audit named: a registry losing a whole, well-formed line
+read as a valid but smaller registry — a silent undercount, the one direction
+of error that always flatters a result. Every record now carries `seq`
+(contiguous from 0) and `prev_sha256` (the hash of the preceding line), so
+removal, reordering and in-place editing all fail closed. The chain fields
+describe a line's position in the file, not the research choice, so they are
+excluded from identity and from the idempotent-replay comparison.
+
+**Honest bound, stated rather than papered over:** truncating *complete* lines
+from the end of the file cannot be detected from the file alone — no
+self-describing format can. The mitigation is external and already required:
+§7.1 pins a registry content hash into every published DSR, so a result
+computed against a fuller registry stays checkable against the file it
+actually used.
+
+**A2 — the guardrail keys on `n_trials`, not on a callee name (added
+2026-08-18, after the independent audit).** §7.3 was implemented as a scan for
+calls named `deflated_sharpe`, which an alias import, a module alias or a
+`getattr` lookup walked straight past. The rule is now that no module outside
+the allowlist may name `n_trials` as a keyword argument or as a literal key —
+`n_trials` means one thing in this repository, so any module naming it is
+claiming a trial count however it reaches M01. Reading a count back off a
+result is not flagged; a guard that punished reporting would push future
+reporters toward hiding the number.
+
+---
+
 ## 11. Out of scope
 
 - **Phase A′.** No strategy is evaluated here. The registry is built and

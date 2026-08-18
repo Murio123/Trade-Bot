@@ -77,14 +77,20 @@ class ResearchDSRResult:
 
 
 def research_trial_count(registry: TrialRegistry, scope: FamilyScope,
-                         trial_id: str) -> TrialCount:
-    """The family count for `trial_id`, refusing a family it is not part of.
+                         trial_id: str) -> tuple[dict[str, Any], TrialCount]:
+    """The family count for `trial_id`, with the snapshot that pins it.
+
+    Both come from one read of the registry. Counting and hashing in two
+    separate reads is a race: a declaration landing between them yields
+    provenance advertising a registry state whose count is larger than the
+    number actually used, which is the one direction of error this whole
+    stage exists to prevent.
 
     Deflating against a scope that excludes the very trial being deflated
     would be the easiest possible way to undercount: pick a narrow family, get
     a small number, quote it. So the trial must be inside its own family.
     """
-    declarations = registry.declarations()
+    snapshot, count, declarations = registry.snapshot_and_count(scope)
     record = declarations.get(trial_id)
     if record is None:
         raise UndeclaredTrialError(
@@ -96,13 +102,12 @@ def research_trial_count(registry: TrialRegistry, scope: FamilyScope,
             f"trial {trial_id} is synthetic and is excluded from every family "
             f"count (§6.3); synthetic analysis uses the mathematical layer "
             f"`validation.deflated_sharpe.deflated_sharpe` directly")
-    count = registry.n_trials(scope)
     if trial_id not in count.trial_ids:
         raise ProvenanceError(
             f"trial {trial_id} is not a member of the family it is being "
             f"deflated against ({scope.as_dict()}); a result may not be "
             f"measured against a family that excludes it")
-    return count
+    return snapshot, count
 
 
 def research_deflated_sharpe(returns: Sequence[float] | np.ndarray, *,
@@ -117,8 +122,7 @@ def research_deflated_sharpe(returns: Sequence[float] | np.ndarray, *,
     the decomposition travels with the result so the choice is visible rather
     than buried.
     """
-    count = research_trial_count(registry, scope, trial_id)
-    snapshot = registry.snapshot()
+    snapshot, count = research_trial_count(registry, scope, trial_id)
     result = deflated_sharpe(returns, n_trials=count.n_trials,
                              trial_sharpes=trial_sharpes)
     provenance = DSRProvenance(

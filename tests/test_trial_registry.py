@@ -7,6 +7,7 @@ do (§5), and what enters a family count (§6).
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 
 import pytest
@@ -44,6 +45,25 @@ def record(created_at: str = "2026-01-01", **overrides) -> TrialRecord:
 @pytest.fixture()
 def registry(tmp_path) -> TrialRegistry:
     return TrialRegistry(str(tmp_path / "reg" / "trials.jsonl"))
+
+
+def rewrite(registry: TrialRegistry, rows: list[dict]) -> None:
+    """Rewrite the file with a valid seq/prev chain.
+
+    Tampering tests need this: without it the chain check fires first and the
+    specific guard under test — unknown kind, duplicate declaration, orphaned
+    execution — is never reached, so it would look covered while being untested.
+    """
+    prev = ""
+    with open(registry.path, "w") as fh:
+        for n, row in enumerate(rows):
+            row = {k: v for k, v in row.items() if k not in ("seq",
+                                                             "prev_sha256")}
+            row["seq"] = n
+            row["prev_sha256"] = prev
+            line = canonical_json(row)
+            fh.write(line + "\n")
+            prev = hashlib.sha256(line.encode()).hexdigest()
 
 
 # --- §3 identity ---------------------------------------------------------
@@ -284,8 +304,8 @@ def test_an_unparseable_line_is_detected(registry):
 
 def test_an_unknown_kind_is_detected(registry):
     registry.declare(record())
-    with open(registry.path, "a") as fh:
-        fh.write(json.dumps({"kind": "amendment"}) + "\n")
+    rows = registry.read_raw() + [{"kind": "amendment"}]
+    rewrite(registry, rows)
     with pytest.raises(TrialRegistryError, match="unknown kind"):
         registry.declarations()
 
@@ -294,21 +314,17 @@ def test_a_duplicated_declaration_line_is_detected(registry):
     """Idempotent replay never writes a second line, so a second line for one
     trial means the file was tampered with — not an update."""
     registry.declare(record())
-    with open(registry.path) as fh:
-        line = fh.read()
-    with open(registry.path, "a") as fh:
-        fh.write(line)
+    rows = registry.read_raw()
+    rewrite(registry, rows + rows)
     with pytest.raises(TrialRegistryError, match="second time"):
         registry.declarations()
 
 
 def test_an_edited_identity_no_longer_hashes_to_its_id(registry):
     registry.declare(record())
-    rows = [json.loads(line) for line in open(registry.path)]
+    rows = registry.read_raw()
     rows[0]["identity"]["hypothesis"] = "something_else"
-    with open(registry.path, "w") as fh:
-        for row in rows:
-            fh.write(json.dumps(row, sort_keys=True) + "\n")
+    rewrite(registry, rows)
     with pytest.raises(TrialRegistryError, match="hashes to"):
         registry.declarations()
 
@@ -317,13 +333,78 @@ def test_an_execution_without_its_declaration_is_detected(registry):
     declared = registry.declare(record())
     registry.record_execution(declared.trial_id, code_commit="a",
                               dataset_version="v1", started_at="2026-01-02")
-    rows = [json.loads(line) for line in open(registry.path)]
-    kept = [r for r in rows if r["kind"] != KIND_DECLARATION]
-    with open(registry.path, "w") as fh:
-        for row in kept:
-            fh.write(json.dumps(row, sort_keys=True) + "\n")
+    kept = [r for r in registry.read_raw() if r["kind"] != KIND_DECLARATION]
+    rewrite(registry, kept)
     with pytest.raises(TrialRegistryError, match="undeclared trial"):
         registry.declarations()
+
+
+def test_a_removed_record_is_detected(registry):
+    """The failure the registry exists to prevent, made detectable.
+
+    A file that simply loses a line would otherwise read as a valid, smaller
+    registry — a silent undercount, which is the one direction of error that
+    always flatters the result.
+    """
+    for name in ("a", "b", "c"):
+        registry.declare(record(hypothesis=name))
+    lines = open(registry.path).read().splitlines(keepends=True)
+    with open(registry.path, "w") as fh:
+        fh.writelines(lines[:1] + lines[2:])
+    with pytest.raises(TrialRegistryError, match="removed or reordered"):
+        registry.declarations()
+
+
+def test_a_reordered_registry_is_detected(registry):
+    for name in ("a", "b"):
+        registry.declare(record(hypothesis=name))
+    lines = open(registry.path).read().splitlines(keepends=True)
+    with open(registry.path, "w") as fh:
+        fh.writelines(reversed(lines))
+    with pytest.raises(TrialRegistryError, match="removed or reordered"):
+        registry.declarations()
+
+
+def test_a_record_edited_in_place_breaks_the_chain(registry):
+    """Even an edit that leaves the identity hash intact — a note, a status —
+    is caught, because the next line's chain no longer matches."""
+    registry.declare(record(hypothesis="a"))
+    registry.declare(record(hypothesis="b"))
+    rows = [json.loads(line) for line in open(registry.path)]
+    rows[0]["notes"] = "quietly reinterpreted later"
+    with open(registry.path, "w") as fh:
+        for row in rows:
+            fh.write(canonical_json(row) + "\n")
+    with pytest.raises(TrialRegistryError, match="does not chain"):
+        registry.declarations()
+
+
+def test_the_first_record_chains_to_nothing(registry):
+    registry.declare(record())
+    row = json.loads(open(registry.path).read())
+    assert row["seq"] == 0
+    assert row["prev_sha256"] == ""
+
+
+def test_chain_fields_do_not_make_a_replay_look_like_a_conflict(registry):
+    """They describe a line's position in the file, not the research choice,
+    so idempotent replay must ignore them."""
+    declared = registry.declare(record())
+    registry.declare(record())
+    kwargs = dict(code_commit="a", dataset_version="v1",
+                  started_at="2026-01-02")
+    registry.record_execution(declared.trial_id, **kwargs)
+    registry.record_execution(declared.trial_id, **kwargs)
+    assert len(registry.read_raw()) == 2
+
+
+def test_a_count_and_its_snapshot_come_from_one_read(registry):
+    """Counting and hashing in two reads is a race: a declaration landing
+    between them pins a registry state that is not the one counted."""
+    registry.declare(record())
+    snapshot, count, declarations = registry.snapshot_and_count(FamilyScope())
+    assert snapshot["content_sha256"] == registry.content_sha256()
+    assert snapshot["n_declarations"] == count.n_records == len(declarations)
 
 
 def test_serialization_is_deterministic(registry):

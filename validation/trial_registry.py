@@ -24,6 +24,12 @@ that every public reader goes through. That last rule is not stylistic — four
 audit rounds on the C4.4 ledger found the same defect shape each time, a check
 added to some read paths and not others.
 
+One thing is added on top of that pattern: every line carries `seq` and
+`prev_sha256`, so a record that is removed, reordered or edited in place fails
+closed instead of reading as a valid, smaller registry. A silent undercount is
+the one direction of error that always flatters the result, so it is the one
+the storage format is built to refuse.
+
 Policy is frozen in `reports/c50/TRIAL_REGISTRY_SPEC.md` and this module
 implements it without reinterpretation. Where the spec says an ambiguity
 resolves upward, the code resolves it upward.
@@ -53,6 +59,12 @@ KIND_EXECUTION = "execution"
 KINDS = (KIND_DECLARATION, KIND_EXECUTION)
 
 LOCK_SUFFIX = ".lock"
+
+# Written by the append path, not by the record: they describe where a line
+# sits in the file. `seq` must be contiguous from 0 and `prev_sha256` must
+# chain, which is what makes a removed or reordered line detectable rather
+# than a silently smaller trial count.
+CHAIN_FIELDS = ("seq", "prev_sha256")
 
 # TRIAL_REGISTRY_SPEC.md §3.1. Order is fixed here and must not be changed:
 # the canonical payload is a sorted-key dict, so order does not affect the
@@ -438,25 +450,55 @@ class TrialCount:
                 "trial_ids": list(self.trial_ids)}
 
 
-def _read_lines(path: str) -> Iterator[dict[str, Any]]:
+def _read_bytes(path: str) -> bytes:
+    """One read, so a count and the hash that pins it describe the same file.
+
+    Reading the file twice — once to count, once to hash — is a race: a
+    concurrent declaration between the two reads produces provenance claiming
+    a registry state that is not the one the count came from.
+    """
     if not os.path.exists(path):
-        return
-    with open(path) as fh:
-        for n, line in enumerate(fh, 1):
-            stripped = line.strip()
-            if not stripped:
-                continue
-            if not line.endswith("\n"):
-                raise TrialRegistryError(
-                    f"{path}:{n} has no terminating newline — the registry was "
-                    "truncated mid-write and its last trial may be incomplete; "
-                    "a silently dropped trial is exactly what this registry "
-                    "exists to prevent")
-            try:
-                yield json.loads(stripped)
-            except json.JSONDecodeError as exc:
-                raise TrialRegistryError(
-                    f"{path}:{n} is not valid JSON: {exc}") from exc
+        return b""
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def _parse_lines(content: bytes, path: str) -> Iterator[dict[str, Any]]:
+    """Records from an already-read snapshot of the file.
+
+    The chain fields (`seq`, `prev_sha256`) are validated here rather than by
+    the callers: line loss and reordering are file-level damage, and checking
+    them at the point of parsing means every reader gets the check.
+    """
+    text = content.decode("utf-8")
+    if text and not text.endswith("\n"):
+        raise TrialRegistryError(
+            f"{path} does not end in a newline — the registry was truncated "
+            "mid-write and its last trial may be incomplete; a silently "
+            "dropped trial is exactly what this registry exists to prevent")
+    expected_seq = 0
+    prev_line_hash = ""
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise TrialRegistryError(
+                f"{path}:{n} is not valid JSON: {exc}") from exc
+        seq = rec.get("seq")
+        if seq != expected_seq:
+            raise TrialRegistryError(
+                f"{path}:{n} carries seq {seq!r} where {expected_seq} was "
+                f"expected — a record was removed or reordered. The registry "
+                f"is corrupt; it does not lose trials quietly")
+        if rec.get("prev_sha256") != prev_line_hash:
+            raise TrialRegistryError(
+                f"{path}:{n} does not chain to the record before it — the "
+                f"registry was edited in place. It is corrupt")
+        expected_seq += 1
+        prev_line_hash = hashlib.sha256(line.encode("utf-8")).hexdigest()
+        yield rec
 
 
 @contextlib.contextmanager
@@ -499,18 +541,29 @@ class TrialRegistry:
         For inspecting a registry you already suspect is damaged. Anything
         that draws a conclusion uses the validated readers instead.
         """
-        return list(_read_lines(self.path))
+        content = _read_bytes(self.path)
+        out = []
+        for line in content.decode("utf-8").splitlines():
+            if line.strip():
+                out.append(json.loads(line))
+        return out
 
-    def _validated(self) -> tuple[dict[str, TrialRecord], dict[str, dict[str, Any]]]:
+    def _validated(self, content: bytes | None = None
+                   ) -> tuple[dict[str, TrialRecord], dict[str, dict[str, Any]]]:
         """The single entry point every public reader goes through.
 
         Routing everything through one function removes a class of defect
         rather than an instance of it: a public method either calls this, or
         is deliberately raw (`read_raw`) and says so.
+
+        `content` lets a caller validate a snapshot it has already read, so a
+        count and the hash pinning it are computed from the same bytes.
         """
+        if content is None:
+            content = _read_bytes(self.path)
         declarations: dict[str, TrialRecord] = {}
         executions: dict[str, dict[str, Any]] = {}
-        for n, rec in enumerate(_read_lines(self.path), 1):
+        for n, rec in enumerate(_parse_lines(content, self.path), 1):
             kind = rec.get("kind")
             if kind not in KINDS:
                 raise TrialRegistryError(
@@ -555,24 +608,51 @@ class TrialRegistry:
 
     def content_sha256(self) -> str:
         """Hash of the registry file, for pinning a count to a registry state."""
-        if not os.path.exists(self.path):
-            return hashlib.sha256(b"").hexdigest()
-        with open(self.path, "rb") as fh:
-            return hashlib.sha256(fh.read()).hexdigest()
+        return hashlib.sha256(_read_bytes(self.path)).hexdigest()
 
     def snapshot(self) -> dict[str, Any]:
-        declarations, executions = self._validated()
+        return self._snapshot(_read_bytes(self.path))
+
+    def _snapshot(self, content: bytes) -> dict[str, Any]:
+        declarations, executions = self._validated(content)
         return {"registry_version": REGISTRY_VERSION, "path": self.path,
-                "content_sha256": self.content_sha256(),
+                "content_sha256": hashlib.sha256(content).hexdigest(),
                 "n_declarations": len(declarations),
                 "n_executions": len(executions)}
 
+    def snapshot_and_count(self, scope: "FamilyScope | None" = None
+                           ) -> tuple[dict[str, Any], "TrialCount",
+                                      dict[str, "TrialRecord"]]:
+        """A count, the snapshot pinning it, and the declarations behind both.
+
+        All three come from one read. Two separate reads would be a race: a
+        declaration landing between them yields provenance claiming a registry
+        state whose family count is not the count that was used. One read
+        makes the pairing exact.
+        """
+        content = _read_bytes(self.path)
+        declarations, _ = self._validated(content)
+        count = self._count(declarations, scope or FamilyScope())
+        return self._snapshot(content), count, declarations
+
     # -- writing ---------------------------------------------------------
 
-    def _append(self, record: dict[str, Any]) -> None:
+    def _append(self, record: dict[str, Any], content: bytes) -> None:
+        """Append one chained line.
+
+        `seq` and `prev_sha256` are added here rather than carried on the
+        record so that idempotent replay still compares equal: they describe a
+        record's position in the file, not the research choice.
+        """
+        lines = [l for l in content.decode("utf-8").splitlines() if l.strip()]
+        chained = dict(record)
+        chained["seq"] = len(lines)
+        chained["prev_sha256"] = (
+            hashlib.sha256(lines[-1].encode("utf-8")).hexdigest()
+            if lines else "")
         os.makedirs(os.path.dirname(self.path) or ".", exist_ok=True)
         with open(self.path, "a") as fh:
-            fh.write(canonical_json(record) + "\n")
+            fh.write(canonical_json(chained) + "\n")
             fh.flush()
             os.fsync(fh.fileno())
 
@@ -585,7 +665,8 @@ class TrialRegistry:
         habit, which is how an append-only store stops being one.
         """
         with _exclusive(self.path):
-            declarations, _ = self._validated()
+            content = _read_bytes(self.path)
+            declarations, _ = self._validated(content)
             existing = declarations.get(record.trial_id)
             if existing is not None:
                 if existing.as_record() == record.as_record():
@@ -596,7 +677,7 @@ class TrialRegistry:
                     f"changed research choice is a new trial, and a changed "
                     f"record for an unchanged choice is a mutation of frozen "
                     f"history. Existing: {existing.as_record()!r}")
-            self._append(record.as_record())
+            self._append(record.as_record(), content)
             return record
 
     def record_execution(self, trial_id: str, *, code_commit: str,
@@ -615,7 +696,8 @@ class TrialRegistry:
             raise TrialRegistryError(
                 f"unknown status {status!r}; expected one of {list(STATUSES)}")
         with _exclusive(self.path):
-            declarations, executions = self._validated()
+            content = _read_bytes(self.path)
+            declarations, executions = self._validated(content)
             if trial_id not in declarations:
                 raise UndeclaredTrialError(
                     f"no declaration for trial {trial_id}; a result whose "
@@ -637,18 +719,24 @@ class TrialRegistry:
                 "outcome_summary": outcome_summary or {},
             }
             if existing is not None:
-                if existing == record:
-                    return existing
+                # Chain fields describe the record's position in the file, not
+                # the run, so they are excluded from the comparison; leaving
+                # them in would make every replay look like a conflict.
+                stored = {k: v for k, v in existing.items()
+                          if k not in CHAIN_FIELDS}
+                if stored == record:
+                    return stored
                 raise ImmutableRecordError(
                     f"run {rid} is already recorded with different content; "
                     f"executions are append-only")
-            self._append(record)
+            self._append(record, content)
             return record
 
     # -- counting --------------------------------------------------------
 
-    def _counted_records(self, scope: FamilyScope) -> list[TrialRecord]:
-        declarations = self.declarations()
+    def _counted_records(self, scope: FamilyScope,
+                         declarations: dict[str, TrialRecord]
+                         ) -> list[TrialRecord]:
         selected: dict[str, TrialRecord] = {}
         for trial_id, record in declarations.items():
             if record.origin == ORIGIN_SYNTHETIC:
@@ -681,8 +769,11 @@ class TrialRegistry:
 
     def n_trials(self, scope: FamilyScope | None = None) -> TrialCount:
         """The conservative trial count for a family, with its decomposition."""
-        scope = scope or FamilyScope()
-        records = self._counted_records(scope)
+        return self._count(self.declarations(), scope or FamilyScope())
+
+    def _count(self, declarations: dict[str, TrialRecord],
+               scope: FamilyScope) -> TrialCount:
+        records = self._counted_records(scope, declarations)
         return TrialCount(
             scope=scope.as_dict(),
             confirmed=sum(r.confirmed_low for r in records),

@@ -184,10 +184,11 @@ def test_a_synthetic_trial_is_refused_by_the_research_path(registry, returns):
 def test_research_trial_count_is_the_same_object_the_wrapper_uses(registry,
                                                                   returns):
     declared = registry.declare(_record())
-    count = research_trial_count(registry, SCOPE, declared.trial_id)
+    snapshot, count = research_trial_count(registry, SCOPE, declared.trial_id)
     result = research_deflated_sharpe(returns, registry=registry, scope=SCOPE,
                                       trial_id=declared.trial_id)
     assert result.dsr.n_trials == count.n_trials
+    assert result.provenance.registry_sha256 == snapshot["content_sha256"]
 
 
 def test_the_result_serializes_with_its_provenance(registry, returns):
@@ -223,20 +224,25 @@ def _python_files() -> list[str]:
 
 
 def _direct_dsr_calls(path: str) -> list[int]:
-    """Lines calling `deflated_sharpe(...)` with an explicit n_trials."""
+    """Lines where a module supplies its own trial count.
+
+    The rule is deliberately about `n_trials` rather than about the callee's
+    name. An earlier version matched calls named `deflated_sharpe`, which an
+    alias import (`import ... as dsr`) or a `getattr` lookup walked straight
+    past — a guardrail that only stops the obvious spelling of a bypass is not
+    a guardrail. `n_trials` means one thing in this repository, so any module
+    naming it is claiming a trial count, however it reaches M01.
+    """
     tree = ast.parse(open(path).read())
-    hits = []
+    hits = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        func = node.func
-        name = (func.id if isinstance(func, ast.Name)
-                else func.attr if isinstance(func, ast.Attribute) else None)
-        if name != "deflated_sharpe":
-            continue
-        if any(kw.arg == "n_trials" for kw in node.keywords):
-            hits.append(node.lineno)
-    return hits
+        if isinstance(node, ast.keyword) and node.arg == "n_trials":
+            hits.add(node.value.lineno)
+        elif isinstance(node, ast.Constant) and node.value == "n_trials":
+            # getattr(m, "deflated_sharpe")(r, **{"n_trials": 1}), and any
+            # other route that spells the argument as data.
+            hits.add(node.lineno)
+    return sorted(hits)
 
 
 def test_no_research_module_injects_its_own_trial_count():
@@ -260,19 +266,57 @@ def test_no_research_module_injects_its_own_trial_count():
         f"to DIRECT_CALL_ALLOWLIST with a stated reason.")
 
 
-def test_the_guardrail_can_actually_fail(tmp_path, monkeypatch):
+def test_the_guardrail_can_actually_fail(tmp_path):
     """A guardrail that cannot fail is decoration.
 
     The scan is pointed at a module that does the forbidden thing, and must
     report it.
     """
-    offender = tmp_path / "validation" / "sneaky_runner.py"
-    offender.parent.mkdir()
+    offender = tmp_path / "sneaky_runner.py"
     offender.write_text(
         "from validation.deflated_sharpe import deflated_sharpe\n"
         "def go(r):\n"
         "    return deflated_sharpe(r, n_trials=1)\n")
     assert _direct_dsr_calls(str(offender)) == [3]
+
+
+@pytest.mark.parametrize("source", [
+    # An alias import: the callee is no longer spelled `deflated_sharpe`.
+    "from validation.deflated_sharpe import deflated_sharpe as dsr\n"
+    "def go(r):\n"
+    "    return dsr(r, n_trials=1)\n",
+    # A module alias, same idea one level up.
+    "import validation.deflated_sharpe as m\n"
+    "def go(r):\n"
+    "    return m.deflated_sharpe(r, n_trials=1)\n",
+    # Dynamic lookup: the call's func is itself a Call node.
+    "import validation.deflated_sharpe as m\n"
+    "def go(r):\n"
+    "    return getattr(m, 'deflated_sharpe')(r, n_trials=1)\n",
+    # The argument spelled as data rather than as a keyword.
+    "import validation.deflated_sharpe as m\n"
+    "def go(r):\n"
+    "    return m.deflated_sharpe(r, **{'n_trials': 1})\n",
+])
+def test_the_guardrail_survives_the_obvious_evasions(tmp_path, source):
+    """Each of these walks past a scan that matches on the callee's name.
+
+    The rule is about `n_trials`, not about how M01 was reached, precisely so
+    that renaming the route does not change the answer.
+    """
+    offender = tmp_path / "evader.py"
+    offender.write_text(source)
+    assert _direct_dsr_calls(str(offender)) == [3]
+
+
+def test_the_guardrail_does_not_flag_reading_a_trial_count(tmp_path):
+    """Reporting `n_trials` is not supplying one. A guard that failed here
+    would push future reporters toward hiding the number instead."""
+    reader = tmp_path / "reporter.py"
+    reader.write_text(
+        "def render(result):\n"
+        "    return f'deflated against {result.dsr.n_trials} trials'\n")
+    assert _direct_dsr_calls(str(reader)) == []
 
 
 def test_the_allowlist_entries_all_exist():

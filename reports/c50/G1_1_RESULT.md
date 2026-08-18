@@ -184,9 +184,15 @@ added to some read paths and not others.
 
 Corruption detected: unparseable line, unknown `kind`, duplicate declaration,
 duplicate `run_id`, execution without declaration, identity payload that does
-not hash to its own `trial_id`, and a truncated final line. The last is
-treated as corruption rather than skipped — a registry that quietly drops its
-newest trial is precisely the failure this stage exists to prevent.
+not hash to its own `trial_id`, a truncated final line, and — after amendment
+A1 — any removed, reordered or in-place-edited record, via a `seq` +
+`prev_sha256` chain on every line.
+
+One bound is stated rather than papered over: truncating *complete* lines from
+the end of the file cannot be detected from the file alone, and no
+self-describing format can do it. The mitigation is external and already
+required — every published DSR pins the registry's content hash, so a result
+stays checkable against the file it actually used.
 
 There is no delete, no amend, no compact. The absence is the mechanism, and a
 test asserts it.
@@ -221,6 +227,12 @@ Above it, `research_deflated_sharpe(returns, registry=, scope=, trial_id=)`
   number stays checkable against the registry it was computed from rather than
   against whatever the registry later becomes.
 
+The count and the hash that pins it come from a **single read** of the
+registry. Reading twice — once to count, once to hash — is a race the audit
+caught: a declaration landing between the two reads produces provenance
+advertising a registry state whose family count is larger than the number
+actually used.
+
 Layering has no cycle: `trial_registry` does not import `deflated_sharpe`,
 `deflated_sharpe` imports neither, and both facts are asserted by tests
 walking the import AST rather than grepping prose.
@@ -231,10 +243,12 @@ walking the import AST rather than grepping prose.
 
 1. **The static scan.** A test walks the AST of every module under
    `validation/`, `labeling/`, `models/`, `research/`, `forecast/` and
-   `tools/` and fails on any call to `deflated_sharpe(...)` passing
-   `n_trials`, outside a three-entry allowlist with stated reasons. A future
-   A′ runner that hand-picks a trial count becomes a test failure instead of a
-   silent regression.
+   `tools/` and fails on any module outside a three-entry allowlist that names
+   `n_trials` — as a keyword argument or as a literal key. A future A′ runner
+   that hand-picks a trial count becomes a test failure instead of a silent
+   regression. The rule keys on `n_trials`, not on the callee's name
+   (amendment A2), so an alias import, a module alias or a `getattr` lookup
+   does not change the answer; four such evasions are tested explicitly.
 2. **The allowlist is checked in both directions.** Entries must exist, and
    must still need the exemption — an allowlist naming a file that no longer
    makes the call is silently wider than it reads.
@@ -275,9 +289,9 @@ built.
 
 ## 9. Verification
 
-- **Targeted tests: 110.** `tests/test_trial_registry.py` (67),
-  `tests/test_research_dsr.py` (20), `tests/test_trial_history.py` (23).
-- **Full suite: 1908 passed, 0 failed.**
+- **Targeted tests: 121.** `tests/test_trial_registry.py` (73),
+  `tests/test_research_dsr.py` (25), `tests/test_trial_history.py` (23).
+- **Full suite: 1919 passed, 0 failed.**
 - Two pre-existing guards fired on the new code and were addressed without
   weakening either:
   - the single-Sharpe-implementation guard matched
@@ -288,10 +302,38 @@ built.
     `trial_history.py`. The evidence note was reworded; the guard was not
     touched.
 - `git diff --check` clean.
+- **Independent audit: three real defects, all fixed** (§9.1).
 - Sealed holdout (idx 8199+): not read. The runner imports only `argparse`,
   `json`, `os`, `typing` and the two registry modules, asserted by test.
 - No strategy rule, threshold, model, gate or runtime behaviour changed.
 - Generated artifacts in `reports/g1_1/` are untracked.
+
+### 9.1 What the audit found
+
+The first submission returned **FAIL**, and it was right to. Three defects,
+all of them in the direction that matters:
+
+1. **The provenance hash did not pin the count it travelled with.** The count
+   and the snapshot came from two separate reads with no lock between them.
+   Fixed: `snapshot_and_count()` derives both from one read of the bytes.
+2. **A registry that lost a whole line read as a valid, smaller registry.**
+   §5 claimed corruption was detectable; for the case that matters most —
+   silent undercount — it was not. Fixed by the A1 record chain.
+3. **The static guardrail was evadable by aliasing.** It matched calls named
+   `deflated_sharpe`; `import ... as dsr`, `import ... as m`, and
+   `getattr(m, "deflated_sharpe")` all walked past it. A guardrail that only
+   stops the obvious spelling of a bypass is not a guardrail. Fixed by A2, and
+   each named evasion now has a test.
+
+The audit found no defect in family counting, in the ancestry closure, or in
+the reconstruction arithmetic, and confirmed no sealed-holdout access, no
+frozen-artifact modification, and no change to the G1 verdict.
+
+Two tests I had written were also weaker than they read: the tampering tests
+mutated the file in ways the new chain check catches *first*, which would have
+left the unknown-kind, duplicate-declaration and orphaned-execution guards
+looking covered while never being reached. They now re-chain the file so each
+guard is genuinely exercised.
 
 ---
 
