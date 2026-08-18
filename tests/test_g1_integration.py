@@ -88,15 +88,32 @@ def test_funding_delegates_its_bar_grid_helpers():
 
 
 def test_there_is_only_one_sharpe_ratio_implementation():
+    """One formula, in one file.
+
+    G1.1 added `validation/research_dsr.py`, whose `research_deflated_sharpe`
+    matches the name pattern without being a second implementation: it derives
+    a trial count and hands the series to M01. That is checked below rather
+    than assumed, so the exemption cannot quietly become a hiding place for a
+    second Sharpe.
+    """
+    delegating = REPO / "validation" / "research_dsr.py"
     offenders = []
     for py in REPO.rglob("*.py"):
         if ({".venv", ".git", "__pycache__", "scratchpad", "tests"}
                 & set(py.parts)):
             continue
         src = py.read_text(encoding="utf-8", errors="ignore")
-        if re.search(r"def \w*sharpe", src) and py != M01:
+        if re.search(r"def \w*sharpe", src) and py not in (M01, delegating):
             offenders.append(str(py.relative_to(REPO)))
     assert not offenders, offenders
+
+    src = delegating.read_text(encoding="utf-8")
+    assert "from validation.deflated_sharpe import" in src
+    # No moments, no ratio, no distribution: the wrapper does arithmetic on
+    # nothing. If it ever starts to, this fails and the exemption is revisited.
+    for arithmetic in ("np.mean", "np.std", "np.sqrt", "math.sqrt",
+                       "skew", "kurtosis", "/ std"):
+        assert arithmetic not in src, arithmetic
 
 
 def test_there_is_only_one_uniqueness_weighting_implementation():
