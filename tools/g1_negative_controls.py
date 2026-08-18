@@ -216,86 +216,111 @@ def aggregate(name: str, records: list[dict[str, Any]],
 
 
 def verdict(aggregates: list[dict[str, Any]]) -> dict[str, Any]:
-    """Apply G1_SPEC.md §5. Returns the reasons, not just the word."""
-    failures: list[str] = []
+    """Apply G1_SPEC.md §5. Returns the reasons, not just the word.
+
+    Failures are structured records with an explicit `kind`, not free text that a
+    substring search later sorts into buckets. The earlier version tagged a
+    specification defect by embedding a marker in the message and grepping for
+    it, which meant any failure whose text happened to contain that marker — a
+    control name, a quoted threshold — would be silently rebucketed. A verdict
+    that can be changed by the wording of an error message is not a verdict.
+    """
+    failures: list[dict[str, Any]] = []
+
+    def fail(control: str, criterion: str, detail: str,
+             kind: str = "apparatus") -> None:
+        failures.append({"control": control, "criterion": criterion,
+                         "kind": kind, "detail": detail})
+
     for agg in aggregates:
         name = agg["control"]
         t1 = agg.get("t1")
         if t1 and not t1["t1_pass"]:
-            failures.append(f"{name}: T1 false-positive rate {t1['fpr']:.4f} "
-                            f"> {T1_MAX_FPR}")
+            fail(name, "T1", f"false-positive rate {t1['fpr']:.4f} > {T1_MAX_FPR}")
         t2 = agg.get("t2")
         if t2 and not t2["t2_pass"]:
-            failures.append(f"{name}: T2 null expectancy CI is above zero "
-                            f"(net {t2['net']['verdict']}, "
-                            f"gross {t2['gross']['verdict']})")
+            fail(name, "T2", f"null expectancy CI is above zero "
+                             f"(net {t2['net']['verdict']}, "
+                             f"gross {t2['gross']['verdict']})")
+
         # T3 binds to the statistic as frozen. A3 proposes replacing it, and the
         # proposal is reported as evidence, but it does not gate: adopting it
         # here would convert a failing frozen criterion into a pass after the
         # results were seen, which is the one thing the freeze exists to prevent.
-        # The distinction between "the statistic is defective" and "the statistic
-        # is inconvenient" cannot be drawn by the code that is failing it.
         t3 = agg.get("t3")
+        gap_pass = t3.get("t3_gap_pass") if t3 else None
         if t3 and not t3["t3_pass"]:
-            failures.append(
-                f"{name}: T3 as frozen — share of positive replications "
-                f"{t3['share_positive']:.4f} outside "
-                f"[{t3['band_lo']:.3f}, {t3['band_hi']:.3f}] "
-                "(SPECIFICATION_DEFECT: see G1_SPEC.md A3; the gap statistic it "
-                "proposes instead reads "
-                f"{t3.get('gap_ci', {}).get('verdict', 'n/a')})")
-        if t3 and "t3_gap_pass" in t3 and not t3["t3_gap_pass"]:
-            failures.append(f"{name}: T3 long/short gap CI excludes zero "
-                            f"({t3['gap_ci']['verdict']}, gap "
-                            f"{t3['long_short_gap']:+.5f} R) — the sign "
-                            "convention is asymmetric")
+            # Classified as a specification defect ONLY when the alternative
+            # measure of the same property passes. If the gap statistic fails
+            # too, the asymmetry is real and this is a plain apparatus failure —
+            # the classification is conditional on evidence rather than asserted
+            # a priori, which is what the previous version got wrong.
+            kind = "specification" if gap_pass else "apparatus"
+            fail(name, "T3_as_frozen",
+                 f"share of positive replications {t3['share_positive']:.4f} "
+                 f"outside [{t3['band_lo']:.3f}, {t3['band_hi']:.3f}]"
+                 + (f"; the A3 gap statistic reads "
+                    f"{t3.get('gap_ci', {}).get('verdict', 'n/a')}, so the "
+                    "property itself is demonstrated — see G1_SPEC.md A3"
+                    if gap_pass else
+                    "; the A3 gap statistic ALSO fails, so the asymmetry is real"),
+                 kind=kind)
+        if t3 and gap_pass is False:
+            fail(name, "T3_gap",
+                 f"long/short gap CI excludes zero ({t3['gap_ci']['verdict']}, "
+                 f"gap {t3['long_short_gap']:+.5f} R) — the sign convention is "
+                 "asymmetric")
 
         nc2 = agg.get("nc2_rank")
         if nc2 and not nc2["nc2_rank_pass"]:
-            failures.append(
-                f"{name}: shuffling the signal improved it in "
-                f"{nc2['shuffled_beats_unshuffled_share']:.4f} of replications, "
-                f"above the band top {nc2['band_hi']:.3f}")
+            fail(name, "NC2_rank",
+                 f"shuffling the signal improved it in "
+                 f"{nc2['shuffled_beats_unshuffled_share']:.4f} of replications, "
+                 f"above the band top {nc2['band_hi']:.3f}")
         if nc2 and not nc2["marginal_preserved_always"]:
-            failures.append(f"{name}: the permutation did not preserve the "
-                            "signal's marginal distribution")
+            fail(name, "NC2_marginal",
+                 "the permutation did not preserve the signal's marginal "
+                 "distribution")
 
-        for key, label in (("t4", "T4 path distribution"),
-                           ("t5", "T5 false ranking superiority")):
+        for key, label in (("t4", "T4"), ("t5", "T5")):
             block = agg.get(key)
             if block and not block[f"{key}_pass"]:
-                failures.append(f"{name}: {label} outside its frozen band")
+                fail(name, label.upper(), "outside its frozen band")
+
         leak = agg.get("leakage", {})
         if leak.get("measured") and not leak["t6_pass"]:
-            failures.append(f"{name}: T6 leakage — "
-                            f"{leak['total_leakage_pairs']} intersecting "
-                            "train/test span pairs")
+            fail(name, "T6", f"{leak['total_leakage_pairs']} intersecting "
+                             "train/test span pairs")
+
         # Both halves of T7, and neither guarded by the other: an unreported
         # count used to skip the comparison as well, so a control that stopped
         # reporting effective sizes passed T7 by omission.
         size = agg.get("sample_size", {})
         if size and not size.get("reported", False):
-            failures.append(f"{name}: T7 — {size.get('n_missing', '?')} "
-                            f"replication(s) did not report both the raw and the "
-                            "effective sample size")
-        if size.get("raw_mean") is not None and not size["effective_never_exceeds_raw"]:
-            failures.append(f"{name}: T7 effective sample size exceeds raw")
+            fail(name, "T7", f"{size.get('n_missing', '?')} replication(s) did "
+                             "not report both the raw and the effective sample size")
+        if (size.get("raw_mean") is not None
+                and not size["effective_never_exceeds_raw"]):
+            fail(name, "T7", "effective sample size exceeds raw")
 
-    # A criterion that no correct apparatus could clear is a defect in the
-    # criterion, and it is a different outcome from the apparatus manufacturing
-    # edge. Collapsing the two would either overstate the apparatus's failure or,
-    # worse, invite the criterion to be quietly rewritten until it passed.
-    spec_defects = [f for f in failures if "SPECIFICATION_DEFECT" in f]
-    real = [f for f in failures if "SPECIFICATION_DEFECT" not in f]
+    spec_defects = [f for f in failures if f["kind"] == "specification"]
+    real = [f for f in failures if f["kind"] == "apparatus"]
     if real:
         outcome = "CONTROLS_FAIL"
     elif spec_defects:
         outcome = "CONTROLS_INDETERMINATE"
     else:
         outcome = "CONTROLS_PASS"
-    return {"verdict": outcome, "failures": failures,
-            "specification_defects": spec_defects,
-            "apparatus_failures": real}
+
+    def render(f: dict[str, Any]) -> str:
+        return f"{f['control']}: {f['criterion']} — {f['detail']}"
+
+    return {"verdict": outcome,
+            "failures": [render(f) for f in failures],
+            "failure_records": failures,
+            "specification_defects": [render(f) for f in spec_defects],
+            "apparatus_failures": [render(f) for f in real]}
+
 
 
 def run_suite(replications: dict[str, int] | None = None) -> dict[str, Any]:

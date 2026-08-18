@@ -24,11 +24,25 @@ defective or merely inconvenient. A3 is therefore recorded as a **proposal that
 does not gate**, T3 as frozen is the binding criterion, and the verdict follows
 from it.
 
-This is a defect in the criterion, not evidence that the apparatus manufactures
-edge — which is why the outcome is indeterminate rather than `G1_FAIL`.
-`G1_FAIL` is reserved by §5 for a T2 CI above zero, a T1 breach, or a T6 leak,
-and none occurred. The three ways to resolve it are set out in `G1_SPEC.md` §7
-A3; the decision is the project owner's, not the implementer's.
+I read this as a defect in the criterion rather than evidence that the apparatus
+manufactures edge, which is why the outcome is indeterminate rather than
+`G1_FAIL`: §5 reserves `G1_FAIL` for a T2 CI above zero, a T1 breach, or a T6
+leak, and none occurred.
+
+**A reader is entitled to reject that reading and call this `G1_FAIL`.** The
+argument for doing so is simple and was put by the independent audit: a frozen
+criterion failed, and the party that failed it is the one arguing the criterion
+was wrong. Both readings block Phase A′ identically, so nothing downstream
+depends on which is chosen — the difference is what has to happen next, and that
+is set out in `G1_SPEC.md` §7 A3. The decision is the project owner's.
+
+One thing the code no longer does is decide this for itself. The runner classifies
+a frozen-T3 failure as a specification defect **only when the gap statistic
+passes** — that is, only when the property T3 targets is demonstrated by the
+other measure. If both fail, the asymmetry is real and the verdict is a plain
+`CONTROLS_FAIL`. The classification is conditional on evidence rather than
+asserted, and it is carried in a structured field rather than grepped out of an
+error message.
 
 **Also unresolved, and independent of the above: the trial ledger does not
 exist**, so M01 cannot verify its own `n_trials`. G1 proves the statistic is
@@ -55,8 +69,13 @@ distribution families):
 | mean DSR | 0.4961 | 0.5 |
 | P(DSR ≥ 0.95) | **0.0340** | 0.05 |
 
-The DSR of a mean-zero series is uniform, so that share *is* the false-positive
-rate. It holds on Gaussian, Student-t(4) and skewed-exponential inputs.
+The DSR of a mean-zero series is *asymptotically* uniform, so that share
+estimates the false-positive rate. The qualifier is not hedging: PSR is a normal
+approximation with estimated skew and kurtosis, exact only in the limit, and for
+a discrete return series it cannot be exact at all — finitely many attainable
+sample means give finitely many attainable DSRs. All three families here are
+continuous and n = 250, which is where the approximation is being checked. It
+holds on Gaussian, Student-t(4) and skewed-exponential inputs.
 
 **A real defect found by its own test.** The degeneracy guard read
 `std <= 0.0`. A constant array's sample std is `1.1e-16`, not zero, so

@@ -295,12 +295,20 @@ Two facts follow, and both are measurements rather than arguments.
    0.0000 with a real, severe sign-convention defect present and 0.0350 with it
    fixed — never inside the band in either state, and barely moved by the very
    asymmetry its closing sentence defines as the failure condition.
-2. **It is unpassable by any correct apparatus.** M02's tie rule is a deliberate
-   pessimistic bias (`barrier_bias_diagnostic`: −0.057 R gross per event on
-   symmetric barriers, from an 11.2% tie rate). That bias is common to both
-   sides, so the gross null is systematically negative and the share of positive
-   replications is near zero however correct the code is. A threshold that a
-   correct apparatus cannot clear does not measure correctness.
+2. **It appears to be unpassable by any apparatus that uses M02's labels** —
+   stated as analysis, not as a proof. M02's tie rule is a deliberate pessimistic
+   bias (`barrier_bias_diagnostic`: −0.057 R gross per event on symmetric
+   barriers, from an 11.2% tie rate). That bias is common to both sides, so the
+   gross null is systematically negative and the share of positive replications
+   sits near zero regardless of whether the code is correct.
+
+   The counter-argument, which a reader should weigh: this reasoning is offered
+   by the same work that is failing the criterion, and "the test is impossible"
+   is what a failing implementation would also say. It could be checked
+   independently — a labelling rule that resolved ties by coin flip would centre
+   the null and make T3-as-frozen passable — and that check has not been run,
+   because building an alternative labeller to rescue a threshold is itself the
+   behaviour the freeze exists to discourage.
 
 **The proposed statistic:** the bootstrap 95% CI of the per-replication
 difference `mean gross R (long) − mean gross R (short)` must contain zero. That

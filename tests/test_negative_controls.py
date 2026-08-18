@@ -252,7 +252,10 @@ def test_t6_leakage_is_exact_and_any_amount_fails():
     agg = aggregate("NC5", dirty, rng)
     assert not agg["leakage"]["t6_pass"]
     assert agg["leakage"]["total_leakage_pairs"] == 1
-    assert "T6 leakage" in " ".join(verdict([agg])["failures"])
+    v = verdict([agg])
+    assert v["verdict"] == "CONTROLS_FAIL"
+    assert any(f["criterion"] == "T6" and f["kind"] == "apparatus"
+               for f in v["failure_records"])
 
 
 def test_t7_flags_an_effective_count_above_the_raw_count():
@@ -284,6 +287,43 @@ def test_a_specification_defect_is_indeterminate_not_a_failure():
     v = verdict([agg])
     assert v["verdict"] == "CONTROLS_INDETERMINATE"
     assert v["specification_defects"] and not v["apparatus_failures"]
+
+
+def test_a_frozen_t3_failure_is_an_apparatus_failure_when_the_gap_also_fails():
+    """The specification-defect classification is conditional on evidence, not
+    asserted a priori. If both measures of directional symmetry fail, the
+    asymmetry is real and the verdict must be a plain failure — otherwise a
+    genuine sign-convention defect could hide behind the label."""
+    rng = rng_for(36)
+    skewed = [{"control": "NC4", "mean_net_r": -0.1, "mean_gross_r": -0.1,
+               "mean_gross_r_long": -0.2, "mean_gross_r_short": 0.2 + 0.001 * i,
+               "raw_count": 10, "effective_count": 9.0} for i in range(200)]
+    agg = aggregate("NC4", skewed, rng)
+    assert not agg["t3"]["t3_pass"] and not agg["t3"]["t3_gap_pass"]
+    v = verdict([agg])
+    assert v["verdict"] == "CONTROLS_FAIL"
+    assert not v["specification_defects"]
+    kinds = {f["criterion"]: f["kind"] for f in v["failure_records"]}
+    assert kinds["T3_as_frozen"] == "apparatus"
+
+
+def test_failures_are_structured_records_not_greppable_strings():
+    """A verdict that can be changed by the wording of an error message is not a
+    verdict. The earlier version embedded a SPECIFICATION_DEFECT marker in the
+    failure text and bucketed by substring search, so any message that happened
+    to contain those characters would have been rebucketed."""
+    rng = rng_for(37)
+    v = verdict([aggregate("NC1", _fake("NC1", 100, significant=True,
+                                        status="OK", dsr=0.99), rng)])
+    assert v["verdict"] == "CONTROLS_FAIL"
+    assert v["failure_records"], "failures must be inspectable records"
+    for f in v["failure_records"]:
+        assert set(f) == {"control", "criterion", "kind", "detail"}
+        assert f["kind"] in ("apparatus", "specification")
+    # The classification reads `kind`, so planting the old marker in the free
+    # text cannot move a failure between buckets.
+    planted = dict(v["failure_records"][0], detail="SPECIFICATION_DEFECT")
+    assert planted["kind"] == "apparatus"
 
 
 def test_a_real_apparatus_failure_outranks_a_specification_defect():
@@ -371,7 +411,8 @@ def test_run_suite_at_a_tiny_replication_count():
     assert result["master_seed"] == MASTER_SEED
     assert result["spec"] == "reports/c50/G1_SPEC.md"
     assert len(result["aggregates"]) == len(CONTROLS)
-    assert result["verdict"] in ("CONTROLS_PASS", "CONTROLS_FAIL")
+    assert result["verdict"] in ("CONTROLS_PASS", "CONTROLS_FAIL",
+                                 "CONTROLS_INDETERMINATE")
     for agg in result["aggregates"]:
         leak = agg.get("leakage", {})
         if leak.get("measured"):
