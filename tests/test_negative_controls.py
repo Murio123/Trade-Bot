@@ -320,10 +320,18 @@ def test_failures_are_structured_records_not_greppable_strings():
     for f in v["failure_records"]:
         assert set(f) == {"control", "criterion", "kind", "detail"}
         assert f["kind"] in ("apparatus", "specification")
-    # The classification reads `kind`, so planting the old marker in the free
-    # text cannot move a failure between buckets.
-    planted = dict(v["failure_records"][0], detail="SPECIFICATION_DEFECT")
-    assert planted["kind"] == "apparatus"
+
+    # The real check: drive `verdict()` with a control whose NAME is the old
+    # marker, so the marker lands inside every rendered failure message. Under
+    # the substring scheme this leakage failure would have been bucketed as a
+    # specification defect and the verdict would have been INDETERMINATE.
+    marker = "SPECIFICATION_DEFECT"
+    leaky = _fake(marker, 30, leakage_pairs=3)
+    poisoned = verdict([aggregate(marker, leaky, rng)])
+    assert marker in " ".join(poisoned["failures"])       # the bait is present
+    assert poisoned["verdict"] == "CONTROLS_FAIL"
+    assert not poisoned["specification_defects"]
+    assert [f["kind"] for f in poisoned["failure_records"]] == ["apparatus"]
 
 
 def test_a_real_apparatus_failure_outranks_a_specification_defect():
