@@ -269,6 +269,95 @@ def test_verdict_is_pass_only_with_no_failures():
     assert verdict([])["failures"] == []
 
 
+def test_a_specification_defect_is_indeterminate_not_a_failure():
+    """A criterion no correct apparatus could clear is a defect in the
+    criterion, and it is a different outcome from the apparatus manufacturing
+    edge. Collapsing them would invite the criterion to be rewritten until it
+    passed."""
+    rng = rng_for(30)
+    recs = [{"control": "NC4", "mean_net_r": -0.1, "mean_gross_r": -0.1,
+             "mean_gross_r_long": 0.0, "mean_gross_r_short": 0.0,
+             "raw_count": 10, "effective_count": 9.0} for _ in range(200)]
+    agg = aggregate("NC4", recs, rng)
+    assert not agg["t3"]["t3_pass"]          # as frozen: fails
+    assert agg["t3"]["t3_gap_pass"]          # the A3 proposal: passes
+    v = verdict([agg])
+    assert v["verdict"] == "CONTROLS_INDETERMINATE"
+    assert v["specification_defects"] and not v["apparatus_failures"]
+
+
+def test_a_real_apparatus_failure_outranks_a_specification_defect():
+    rng = rng_for(31)
+    bad = _fake("NC1", 100, significant=True, status="OK", dsr=0.99)
+    spec = [{"control": "NC4", "mean_net_r": -0.1, "mean_gross_r": -0.1,
+             "mean_gross_r_long": 0.0, "mean_gross_r_short": 0.0,
+             "raw_count": 10, "effective_count": 9.0} for _ in range(200)]
+    v = verdict([aggregate("NC1", bad, rng), aggregate("NC4", spec, rng)])
+    assert v["verdict"] == "CONTROLS_FAIL"
+
+
+def test_t3_as_frozen_is_still_evaluated_and_reported():
+    """A3 is a proposal, not a gate. The frozen statistic must keep being
+    computed, or the amendment becomes a way of not looking."""
+    rng = rng_for(32)
+    recs = [{"control": "NC4", "mean_net_r": -0.1, "mean_gross_r": 0.05 * (-1) ** i,
+             "mean_gross_r_long": 0.0, "mean_gross_r_short": 0.0,
+             "raw_count": 10, "effective_count": 9.0} for i in range(200)]
+    agg = aggregate("NC4", recs, rng)
+    assert agg["t3"]["share_positive"] == pytest.approx(0.5)
+    assert agg["t3"]["t3_pass"]
+
+
+# --- conditions the frozen spec states but an earlier runner never graded -----
+
+def test_nc2_rank_condition_is_actually_evaluated():
+    """G1_SPEC.md §4 requires NC2 not to rank above its own unshuffled null. An
+    earlier runner recorded the two Sharpes and graded neither, so every
+    replication could have had the shuffled signal winning and NC2 would still
+    have passed on T1 alone."""
+    rng = rng_for(33)
+    always_better = [{"control": "NC2", "raw_count": 10, "effective_count": 10.0,
+                      "significant": False, "status": "OK", "dsr": 0.5,
+                      "marginal_preserved": True,
+                      "shuffled_sharpe": 1.0, "unshuffled_sharpe": 0.0}
+                     for _ in range(200)]
+    agg = aggregate("NC2", always_better, rng)
+    assert agg["nc2_rank"]["shuffled_beats_unshuffled_share"] == 1.0
+    assert not agg["nc2_rank"]["nc2_rank_pass"]
+    assert "shuffling the signal improved it" in " ".join(
+        verdict([agg])["failures"])
+
+
+def test_nc2_flags_a_permutation_that_changed_the_marginal():
+    rng = rng_for(34)
+    recs = [{"control": "NC2", "raw_count": 10, "effective_count": 10.0,
+             "significant": False, "status": "OK", "dsr": 0.5,
+             "marginal_preserved": False,
+             "shuffled_sharpe": 0.0, "unshuffled_sharpe": 0.0}
+            for _ in range(50)]
+    assert "marginal" in " ".join(verdict([aggregate("NC2", recs, rng)])["failures"])
+
+
+def test_nc6_grades_the_best_path_not_the_pooled_series():
+    """T4's second half asks whether the BEST path clears dsr >= 0.95. A path
+    visits every group once, so its own series has one entry per event and a
+    genuine per-path DSR is computable — no reinterpretation needed."""
+    rec = CONTROLS["NC6"][0](0)
+    assert rec["dsr"] == rec["best_path_dsr"]
+    assert "dsr_pooled" in rec and rec["dsr_pooled"] != rec["best_path_dsr"]
+    assert rec["n_paths_insufficient"] == 0
+
+
+def test_t7_requires_every_record_to_report_both_counts():
+    rng = rng_for(35)
+    recs = _fake("NC1", 20, significant=False, status="OK", dsr=0.5)
+    recs[4].pop("effective_count")
+    agg = aggregate("NC1", recs, rng)
+    assert not agg["sample_size"]["reported"]
+    assert agg["sample_size"]["n_missing"] == 1
+    assert "T7" in " ".join(verdict([agg])["failures"])
+
+
 def test_every_control_is_bound_by_at_least_one_threshold():
     """A control nobody grades is decoration."""
     graded = set(DSR_CONTROLS) | set(EXPECTANCY_CONTROLS)

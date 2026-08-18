@@ -265,10 +265,21 @@ Both figures are reported. The band binds to gross. This is a reading of an
 ambiguous sentence, not a relaxation: the gross reading is the one that can fail,
 and it did — see A1.
 
-### A3 — T3's statistic is replaced by the long/short gap (2026-08-17)
+### A3 — PROPOSED, NOT ADOPTED: replace T3's statistic with the long/short gap (2026-08-17)
 
-This is the one amendment that changes a §4.1 statistic, so the evidence is given
-in full and the reader is left able to reject it.
+**Status: proposal. It does not gate. T3 as frozen is the binding criterion and
+it FAILS.** Adopting this would be the one thing the freeze exists to prevent —
+turning a failing frozen criterion into a passing one after the results were
+seen. An independent audit called an earlier draft of this section a post-hoc
+relaxation, and on the procedural point it was right: the code that is failing a
+criterion cannot be the judge of whether the criterion is defective or merely
+inconvenient. Only the project owner can adopt this.
+
+The consequence of leaving it unadopted is recorded in `G1_RESULT.md`: the
+verdict is **G1_INDETERMINATE**, which blocks Phase A′ exactly as a failure
+does.
+
+The evidence for the proposal follows, so that the decision can be made on it.
 
 **T3 as written** requires the share of replications with positive mean gross
 expectancy to lie in `[0.394, 0.606]`. Measured at the frozen `R = 200`:
@@ -291,21 +302,32 @@ Two facts follow, and both are measurements rather than arguments.
    replications is near zero however correct the code is. A threshold that a
    correct apparatus cannot clear does not measure correctness.
 
-**T3 now binds to:** the bootstrap 95% CI of the per-replication difference
-`mean gross R (long) − mean gross R (short)` must contain zero. That is exactly
-the property T3's own text describes — longs and shorts must be mirror images —
-and it has demonstrated power in the correct direction: it failed with the defect
-and passes without it.
+**The proposed statistic:** the bootstrap 95% CI of the per-replication
+difference `mean gross R (long) − mean gross R (short)` must contain zero. That
+is exactly the property T3's own text describes — longs and shorts must be mirror
+images — and it has demonstrated power in the correct direction: it failed with
+the A1 defect present and passes with it fixed.
 
-**Why this is not a post-hoc relaxation.** The replacement was *already failing*
-when the amendment was made and passed only after a genuine defect in the
-apparatus was fixed. A relaxation is a change that turns a failing apparatus into
-a passing one; this change turned a *passing-by-vacuity* statistic into one that
-could fail, then the apparatus was corrected until it passed. The direction is
-the opposite of the thing §7 forbids.
+**The argument against adopting it, which is the stronger one.** The ordering was:
+run the controls, watch T3 fail, fix a genuine defect, watch T3 fail again,
+then replace the statistic. The last step came after seeing that the fix did not
+rescue the criterion. That is post-hoc, and "the statistic is defective" is also
+precisely what someone rationalising would say. The freeze is worth nothing if the
+party being measured can retire an inconvenient measurement.
 
-**For a reader who rejects A3:** the verdict on T3 exactly as written is FAIL, at
-0.0350 against `[0.394, 0.606]`, and `G1_RESULT.md` reports that number
-unchanged. The underlying property — directional symmetry of the label and cost
-path — is demonstrated either way by the gap CI. Nothing in the result depends on
-which reading is preferred except the label on this one line.
+**What is true either way.** The property T3 targets — directional symmetry of
+the label and cost path — is demonstrated by the gap CI regardless of whether A3
+is adopted, and the A1 defect it exposed is fixed. What is *not* settled is
+whether the frozen criterion can be retired. That is the owner's call.
+
+**Three ways this could be resolved**, none of which is for the implementer to
+pick:
+
+1. **Adopt A3.** The verdict becomes G1_PASS. Requires accepting a statistic
+   changed after seeing results, on the evidence above.
+2. **Keep T3 as frozen.** The verdict stays G1_INDETERMINATE and A′ stays
+   blocked until the criteria are re-frozen and the controls re-run — the clean
+   but slow path.
+3. **Re-freeze T3 for a future gate** and record G1 as indeterminate on this one
+   line, with the apparatus properties taken as demonstrated. This is the
+   recommendation: it neither rewrites history nor discards work.

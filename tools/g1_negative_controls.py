@@ -73,15 +73,35 @@ def _fpr(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _sample_size_check(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """T7 — both counts reported, and effective <= raw everywhere."""
+    """T7 — both counts reported by EVERY record, and effective <= raw.
+
+    "Reported" means every replication carries both numbers. An earlier version
+    only required that some finite values existed somewhere in the batch, which
+    would have passed a control that reported the pair once and the raw count
+    everywhere else — the exact omission T7 exists to forbid.
+    """
+    missing = [r.get("replication") for r in records
+               if not np.isfinite(float(r.get("raw_count", np.nan)))
+               or not np.isfinite(float(r.get("effective_count", np.nan)))]
     raw = _finite(records, "raw_count")
     eff = _finite(records, "effective_count")
     if raw.size == 0 or eff.size == 0:
-        return {"reported": False}
-    return {"reported": True,
+        return {"reported": False, "n_missing": len(missing)}
+    # Pair the two counts per record rather than aligning two separately
+    # filtered arrays: with a record missing one of them the arrays have
+    # different lengths, and an elementwise comparison would either raise or,
+    # worse, silently compare mismatched rows.
+    pairs = [(float(r["raw_count"]), float(r["effective_count"]))
+             for r in records
+             if np.isfinite(float(r.get("raw_count", np.nan)))
+             and np.isfinite(float(r.get("effective_count", np.nan)))]
+    raw_p = np.array([p[0] for p in pairs], dtype=float)
+    eff_p = np.array([p[1] for p in pairs], dtype=float)
+    return {"reported": not missing, "n_missing": len(missing),
+            "n_records": len(records),
             "raw_mean": float(raw.mean()), "effective_mean": float(eff.mean()),
-            "overlap_factor_mean": float((raw / eff).mean()),
-            "effective_never_exceeds_raw": bool(np.all(eff <= raw + 1e-9))}
+            "overlap_factor_mean": float((raw_p / eff_p).mean()),
+            "effective_never_exceeds_raw": bool(np.all(eff_p <= raw_p + 1e-9))}
 
 
 def _leakage(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -174,6 +194,24 @@ def aggregate(name: str, records: list[dict[str, Any]],
             "share": share, "band_lo": lo, "band_hi": hi,
             "in_band": bool(lo <= share <= hi)}
 
+    if name == "NC2":
+        # G1_SPEC.md §4's table states NC2's condition as "must not rank above
+        # its own unshuffled null". That was recorded and then never evaluated —
+        # every replication could have had the shuffled signal beating the
+        # unshuffled one and NC2 would still have passed on T1 alone. Both are
+        # null, so the share must sit in the binomial band around one half; a
+        # share systematically above it would mean destroying a signal's time
+        # alignment reliably improves it, which is not a thing that can be true.
+        shuffled = _finite(records, "shuffled_sharpe")
+        unshuffled = _finite(records, "unshuffled_sharpe")
+        share = float(np.mean(shuffled > unshuffled))
+        lo, hi = share_band(0.5, len(records))
+        out["nc2_rank"] = {"shuffled_beats_unshuffled_share": share,
+                           "band_lo": lo, "band_hi": hi,
+                           "marginal_preserved_always": all(
+                               bool(r.get("marginal_preserved")) for r in records),
+                           "nc2_rank_pass": bool(share <= hi)}
+
     return out
 
 
@@ -191,17 +229,36 @@ def verdict(aggregates: list[dict[str, Any]]) -> dict[str, Any]:
             failures.append(f"{name}: T2 null expectancy CI is above zero "
                             f"(net {t2['net']['verdict']}, "
                             f"gross {t2['gross']['verdict']})")
-        # T3 binds to the long/short gap, per G1_SPEC.md amendment A3. The
-        # as-written share statistic is still computed and reported
-        # (`t3_pass`), and the amendment records why it is not the operative
-        # one: it read 0.0000 both with and without a real sign-convention
-        # defect, so it has no power for the property T3 names.
+        # T3 binds to the statistic as frozen. A3 proposes replacing it, and the
+        # proposal is reported as evidence, but it does not gate: adopting it
+        # here would convert a failing frozen criterion into a pass after the
+        # results were seen, which is the one thing the freeze exists to prevent.
+        # The distinction between "the statistic is defective" and "the statistic
+        # is inconvenient" cannot be drawn by the code that is failing it.
         t3 = agg.get("t3")
+        if t3 and not t3["t3_pass"]:
+            failures.append(
+                f"{name}: T3 as frozen — share of positive replications "
+                f"{t3['share_positive']:.4f} outside "
+                f"[{t3['band_lo']:.3f}, {t3['band_hi']:.3f}] "
+                "(SPECIFICATION_DEFECT: see G1_SPEC.md A3; the gap statistic it "
+                "proposes instead reads "
+                f"{t3.get('gap_ci', {}).get('verdict', 'n/a')})")
         if t3 and "t3_gap_pass" in t3 and not t3["t3_gap_pass"]:
             failures.append(f"{name}: T3 long/short gap CI excludes zero "
                             f"({t3['gap_ci']['verdict']}, gap "
                             f"{t3['long_short_gap']:+.5f} R) — the sign "
                             "convention is asymmetric")
+
+        nc2 = agg.get("nc2_rank")
+        if nc2 and not nc2["nc2_rank_pass"]:
+            failures.append(
+                f"{name}: shuffling the signal improved it in "
+                f"{nc2['shuffled_beats_unshuffled_share']:.4f} of replications, "
+                f"above the band top {nc2['band_hi']:.3f}")
+        if nc2 and not nc2["marginal_preserved_always"]:
+            failures.append(f"{name}: the permutation did not preserve the "
+                            "signal's marginal distribution")
 
         for key, label in (("t4", "T4 path distribution"),
                            ("t5", "T5 false ranking superiority")):
@@ -213,12 +270,32 @@ def verdict(aggregates: list[dict[str, Any]]) -> dict[str, Any]:
             failures.append(f"{name}: T6 leakage — "
                             f"{leak['total_leakage_pairs']} intersecting "
                             "train/test span pairs")
+        # Both halves of T7, and neither guarded by the other: an unreported
+        # count used to skip the comparison as well, so a control that stopped
+        # reporting effective sizes passed T7 by omission.
         size = agg.get("sample_size", {})
-        if size.get("reported") and not size["effective_never_exceeds_raw"]:
+        if size and not size.get("reported", False):
+            failures.append(f"{name}: T7 — {size.get('n_missing', '?')} "
+                            f"replication(s) did not report both the raw and the "
+                            "effective sample size")
+        if size.get("raw_mean") is not None and not size["effective_never_exceeds_raw"]:
             failures.append(f"{name}: T7 effective sample size exceeds raw")
 
-    return {"verdict": "CONTROLS_PASS" if not failures else "CONTROLS_FAIL",
-            "failures": failures}
+    # A criterion that no correct apparatus could clear is a defect in the
+    # criterion, and it is a different outcome from the apparatus manufacturing
+    # edge. Collapsing the two would either overstate the apparatus's failure or,
+    # worse, invite the criterion to be quietly rewritten until it passed.
+    spec_defects = [f for f in failures if "SPECIFICATION_DEFECT" in f]
+    real = [f for f in failures if "SPECIFICATION_DEFECT" not in f]
+    if real:
+        outcome = "CONTROLS_FAIL"
+    elif spec_defects:
+        outcome = "CONTROLS_INDETERMINATE"
+    else:
+        outcome = "CONTROLS_PASS"
+    return {"verdict": outcome, "failures": failures,
+            "specification_defects": spec_defects,
+            "apparatus_failures": real}
 
 
 def run_suite(replications: dict[str, int] | None = None) -> dict[str, Any]:
@@ -297,10 +374,18 @@ def format_report(result: dict[str, Any]) -> str:
             lines.append(f"    T6 leakage  {leak['total_leakage_pairs']} pairs  "
                          f"[{'pass' if leak['t6_pass'] else 'FAIL'}]")
         size = agg.get("sample_size", {})
-        if size.get("reported"):
+        if size.get("raw_mean") is not None:
+            missing = size["n_missing"]
+            note = "pass" if size["reported"] else f"FAIL, {missing} missing"
             lines.append(f"    T7 samples  raw {size['raw_mean']:.1f} / "
                          f"effective {size['effective_mean']:.1f}  "
-                         f"overlap x{size['overlap_factor_mean']:.4f}")
+                         f"overlap x{size['overlap_factor_mean']:.4f}  [{note}]")
+        nc2 = agg.get("nc2_rank")
+        if nc2:
+            lines.append(f"    NC2 rank    shuffled beats unshuffled "
+                         f"{nc2['shuffled_beats_unshuffled_share']:.4f} "
+                         f"(band top {nc2['band_hi']:.3f})  "
+                         f"[{'pass' if nc2['nc2_rank_pass'] else 'FAIL'}]")
         perm = agg.get("permutation_improved_share")
         if perm:
             lines.append(f"       perm+    {perm['share']:.4f} in "

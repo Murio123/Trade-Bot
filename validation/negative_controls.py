@@ -654,21 +654,44 @@ def nc6_pipeline_zero_drift(replication: int) -> dict[str, Any]:
         sd = vals.std(ddof=1)
         per_path_sharpe.append(float(vals.mean() / sd) if sd > 0 else 0.0)
 
-    # The DSR is taken on this strategy's own out-of-sample P&L, one entry per
-    # event, with `n_trials = n_paths`: a result selected as the best of the
-    # paths was selected out of that many, and the deflation has to be told so.
-    oos = np.zeros(weights.raw_count, dtype=float)
-    seen = np.zeros(weights.raw_count, dtype=np.int64)
-    for split in geometry.splits:
+    # Per-event out-of-sample P&L, per split, reused twice below.
+    def split_pnl(split: Any) -> np.ndarray:
         wt = weights.weights[split.train_idx]
         centred_train = _centred(run.r_multiples, split.train_idx,
                                  split.train_idx, weights.weights)
         lean = np.sign(np.sum(wt * signal[split.train_idx] * centred_train)) or 1.0
         payoff = _centred(run.r_multiples, split.train_idx, split.test_idx,
                           weights.weights)
-        oos[split.test_idx] += lean * np.sign(signal[split.test_idx]) * payoff
+        return lean * np.sign(signal[split.test_idx]) * payoff
+
+    oos = np.zeros(weights.raw_count, dtype=float)
+    seen = np.zeros(weights.raw_count, dtype=np.int64)
+    for split in geometry.splits:
+        oos[split.test_idx] += split_pnl(split)
         seen[split.test_idx] += 1
     oos_pnl = oos[seen > 0] / seen[seen > 0]
+
+    # T4's second half, evaluated literally: the DSR of the BEST path.
+    #
+    # A path visits every group exactly once, so its own P&L series has one entry
+    # per event — comfortably above M01's 30-observation floor, which means a
+    # genuine per-path DSR is computable and no reinterpretation is needed. An
+    # earlier version graded the pooled series instead and merely argued that
+    # `n_trials = n_paths` represented the selection; the independent audit was
+    # right that this did not evaluate the stated condition. `n_trials` is the
+    # path count because the maximum is taken over exactly that many paths, which
+    # is the selection the deflation has to absorb.
+    path_dsr: list[dict[str, Any]] = []
+    for path in assemble_paths(geometry):
+        series = np.concatenate([split_pnl(geometry.splits[si])[
+            np.isin(geometry.splits[si].test_idx,
+                    geometry.splits[si].test_idx_by_group[g])]
+            for g, si in path])
+        path_dsr.append(_dsr_or_insufficient(series, n_trials=geometry.n_paths))
+
+    graded = [p for p in path_dsr if p["status"] == "OK"]
+    best_path_dsr = max((p["dsr"] for p in graded), default=None)
+    best_path_significant = any(p["significant"] for p in path_dsr)
 
     pooled = _dsr_or_insufficient(oos_pnl, n_trials=geometry.n_paths)
     pooled_net = _dsr_or_insufficient(run.net_r, n_trials=geometry.n_paths)
@@ -676,6 +699,13 @@ def nc6_pipeline_zero_drift(replication: int) -> dict[str, Any]:
 
     return {"control": "NC6", "replication": replication,
             "dsr_net": pooled_net.get("dsr"),
+            "best_path_dsr": best_path_dsr,
+            # T1 for NC6 binds to the best path, not the pooled series: taking
+            # the maximum over paths is how a backtest lies, so that is the
+            # quantity whose false-positive rate matters.
+            "significant_pooled": pooled["significant"],
+            "dsr_pooled": pooled.get("dsr"),
+            "n_paths_insufficient": len(path_dsr) - len(graded),
             "tie_rate": run.outcomes.get("TIE", 0) / max(1, weights.raw_count),
             "raw_count": weights.raw_count,
             "effective_count": weights.effective_count,
@@ -688,8 +718,9 @@ def nc6_pipeline_zero_drift(replication: int) -> dict[str, Any]:
             "mean_net_r": float(run.net_r.mean()),
             "mean_gross_r": float(run.r_multiples.mean()),
             "outcomes": run.outcomes,
-            "dsr": pooled.get("dsr"), "status": pooled["status"],
-            "significant": pooled["significant"], "funding_modelled": False}
+            "dsr": best_path_dsr,
+            "status": "OK" if graded else "INSUFFICIENT_DATA",
+            "significant": best_path_significant, "funding_modelled": False}
 
 
 # ---------------------------------------------------------------------------
@@ -771,9 +802,16 @@ def nc8_iid_noise_calibration(replication: int) -> dict[str, Any]:
     their null is not centred.
 
     This one is centred by construction. Under a correct M01 the DSR of a
-    zero-mean series is uniform on (0, 1), so the share above 0.95 estimates the
-    false-positive rate directly, and the mean DSR should sit near 0.5. That
-    makes T1 a real measurement rather than a formality.
+    zero-mean series is *asymptotically* uniform on (0, 1), so the share above
+    0.95 estimates the false-positive rate directly and the mean DSR should sit
+    near 0.5. That makes T1 a real measurement rather than a formality.
+
+    "Asymptotically" is not hedging. PSR is a normal approximation with estimated
+    skew and kurtosis, so uniformity is exact only in the limit; for a discrete
+    return series it cannot be exact at all, since a finite set of attainable
+    sample means gives a finite set of attainable DSRs. All three families drawn
+    here are continuous, and n = 250 is where the approximation is being checked
+    — which is the point of measuring the rate instead of asserting it.
 
     Fat tails and skew are drawn in deliberately: a Student-t with 4 degrees of
     freedom, sign-tilted, is the case where a naive Sharpe test over-rejects, and

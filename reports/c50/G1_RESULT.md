@@ -3,24 +3,36 @@
 Run 2026-08-17. Anchor `7c8f37e` (P1 closed). Criteria frozen at `197a765`,
 before any code existed. Apparatus at `d2e86b3`.
 
-## Verdict: **G1_PASS**
+## Verdict: **G1_INDETERMINATE**
 
-All five pieces are internally consistent, and the negative controls do not
-manufacture edge. The suite returns `CONTROLS_PASS` at the frozen replication
-counts (R = 500 / 200, master seed 20260817).
+**Phase A′ stays blocked.** Indeterminate is an outcome, not an error
+(ARCHITECTURE.md §5.7), and it blocks exactly as a failure does.
 
-Two qualifications, stated here rather than buried:
+Every apparatus property G1 asks about is demonstrated: leakage is exactly zero,
+the false-positive rate is at or below nominal on every control that can measure
+one, no control shows manufactured edge, and the two defects the suite found are
+fixed. The suite returns `CONTROLS_INDETERMINATE` at the frozen replication
+counts (R = 500 / 200, master seed 20260817) with a single outstanding item.
 
-1. **T3 exactly as written FAILS** (0.0350 against `[0.394, 0.606]`). It is
-   evaluated instead as the long/short gap under amendment A3, which passes. The
-   full argument, including the evidence that the as-written statistic has no
-   power, is in `G1_SPEC.md` §7 A3. A reader who rejects A3 should read this as
-   `G1_FAIL` on that one line; the underlying property is demonstrated either
-   way.
-2. **The trial ledger does not exist**, so M01 cannot verify its own
-   `n_trials`. G1 proves the statistic is correct; it does not and cannot prove
-   that a future caller will report the trial count honestly. That is the next
-   blocker.
+**What is unresolved: T3 as frozen fails, at 0.0350 against `[0.394, 0.606]`.**
+An earlier draft of this document reported G1_PASS by evaluating T3 as the
+long/short gap under amendment A3 instead. An independent audit called that a
+post-hoc relaxation, and on the point that matters it was right: a failing frozen
+criterion was replaced with a passing one after the results were seen, and the
+code being measured cannot be the judge of whether the criterion it fails is
+defective or merely inconvenient. A3 is therefore recorded as a **proposal that
+does not gate**, T3 as frozen is the binding criterion, and the verdict follows
+from it.
+
+This is a defect in the criterion, not evidence that the apparatus manufactures
+edge — which is why the outcome is indeterminate rather than `G1_FAIL`.
+`G1_FAIL` is reserved by §5 for a T2 CI above zero, a T1 breach, or a T6 leak,
+and none occurred. The three ways to resolve it are set out in `G1_SPEC.md` §7
+A3; the decision is the project owner's, not the implementer's.
+
+**Also unresolved, and independent of the above: the trial ledger does not
+exist**, so M01 cannot verify its own `n_trials`. G1 proves the statistic is
+correct; it cannot prove a future caller will report the trial count honestly.
 
 ---
 
@@ -208,16 +220,17 @@ frozen spec required but did not name.
 | NC2 | T1 FPR ≤ 0.075 | 0.0480 | pass |
 | NC3 | T2 net / gross CI not above zero | −0.2101 / −0.0973, both BELOW_ZERO | pass |
 | NC4 | T2 net / gross CI not above zero | −0.2133 / −0.1005, both BELOW_ZERO | pass |
-| NC4 | T3 long/short gap CI contains zero | +0.01135, CI [−0.0041, +0.0287] | pass (A3) |
-| NC4 | T3 as written | 0.0350 vs [0.394, 0.606] | **FAIL as written** |
+| NC4 | **T3 as frozen** | 0.0350 vs [0.394, 0.606] | **FAIL — binding** |
+| NC4 | T3 long/short gap CI contains zero | +0.01135, CI [−0.0041, +0.0287] | pass (A3, proposal only) |
 | NC5 | T1 FPR ≤ 0.075 | 0.0680 | pass |
-| NC6 | T1 FPR ≤ 0.075 | 0.0020 | pass |
+| NC6 | T1 FPR ≤ 0.075, **best path** | 0.0020 | pass |
 | NC6 | T4 path median CI contains zero | −0.00248, CI [−0.0072, +0.0026] | pass |
 | NC7 | T5 winner share in [0.433, 0.567] | 0.4800 | pass |
 | NC7 | T1 FPR ≤ 0.075 | 0.0200 | pass |
 | NC8 | T1 FPR ≤ 0.075 | 0.0340 | pass |
+| NC2 | must not rank above its own unshuffled null | 0.4900 vs band top 0.567 | pass |
 | NC5/6/7 | T6 leakage == 0 | 0 | pass |
-| all | T7 both counts reported | yes, effective ≤ raw everywhere | pass |
+| all | T7 both counts reported by every record | yes, effective ≤ raw everywhere | pass |
 
 Notes a reader should have:
 
@@ -232,6 +245,35 @@ Notes a reader should have:
 - **NC6's path spread is 0.056, not zero.** This is checked because a degenerate
   path distribution would satisfy T4's CI test while measuring nothing — which
   is exactly what the first version of that control did.
+
+### Four gate defects found by the independent audit
+
+Recorded separately from the ones I found, because these are the ones that got
+past me and two of them made the gate weaker than it claimed to be.
+
+1. **T4's second half was never evaluated.** The frozen text asks whether the
+   *best path* clears `dsr >= 0.95`; the runner graded the pooled series and
+   argued that `n_trials = n_paths` represented the selection. That was a
+   reinterpretation, and an unnecessary one: a path visits every group exactly
+   once, so its own series has one entry per event — well above M01's
+   30-observation floor — and a genuine per-path DSR is computable. Now it is
+   computed, and the best-path FPR is **0.0020**.
+2. **NC2's stated condition was recorded and never graded.** The spec requires
+   the shuffled signal not to rank above its own unshuffled null. Both Sharpes
+   were computed and neither was compared, so every replication could have had
+   the shuffled signal winning and NC2 would still have passed on T1 alone.
+   Measured: **0.4900** against a band top of 0.567.
+3. **T7 passed by omission.** `reported` was true if *any* record carried both
+   counts, and the effective-vs-raw comparison was nested inside that check — so
+   a control that stopped reporting effective sizes would have satisfied T7 by
+   not reporting them. Both halves are now enforced independently.
+4. **The M01 calibration claim was overstated.** "The DSR of a mean-zero series
+   is uniform" is exact only asymptotically, and for a discrete return series it
+   cannot be exact at all: finitely many attainable sample means give finitely
+   many attainable DSRs. The claim is now qualified.
+
+The audit also found no leakage path in M04, no look-ahead in M02, and no
+arithmetic defect in M03 — and it was the source of the verdict change above.
 
 ### Three invalid controls, found and fixed
 
@@ -276,24 +318,29 @@ Generated artifacts are untracked, under `reports/g1/`.
 
 ## 8. Next allowed step
 
-**Phase A′ is now unblocked** — re-run H1, H2, the confluence score and
-C4.3d/C4.3e through this apparatus. Both possible outcomes are written into
-ARCHITECTURE.md §3.2 in advance: a rejection may have been made on insufficient
-grounds, or the +0.13 may not survive deflation and the C4.4/C4.5 ranker loses
-its stated justification. The second must be accepted if it occurs.
+**Phase A′ is blocked**, by the indeterminate verdict. Two things stand between
+here and it, in this order.
 
-**But the honest ordering puts one thing first.** M01 takes `n_trials` as an
-argument and cannot check it. Understating that count is, per ARCHITECTURE.md
-M01, "the single largest failure mode", and it is addressed structurally by the
-§6.1 trial ledger, which does not exist. Running A′ before the ledger means
-every deflated number in it rests on a trial count reconstructed after the fact
-from git history — which is exactly the reconstruction §6.1 says cannot be
-trusted.
+**First, a decision that is not mine to make: what to do about T3.** The three
+options are in `G1_SPEC.md` §7 A3. The recommendation is option 3 — re-freeze T3
+for a future gate, record G1 as indeterminate on that one line, and take the
+apparatus properties as demonstrated — because it neither rewrites history nor
+discards work. Options 1 and 2 are both defensible and both belong to the owner.
 
-So: **build the §6.1 trial ledger, then A′.** The ledger also needs retroactive
-population from the project's history (H1, H2, confluence variants, the
-`/backtest` threshold grid, the four profiles, C4.3a–e) with unknowns rounded
-up.
+**Second, the §6.1 trial ledger.** M01 takes `n_trials` as an argument and cannot
+check it. Understating that count is, per ARCHITECTURE.md M01, "the single
+largest failure mode", and it is addressed structurally by the ledger, which does
+not exist. Running A′ before it means every deflated number rests on a trial
+count reconstructed after the fact from git history — exactly the reconstruction
+§6.1 says cannot be trusted. The ledger also needs retroactive population from
+the project's history (H1, H2, confluence variants, the `/backtest` threshold
+grid, the four profiles, C4.3a–e), with unknowns rounded up.
+
+Only then A′: re-run H1, H2, the confluence score and C4.3d/C4.3e through this
+apparatus. Both outcomes are written into ARCHITECTURE.md §3.2 in advance — a
+rejection may have been made on insufficient grounds, or the +0.13 may not
+survive deflation and the C4.4/C4.5 ranker loses its stated justification. The
+second must be accepted if it occurs.
 
 Two smaller items A′ must not forget:
 
