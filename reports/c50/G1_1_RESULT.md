@@ -299,8 +299,9 @@ built.
 
 ## 9. Verification
 
-- **Targeted tests: 125.** `tests/test_trial_registry.py` (73),
-  `tests/test_research_dsr.py` (28), `tests/test_trial_history.py` (24).
+- **Targeted tests: 141.** `tests/test_trial_registry.py` (77),
+  `tests/test_research_dsr.py` (29), `tests/test_trial_history.py` (24),
+  `tests/test_g1_governance.py` (12).
 - **Full suite: 1919 passed, 0 failed** — run twice, 246s and 255s.
 - Two pre-existing guards fired on the new code and were addressed without
   weakening either:
@@ -365,6 +366,40 @@ mutated the file in ways the new chain check catches *first*, which would have
 left the unknown-kind, duplicate-declaration and orphaned-execution guards
 looking covered while never being reached. They now re-chain the file so each
 guard is genuinely exercised.
+
+### 9.2 The third audit round, before push
+
+A final audit returned **NOT_SAFE** on four points. All four are fixed, and no
+count moved: A′ still reads 83 / 17 / **100**.
+
+1. **The guardrail still had a two-statement bypass.** A2's rule is "keyword
+   argument or literal key", but the scan looked only inside call nodes, so
+   `KW = {"n_trials": 1}` followed by `f(**KW)` walked past it — the same
+   evasion A2 closed, spelled across two lines. The scan now examines every
+   dict literal (amendment A4). Reads are still not flagged.
+2. **A withdrawn duplicate could re-enter through ancestry.** §6.3 excludes it
+   from every count; §6.2 pulls ancestry in unconditionally; the second won in
+   the implementation, so an excluded record could be counted alongside the
+   trial it exactly duplicates. §6.3 governs now, and the lineage still walks
+   *through* the skipped record to the real ancestor behind it (A5). No
+   historical record was affected — none is a withdrawn duplicate — which is
+   why the count is unchanged.
+3. **This document's own decision record had the wrong cutoff date.** The
+   governed T3 record used its own date, 2026-08-19, as the cutoff and
+   claimed that matched §8 item 3, which says 2026-08-18. The frozen date governs; the
+   decision's own date is when the option was chosen, not when the semantics
+   begin. A test now asserts the two never merge again.
+4. **The mixed-evidence rule was implemented but never stated.** A record
+   citing both a confirming source and an inference puts its whole
+   multiplicity in the uncertain band. That was pinned by a test and absent
+   from the spec, which is the same defect shape as §9.1's. Written down as
+   amendment A3, with the property that makes it safe stated alongside: the
+   conservative count is the multiplicity's high bound and cannot move,
+   whichever way this rule falls.
+
+The pattern from §9.1 held for one more round — three of the four are a rule
+that read broader than the code implemented, or a code path that read broader
+than the rule.
 
 ---
 

@@ -751,17 +751,27 @@ class TrialRegistry:
         # from, and relabelling its objective would otherwise be the cheapest
         # way to shed that history.
         frontier = list(selected.values())
+        walked: set[str] = set()
         while frontier:
             record = frontier.pop()
             parent_id = record.parent_trial_id
-            if parent_id is None or parent_id in selected:
+            if parent_id is None or parent_id in selected or parent_id in walked:
                 continue
+            walked.add(parent_id)
             parent = declarations.get(parent_id)
             if parent is None:
                 raise TrialRegistryError(
                     f"trial {record.trial_id} names parent {parent_id}, which "
                     f"is not declared; the lineage cannot be counted")
             if parent.origin == ORIGIN_SYNTHETIC:
+                continue
+            if parent.status == STATUS_WITHDRAWN_DUPLICATE:
+                # §6.3 excludes a withdrawn duplicate from *every* family
+                # count, and an ancestor is no exception — counting it would
+                # double-count the trial it duplicates. The lineage is not
+                # severed by it, though: the walk continues to its own parent,
+                # which is a real trial whose pressure is still inherited.
+                frontier.append(parent)
                 continue
             selected[parent_id] = parent
             frontier.append(parent)

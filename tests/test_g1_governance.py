@@ -74,6 +74,25 @@ def test_option_three_was_recorded_and_is_forward_only(gov):
     assert dec["corrected_t3_semantics_apply"] == "prospectively only"
 
 
+def test_the_t3_cutoff_is_the_frozen_one_not_the_decision_date(gov):
+    """Two dates live here and an earlier draft conflated them.
+
+    The decision was taken on 2026-08-19. The date that decides *which gates*
+    the corrected T3 semantics reach was frozen a day earlier, before the
+    decision existed, and taking a decision does not move it. If they are ever
+    written as the same date again, one of the documents is wrong.
+    """
+    cutoff = "gates declared after 2026-08-18"
+    assert gov["prospective_decision"]["corrected_t3_semantics_cutoff"] == cutoff
+    for path in ("reports/c50/TRIAL_REGISTRY_SPEC.md",
+                 "reports/c50/G1_1_RESULT.md",
+                 DECISION_DOC,
+                 "reports/c50/G1_SPEC.md"):
+        text = open(path).read()
+        assert "2026-08-18" in text, path
+        assert "gates declared after 2026-08-19" not in text, path
+
+
 def test_the_accepted_apparatus_properties_are_the_five_named(gov):
     assert gov["prospective_decision"]["accepted_properties"] == [
         "leakage controls",

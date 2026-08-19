@@ -236,16 +236,21 @@ def _direct_dsr_calls(path: str) -> list[int]:
     tree = ast.parse(open(path).read())
     hits = set()
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        for kw in node.keywords:
-            if kw.arg == "n_trials":
-                hits.add(kw.value.lineno)
-            elif kw.arg is None and isinstance(kw.value, ast.Dict):
-                # `f(**{"n_trials": 1})` — the argument spelled as data.
-                for key in kw.value.keys:
-                    if isinstance(key, ast.Constant) and key.value == "n_trials":
-                        hits.add(key.lineno)
+        if isinstance(node, ast.Call):
+            for kw in node.keywords:
+                if kw.arg == "n_trials":
+                    hits.add(kw.value.lineno)
+        elif isinstance(node, ast.Dict):
+            # Any dict literal naming the key, wherever it is written. An
+            # earlier version looked only inside `f(**{...})`, which lifting
+            # the same dict into a variable — `KW = {"n_trials": 1}` then
+            # `f(**KW)` — walked straight past. Reading a count back off a
+            # result stays unflagged: `payload["n_trials"]` is a subscript and
+            # `.get("n_trials")` is a positional argument, neither of which is
+            # a dict key.
+            for key in node.keys:
+                if isinstance(key, ast.Constant) and key.value == "n_trials":
+                    hits.add(key.lineno)
     return sorted(hits)
 
 
@@ -313,6 +318,23 @@ def test_the_guardrail_survives_the_obvious_evasions(tmp_path, source):
     assert _direct_dsr_calls(str(offender)) == [3]
 
 
+def test_the_guardrail_catches_a_dict_lifted_into_a_variable(tmp_path):
+    """`f(**{...})` and `KW = {...}; f(**KW)` are the same bypass.
+
+    The second one walked past the first version of this scan, which only
+    looked inside the call node. Any dict literal naming the key is flagged
+    now, which is what TRIAL_REGISTRY_SPEC.md §7.3 / A2 says the rule is:
+    no module outside the allowlist may name `n_trials` as a keyword argument
+    or as a literal key.
+    """
+    offender = tmp_path / "evader.py"
+    offender.write_text("import validation.deflated_sharpe as m\n"
+                        "KW = {'n_trials': 1}\n"
+                        "def go(r):\n"
+                        "    return m.deflated_sharpe(r, **KW)\n")
+    assert _direct_dsr_calls(str(offender)) == [2]
+
+
 @pytest.mark.parametrize("source", [
     # Attribute access on a result.
     "def render(result):\n"
@@ -330,9 +352,11 @@ def test_the_guardrail_does_not_flag_reading_a_trial_count(tmp_path, source):
     """Reporting `n_trials` is not supplying one.
 
     A guard that failed here would push future reporters toward hiding the
-    number — the opposite of what this stage is for. Only a count handed *to*
-    a call is flagged, which is why the scan looks at call keywords and at
-    `**{...}` literals rather than at every occurrence of the string.
+    number — the opposite of what this stage is for. Only a count *written*
+    is flagged — call keywords and dict-literal keys — rather than every
+    occurrence of the string. Building `{"n_trials": count}` for output does
+    trip the guard; that is deliberate, and the allowlist is where a module
+    that legitimately publishes the number belongs.
     """
     reader = tmp_path / "reporter.py"
     reader.write_text(source)

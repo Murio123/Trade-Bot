@@ -43,7 +43,9 @@ Of the three resolutions `G1_SPEC.md` §7 A3 put to the owner, **option 3** was
 chosen: re-freeze T3 for a future gate, record G1 as indeterminate on that one
 line, and take the apparatus properties as demonstrated.
 
-**Effective 2026-08-19, forwards only.**
+**Recorded and effective 2026-08-19, forwards only.** The separate cutoff
+that governs which gates the corrected T3 semantics reach — gates declared
+after **2026-08-18** — is the frozen one and is unchanged (§2.2).
 
 ### 2.1 What is accepted
 
@@ -77,8 +79,13 @@ the directional-symmetry property.** Two constraints bind that re-freeze:
   seeing G1, one stage later.
 
 The corrected T3 semantics of `G1_SPEC.md` §7 A3 therefore apply **to gates
-declared after 2026-08-19 and to no earlier one**, which is exactly what
-`G1_1_RESULT.md` §8 item 3 already stated.
+declared after 2026-08-18 and to no earlier one**. That cutoff is not this
+decision's date and is not moved by it: it was fixed by
+`TRIAL_REGISTRY_SPEC.md` §9 item 3 and repeated in `G1_1_RESULT.md` §8 item 3,
+both written before the decision was taken. This record is dated 2026-08-19
+and changes nothing about which gates the corrected semantics reach. An
+earlier draft of this document wrote 2026-08-19 for both and claimed the two
+agreed; the audit caught it, and the frozen cutoff governs.
 
 ---
 

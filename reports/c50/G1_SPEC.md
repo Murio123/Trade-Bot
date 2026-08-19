@@ -356,7 +356,10 @@ about it.
 - **T3 must be re-frozen prospectively** before any future gate that depends
   on the directional-symmetry property, and the replacement criterion **must
   not be chosen using Phase A′ results**.
-- The corrected semantics apply to gates declared **after 2026-08-19** only.
+- The corrected semantics apply to gates declared **after 2026-08-18**
+  only — the cutoff frozen in `TRIAL_REGISTRY_SPEC.md` §9 item 3 before
+  this decision was taken. The decision is dated 2026-08-19 and does not
+  move it.
 
 Governed record: `reports/c50/G1_T3_DECISION.md`, machine-readable in
 `reports/c50/g1_governance.json`.

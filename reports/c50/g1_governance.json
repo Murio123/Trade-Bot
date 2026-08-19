@@ -1,7 +1,6 @@
 {
   "schema": "c50.governance/1",
   "note": "Machine-readable governance record for the C5.0 G1 / G1.1 gates. Historical facts are immutable; prospective decisions carry an effective date and never apply backwards. Human record: reports/c50/G1_T3_DECISION.md. Asserted by tests/test_g1_governance.py.",
-
   "historical_fact": {
     "gate": "G1",
     "verdict": "G1_INDETERMINATE",
@@ -15,7 +14,6 @@
     "reinterpretation_permitted": false,
     "rerun_for_cleaner_verdict_permitted": false
   },
-
   "prospective_decision": {
     "id": "G1_T3_OPTION_3",
     "option": 3,
@@ -37,9 +35,10 @@
     "t3_treatment": "specification problem for that historical gate; neither erased nor rewritten",
     "t3_refreeze_required_before": "any future gate that depends on the directional-symmetry property T3 names",
     "t3_refreeze_constraint": "the replacement criterion must not be chosen using Phase A-prime results",
-    "corrected_t3_semantics_apply": "prospectively only"
+    "corrected_t3_semantics_apply": "prospectively only",
+    "corrected_t3_semantics_cutoff": "gates declared after 2026-08-18",
+    "corrected_t3_semantics_cutoff_source": "reports/c50/TRIAL_REGISTRY_SPEC.md §9 item 3; repeated in reports/c50/G1_1_RESULT.md §8 item 3. Frozen before this decision and not moved by it; this record's own date (2026-08-19) is when the option was chosen, not when the semantics begin."
   },
-
   "trial_accounting": {
     "gate": "G1.1",
     "verdict": "G1_1_PASS",
@@ -59,7 +58,6 @@
     "witness_not_input": "The number is recorded here so a reader can check it. Phase A-prime must obtain it from the registry, never from this file and never as a literal.",
     "historical_uncertainty_preserved": "The uncertain band of 17 is pre-C1 and stays a band. This record must not present the reconstruction as more precise than G1_1_RESULT.md §4.3 states."
   },
-
   "phase_a_prime": {
     "status": "UNBLOCKED",
     "unblocked_on": "2026-08-19",

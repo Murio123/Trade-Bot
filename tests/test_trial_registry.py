@@ -14,7 +14,9 @@ import pytest
 
 from validation.trial_registry import (KIND_DECLARATION, ORIGIN_RECONSTRUCTED,
                                        ORIGIN_SYNTHETIC,
-                                       STATUS_WITHDRAWN_DUPLICATE, Evidence,
+                                       STATUS_WITHDRAWN_DUPLICATE,
+                                       TIER_GIT_HISTORY, TIER_INFERENCE,
+                                       Evidence,
                                        FamilyScope, ImmutableRecordError,
                                        TrialIdentity, TrialRecord,
                                        TrialRegistry, TrialRegistryError,
@@ -535,10 +537,76 @@ def test_a_withdrawn_duplicate_is_excluded(registry):
     assert registry.n_trials().n_trials == 1
 
 
+def test_a_withdrawn_duplicate_ancestor_is_excluded_too(registry):
+    """§6.3 excludes it from *every* count, ancestry included.
+
+    Ancestry is pulled in unconditionally, so an excluded record could walk
+    back in through a counted child — and it would be counted alongside the
+    trial it is an exact duplicate of.
+    """
+    original = registry.declare(record(hypothesis="original"))
+    dupe = registry.declare(record(hypothesis="dupe",
+                                   status=STATUS_WITHDRAWN_DUPLICATE,
+                                   parent_trial_id=original.trial_id))
+    registry.declare(record(hypothesis="variant",
+                            parent_trial_id=dupe.trial_id))
+
+    count = registry.n_trials()
+    assert dupe.trial_id not in count.trial_ids
+    assert count.n_trials == 2
+
+
+def test_lineage_is_not_severed_by_a_withdrawn_duplicate(registry):
+    """Skipping it must not also drop the real ancestor behind it.
+
+    The variant still inherits the original's selection pressure; the
+    duplicate is merely a record that should never have existed.
+    """
+    original = registry.declare(record(hypothesis="original",
+                                       research_objective="volatility_forecast"))
+    dupe = registry.declare(record(hypothesis="dupe",
+                                   research_objective="volatility_forecast",
+                                   status=STATUS_WITHDRAWN_DUPLICATE,
+                                   parent_trial_id=original.trial_id))
+    variant = registry.declare(record(hypothesis="variant",
+                                      parent_trial_id=dupe.trial_id))
+
+    count = registry.n_trials(FamilyScope(research_objective="trade_expectancy"))
+    assert set(count.trial_ids) == {variant.trial_id, original.trial_id}
+
+
 def test_an_abandoned_trial_still_counts(registry):
     registry.declare(record(hypothesis="rejected", status="abandoned"))
     registry.declare(record(hypothesis="no_data", status="insufficient_data"))
     assert registry.n_trials().n_trials == 2
+
+
+def test_mixed_evidence_puts_the_whole_record_in_the_uncertain_band(registry):
+    """Spec §8.3 amendment A3, stated rather than only implemented.
+
+    A record citing a confirming source *and* an inference does not identify
+    which of its arms the confirming source establishes, so none of them are
+    counted as confirmed.
+    """
+    registry.declare(record(multiplicity=(1, 3), evidence=(
+        Evidence(tier=TIER_GIT_HISTORY, ref="deadbee", note="the choice"),
+        Evidence(tier=TIER_INFERENCE, ref="reports/x", note="arm count"),
+    )))
+    count = registry.n_trials()
+    assert (count.confirmed, count.uncertain, count.n_trials) == (0, 3, 3)
+
+
+def test_the_evidence_rule_cannot_move_the_conservative_count(registry):
+    """A3's safety property: the number that deflates a result is the
+    multiplicity's high bound, whatever the evidence says."""
+    confirming = (Evidence(tier=TIER_GIT_HISTORY, ref="deadbee", note="n"),)
+    inferred = confirming + (Evidence(tier=TIER_INFERENCE, ref="r",
+                                      note="n"),)
+    registry.declare(record(hypothesis="a", multiplicity=(2, 5),
+                            evidence=confirming))
+    registry.declare(record(hypothesis="b", multiplicity=(2, 5),
+                            evidence=inferred))
+    assert registry.n_trials().n_trials == 10
 
 
 def test_multiplicity_stands_for_a_grid(registry):

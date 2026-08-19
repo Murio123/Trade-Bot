@@ -500,6 +500,42 @@ claiming a trial count however it reaches M01. Reading a count back off a
 result is not flagged; a guard that punished reporting would push future
 reporters toward hiding the number.
 
+**A3 — mixed evidence puts the whole record in the uncertain band (recorded
+2026-08-19, after the final audit).** §8.3 defines *confirmed* as "trials whose
+evidence is tier 1–3", which does not say what happens to a record citing both
+a tier 1–3 source and an `inference`. The implementation has always resolved
+this one way — any `inference` evidence sends the record's entire multiplicity
+into the uncertain band — and the audit was right that the rule was asserted by
+a test rather than stated here. It is stated now.
+
+The rule is not arbitrary. Evidence in this table is cited per record, not per
+arm: a commit that establishes *that* a choice was made, plus an inference about
+*how many arms* were compared, does not identify which arms are established.
+Splitting such a record would require inventing that mapping.
+
+**The conservative count is unaffected either way** — it is the multiplicity's
+high bound, independent of evidence tier — so this rule cannot change the number
+that deflates a result. It moves records between the two transparency figures
+only, and it moves them toward showing less confirmed, which is the direction
+§2.4 requires of every ambiguity in this document.
+
+**A4 — the guardrail flags any dict literal naming `n_trials` (recorded
+2026-08-19, after the final audit).** A2 states the rule as "a keyword argument
+or a literal key", but the scan implementing it looked only inside call nodes,
+so `KW = {"n_trials": 1}` followed by `f(**KW)` walked past — the same bypass A2
+was written to close, spelled across two statements. The scan now examines every
+dict literal in a module. Subscript reads (`payload["n_trials"]`) and `.get`
+lookups are still not flagged, so reporting a count remains free.
+
+**A5 — a withdrawn duplicate is excluded from ancestry too (recorded
+2026-08-19, after the final audit).** §6.3 excludes `withdrawn_duplicate` from
+every family count, and §6.2 pulls ancestry in unconditionally. Those two rules
+met in the implementation and the second won: a withdrawn duplicate named as a
+parent re-entered the count through its child, alongside the very trial it
+duplicates. §6.3 governs. The lineage is not severed by the exclusion — the walk
+continues through the skipped record to its own parent, whose selection pressure
+is still inherited.
+
 ---
 
 ## 11. Out of scope
