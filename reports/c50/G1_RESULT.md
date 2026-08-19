@@ -367,3 +367,19 @@ Two smaller items A′ must not forget:
   the first A′ run.
 - M02's tie rule costs ~0.03 R per event at the project's 2:1 geometry. A′ must
   subtract that before reading a small negative expectancy as absence of edge.
+
+---
+
+## 9. Owner decision, 2026-08-19 — the verdict above is unchanged
+
+Recorded here so the file is not read out of date. **The verdict of this gate
+remains `G1_INDETERMINATE`**, T3 as frozen remains failed, and no control was
+re-run, re-scored or re-interpreted.
+
+The owner chose **option 3** of `G1_SPEC.md` §7 A3: A3 is not adopted, the
+apparatus properties demonstrated here are accepted as sufficient to proceed,
+and T3 is to be re-frozen for a future gate — prospectively, and not using
+Phase A′ results. That is a decision about what happens next, not a re-reading
+of what this document measured.
+
+Full record: `reports/c50/G1_T3_DECISION.md`.

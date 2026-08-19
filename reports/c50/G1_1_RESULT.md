@@ -371,12 +371,15 @@ guard is genuinely exercised.
 ## 10. Next allowed step under C5.0
 
 **Phase A′ is now eligible, and eligibility is not permission.** Two things
-stand between here and an A′ run, and only one of them is mine:
+stood between here and an A′ run; the first is now decided, the second binds
+A′ itself:
 
-1. **The T3 decision** (`G1_SPEC.md` §7 A3) is still open and still the
-   owner's. Three options are recorded there; the recommendation remains
-   option 3 — re-freeze T3 for a future gate, take the apparatus properties as
-   demonstrated.
+1. **The T3 decision** (`G1_SPEC.md` §7 A3) was taken by the owner on
+   2026-08-19: **option 3** — A3 not adopted, G1's verdict stays
+   `G1_INDETERMINATE`, the apparatus properties are accepted as demonstrated,
+   and T3 is re-frozen prospectively for a future gate without using A′
+   results. Governed record: `reports/c50/G1_T3_DECISION.md`.
+   **Phase A′ is therefore UNBLOCKED**, and unblocked is still not started.
 2. **When A′ does start, it declares its trials first.** Every hypothesis it
    evaluates is a new declaration on top of the 100, before its result is
    looked at. A′ starting at `n_trials = 100` and ending at 100 would mean it

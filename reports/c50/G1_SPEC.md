@@ -339,3 +339,24 @@ pick:
 3. **Re-freeze T3 for a future gate** and record G1 as indeterminate on this one
    line, with the apparatus properties taken as demonstrated. This is the
    recommendation: it neither rewrites history nor discards work.
+
+### A3 — owner decision (2026-08-19): option 3, and A3 stays NOT ADOPTED
+
+The three-way choice above was put to the project owner and resolved:
+**option 3**. Nothing in A3 above is edited; this records what was decided
+about it.
+
+- **A3 is not adopted for G1.** The G1 verdict remains **`G1_INDETERMINATE`**,
+  and T3 as frozen remains recorded as failed. Option 1 was declined on the
+  argument A3 itself states against it.
+- **The apparatus properties are accepted as demonstrated** — leakage
+  controls, purge/embargo/CPCV, sample weights and uniqueness, DSR
+  calibration, negative-control FPR — which is what makes Phase A′ eligible
+  without a re-run.
+- **T3 must be re-frozen prospectively** before any future gate that depends
+  on the directional-symmetry property, and the replacement criterion **must
+  not be chosen using Phase A′ results**.
+- The corrected semantics apply to gates declared **after 2026-08-19** only.
+
+Governed record: `reports/c50/G1_T3_DECISION.md`, machine-readable in
+`reports/c50/g1_governance.json`.

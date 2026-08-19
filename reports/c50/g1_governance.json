@@ -1,0 +1,73 @@
+{
+  "schema": "c50.governance/1",
+  "note": "Machine-readable governance record for the C5.0 G1 / G1.1 gates. Historical facts are immutable; prospective decisions carry an effective date and never apply backwards. Human record: reports/c50/G1_T3_DECISION.md. Asserted by tests/test_g1_governance.py.",
+
+  "historical_fact": {
+    "gate": "G1",
+    "verdict": "G1_INDETERMINATE",
+    "result_document": "reports/c50/G1_RESULT.md",
+    "criteria_document": "reports/c50/G1_SPEC.md",
+    "frozen_criterion_that_failed": "T3",
+    "t3_as_frozen": "share of replications with positive mean gross expectancy in [0.394, 0.606]; measured 0.0350 after the A1 fix; FAIL",
+    "a3_adopted": false,
+    "immutable": true,
+    "retroactive_pass_permitted": false,
+    "reinterpretation_permitted": false,
+    "rerun_for_cleaner_verdict_permitted": false
+  },
+
+  "prospective_decision": {
+    "id": "G1_T3_OPTION_3",
+    "option": 3,
+    "option_text": "Re-freeze T3 for a future gate and record G1 as indeterminate on this one line, with the apparatus properties taken as demonstrated.",
+    "source": "reports/c50/G1_SPEC.md §7 A3, three-way choice",
+    "decided_by": "project owner",
+    "recorded": "2026-08-19",
+    "effective_from": "2026-08-19",
+    "applies_to": "gates declared on or after effective_from",
+    "applies_retroactively": false,
+    "apparatus_accepted_for": "Phase A-prime",
+    "accepted_properties": [
+      "leakage controls",
+      "purge / embargo / CPCV behaviour",
+      "sample-weight and uniqueness behaviour",
+      "DSR calibration behaviour",
+      "negative-control false-positive-rate behaviour"
+    ],
+    "t3_treatment": "specification problem for that historical gate; neither erased nor rewritten",
+    "t3_refreeze_required_before": "any future gate that depends on the directional-symmetry property T3 names",
+    "t3_refreeze_constraint": "the replacement criterion must not be chosen using Phase A-prime results",
+    "corrected_t3_semantics_apply": "prospectively only"
+  },
+
+  "trial_accounting": {
+    "gate": "G1.1",
+    "verdict": "G1_1_PASS",
+    "result_document": "reports/c50/G1_1_RESULT.md",
+    "criteria_document": "reports/c50/TRIAL_REGISTRY_SPEC.md",
+    "canonical_scope": {
+      "research_objective": "trade_expectancy",
+      "profile": "swing",
+      "symbol": "BTCUSDT",
+      "target_family": "trade_r"
+    },
+    "confirmed": 83,
+    "uncertain": 17,
+    "canonical_n_trials": 100,
+    "count_basis": "conservative",
+    "derived_by": "validation.trial_registry.TrialRegistry.n_trials over validation.trial_history.ALL_TRIALS",
+    "witness_not_input": "The number is recorded here so a reader can check it. Phase A-prime must obtain it from the registry, never from this file and never as a literal.",
+    "historical_uncertainty_preserved": "The uncertain band of 17 is pre-C1 and stays a band. This record must not present the reconstruction as more precise than G1_1_RESULT.md §4.3 states."
+  },
+
+  "phase_a_prime": {
+    "status": "UNBLOCKED",
+    "unblocked_on": "2026-08-19",
+    "started": false,
+    "entry_conditions": [
+      "deflate against the registry-derived conservative count for the canonical scope",
+      "declare every new hypothesis in the registry before its result is looked at",
+      "n_trials must not become a free parameter inside A-prime"
+    ]
+  }
+}
