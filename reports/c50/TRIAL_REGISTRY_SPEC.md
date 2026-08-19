@@ -464,16 +464,31 @@ for one case the audit named: a registry losing a whole, well-formed line
 read as a valid but smaller registry — a silent undercount, the one direction
 of error that always flatters a result. Every record now carries `seq`
 (contiguous from 0) and `prev_sha256` (the hash of the preceding line), so
-removal, reordering and in-place editing all fail closed. The chain fields
-describe a line's position in the file, not the research choice, so they are
-excluded from identity and from the idempotent-replay comparison.
+removal, reordering and in-place editing fail closed **unless the chain is
+recomputed**. The chain fields describe a line's position in the file, not the
+research choice, so they are excluded from identity and from the
+idempotent-replay comparison.
 
-**Honest bound, stated rather than papered over:** truncating *complete* lines
-from the end of the file cannot be detected from the file alone — no
-self-describing format can. The mitigation is external and already required:
-§7.1 pins a registry content hash into every published DSR, so a result
-computed against a fuller registry stays checkable against the file it
-actually used.
+**Honest bound, corrected after a second audit round.** The first statement of
+A1 claimed removal and reordering "all fail closed", and that was too broad.
+The chain is self-contained: anyone who deletes a line and recomputes `seq`
+and `prev_sha256` produces a file that validates, and truncating complete
+lines from the end needs no recomputation at all. **No file-local format can
+prevent either.** What the chain buys is that accidental damage and casual
+edits fail closed rather than reading as a smaller registry — worth having,
+and not the same as tamper-proof.
+
+The defences that do cover a deliberate rewrite are external to the file, and
+all three already exist:
+
+1. **§7.1 pins the registry's content hash into every published DSR**, so a
+   result stays checkable against the file it actually used.
+2. **The reconstructed history is code** (§8.4), so its trial ids are
+   re-derivable. `trial_history.missing_from(registry)` reports any historical
+   record absent from a registry however carefully the file was rewritten
+   around it, and a test drives exactly that scenario.
+3. **The registry file is materialized under version control's gaze** by a
+   deterministic runner: re-running it reproduces the same bytes.
 
 **A2 — the guardrail keys on `n_trials`, not on a callee name (added
 2026-08-18, after the independent audit).** §7.3 was implemented as a scan for

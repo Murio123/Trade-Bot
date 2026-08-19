@@ -188,11 +188,21 @@ not hash to its own `trial_id`, a truncated final line, and — after amendment
 A1 — any removed, reordered or in-place-edited record, via a `seq` +
 `prev_sha256` chain on every line.
 
-One bound is stated rather than papered over: truncating *complete* lines from
-the end of the file cannot be detected from the file alone, and no
-self-describing format can do it. The mitigation is external and already
-required — every published DSR pins the registry's content hash, so a result
-stays checkable against the file it actually used.
+One bound is stated rather than papered over, and the second audit round was
+right to force it wider than I first wrote it: the chain is **self-contained**.
+Anyone who deletes a line and recomputes `seq`/`prev_sha256` produces a file
+that validates, and truncating complete lines from the end needs no
+recomputation at all. No file-local format can prevent either. What the chain
+buys is that accidental damage and casual edits fail closed instead of reading
+as a smaller registry — worth having, and not the same as tamper-proof.
+
+Three external defences cover the deliberate case, and all three exist:
+provenance pins the registry's content hash into every published DSR; the
+reconstructed history is code, so `trial_history.missing_from()` reports any
+historical record absent from a registry however carefully the file was
+rewritten around it (a test forges exactly that file and catches the
+deletion); and the runner is deterministic, so re-materializing reproduces the
+same bytes.
 
 There is no delete, no amend, no compact. The absence is the mechanism, and a
 test asserts it.
@@ -289,9 +299,9 @@ built.
 
 ## 9. Verification
 
-- **Targeted tests: 121.** `tests/test_trial_registry.py` (73),
-  `tests/test_research_dsr.py` (25), `tests/test_trial_history.py` (23).
-- **Full suite: 1919 passed, 0 failed.**
+- **Targeted tests: 125.** `tests/test_trial_registry.py` (73),
+  `tests/test_research_dsr.py` (28), `tests/test_trial_history.py` (24).
+- **Full suite: 1919 passed, 0 failed** — run twice, 246s and 255s.
 - Two pre-existing guards fired on the new code and were addressed without
   weakening either:
   - the single-Sharpe-implementation guard matched
@@ -325,9 +335,30 @@ all of them in the direction that matters:
    stops the obvious spelling of a bypass is not a guardrail. Fixed by A2, and
    each named evasion now has a test.
 
-The audit found no defect in family counting, in the ancestry closure, or in
-the reconstruction arithmetic, and confirmed no sealed-holdout access, no
-frozen-artifact modification, and no change to the G1 verdict.
+A second round returned **FAIL** again, on two counts, and both stand:
+
+4. **Amendment A1 overclaimed.** It said removal and reordering "all fail
+   closed"; they do not, if the chain is recomputed. Corrected to what is
+   actually true, with the three external defences named — including
+   `missing_from()`, which is new and which catches the exact forged file the
+   audit described.
+5. **The strengthened guardrail had a false positive.** Flagging every string
+   constant `"n_trials"` would have failed a future reporter reading
+   `payload["n_trials"]` back out of a result — pushing it toward hiding the
+   number, the opposite of the intent. The scan now looks only at call
+   keywords and `**{...}` literals; four legitimate read patterns are tested
+   as *not* flagged, alongside the four evasions that are.
+
+Across both rounds the audit found no defect in family counting, in the
+ancestry closure, or in the reconstruction arithmetic, and confirmed no
+sealed-holdout access, no frozen-artifact modification, and no change to the
+G1 verdict.
+
+The pattern in my own errors is worth naming: every one was a claim that a
+protection was **broader than it was** — a hash that pinned less than it
+implied, a chain that detected less than A1 said, a guard whose name-matching
+looked complete. That is the same shape as the failure this whole stage exists
+to close, one level up.
 
 Two tests I had written were also weaker than they read: the tampering tests
 mutated the file in ways the new chain check catches *first*, which would have

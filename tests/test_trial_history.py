@@ -7,14 +7,16 @@ drop a stage.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 
 import pytest
 
-from validation.trial_history import ALL_TRIALS, populate, summary
+from validation.trial_history import (ALL_TRIALS, missing_from, populate,
+                                      summary)
 from validation.trial_registry import (CONFIRMING_TIERS, ORIGIN_RECONSTRUCTED,
                                        TIER_INFERENCE, FamilyScope,
-                                       TrialRegistry)
+                                       TrialRegistry, canonical_json)
 from tools.g1_1_trial_ledger import A_PRIME_SCOPE, SCOPES, build, format_report
 
 
@@ -92,6 +94,36 @@ def test_populating_twice_does_not_inflate_the_count(registry):
     populate(registry)
     assert registry.n_trials().as_dict() == first
     assert len(registry.declarations()) == len(ALL_TRIALS)
+
+
+def test_a_removed_historical_trial_is_caught_from_outside_the_file(registry):
+    """The chain inside the file is not enough, and the audit was right to
+    say so: remove a line, recompute `seq` and `prev_sha256`, and the file
+    validates. Nothing file-local can prevent that.
+
+    What can is that this history is code. The ids are re-derivable, so the
+    deletion shows up regardless of how carefully the file was rewritten.
+    """
+    assert missing_from(registry) == ()
+
+    rows = registry.read_raw()
+    victim = rows[7]["trial_id"]
+    kept = rows[:7] + rows[8:]
+    prev = ""
+    with open(registry.path, "w") as fh:
+        for n, row in enumerate(kept):
+            row = {k: v for k, v in row.items()
+                   if k not in ("seq", "prev_sha256")}
+            row["seq"] = n
+            row["prev_sha256"] = prev
+            line = canonical_json(row)
+            fh.write(line + "\n")
+            prev = hashlib.sha256(line.encode()).hexdigest()
+
+    # The forged file passes every check the file itself can make...
+    assert len(registry.declarations()) == len(ALL_TRIALS) - 1
+    # ...and the deletion is caught anyway.
+    assert missing_from(registry) == (victim,)
 
 
 def test_the_materialized_registry_is_byte_stable(tmp_path):

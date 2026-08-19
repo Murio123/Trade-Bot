@@ -595,6 +595,22 @@ def populate(registry: TrialRegistry) -> list[TrialRecord]:
     return declare_all(registry, ALL_TRIALS)
 
 
+def missing_from(registry: TrialRegistry) -> tuple[str, ...]:
+    """Historical trials that are absent from `registry`.
+
+    The registry's own `seq`/`prev_sha256` chain catches accidental damage and
+    naive edits, but it is self-contained: anyone who removes a line and
+    recomputes the chain produces a file that validates. No file-local format
+    can defend against that, so the defence has to come from outside the file.
+
+    For the reconstructed history it does: this table is code, so the 50
+    trial ids are re-derivable, and a removed historical record shows up here
+    no matter how carefully the file was rewritten around it.
+    """
+    present = set(registry.declarations())
+    return tuple(r.trial_id for r in ALL_TRIALS if r.trial_id not in present)
+
+
 def summary() -> dict[str, Any]:
     """Counts by era and by evidence quality, for the result document."""
     by_stage: dict[str, dict[str, int]] = {}

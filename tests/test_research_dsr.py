@@ -236,12 +236,16 @@ def _direct_dsr_calls(path: str) -> list[int]:
     tree = ast.parse(open(path).read())
     hits = set()
     for node in ast.walk(tree):
-        if isinstance(node, ast.keyword) and node.arg == "n_trials":
-            hits.add(node.value.lineno)
-        elif isinstance(node, ast.Constant) and node.value == "n_trials":
-            # getattr(m, "deflated_sharpe")(r, **{"n_trials": 1}), and any
-            # other route that spells the argument as data.
-            hits.add(node.lineno)
+        if not isinstance(node, ast.Call):
+            continue
+        for kw in node.keywords:
+            if kw.arg == "n_trials":
+                hits.add(kw.value.lineno)
+            elif kw.arg is None and isinstance(kw.value, ast.Dict):
+                # `f(**{"n_trials": 1})` — the argument spelled as data.
+                for key in kw.value.keys:
+                    if isinstance(key, ast.Constant) and key.value == "n_trials":
+                        hits.add(key.lineno)
     return sorted(hits)
 
 
@@ -309,13 +313,29 @@ def test_the_guardrail_survives_the_obvious_evasions(tmp_path, source):
     assert _direct_dsr_calls(str(offender)) == [3]
 
 
-def test_the_guardrail_does_not_flag_reading_a_trial_count(tmp_path):
-    """Reporting `n_trials` is not supplying one. A guard that failed here
-    would push future reporters toward hiding the number instead."""
+@pytest.mark.parametrize("source", [
+    # Attribute access on a result.
+    "def render(result):\n"
+    "    return f'deflated against {result.dsr.n_trials} trials'\n",
+    # A serialized result read back out of its payload.
+    "def render(payload):\n"
+    "    return payload['dsr']['n_trials']\n",
+    # The same, defensively.
+    "def render(payload):\n"
+    "    return payload.get('n_trials', 0)\n",
+    # A report column header.
+    "COLUMNS = ['trial_id', 'n_trials', 'dsr']\n",
+])
+def test_the_guardrail_does_not_flag_reading_a_trial_count(tmp_path, source):
+    """Reporting `n_trials` is not supplying one.
+
+    A guard that failed here would push future reporters toward hiding the
+    number — the opposite of what this stage is for. Only a count handed *to*
+    a call is flagged, which is why the scan looks at call keywords and at
+    `**{...}` literals rather than at every occurrence of the string.
+    """
     reader = tmp_path / "reporter.py"
-    reader.write_text(
-        "def render(result):\n"
-        "    return f'deflated against {result.dsr.n_trials} trials'\n")
+    reader.write_text(source)
     assert _direct_dsr_calls(str(reader)) == []
 
 
