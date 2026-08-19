@@ -299,7 +299,7 @@ built.
 
 ## 9. Verification
 
-- **Targeted tests: 141.** `tests/test_trial_registry.py` (77),
+- **Targeted tests: 142.** `tests/test_trial_registry.py` (77),
   `tests/test_research_dsr.py` (29), `tests/test_trial_history.py` (24),
   `tests/test_g1_governance.py` (12).
 - **Full suite: 1919 passed, 0 failed** — run twice, 246s and 255s.
