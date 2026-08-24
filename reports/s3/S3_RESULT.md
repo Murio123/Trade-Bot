@@ -25,6 +25,13 @@ unchanged**.
    dates read as 12 blocks where `S3_SPEC.md` §7 defines 11. Partial tails are
    now dropped.
 
+A follow-up audit found a fourth, smaller defect and it is fixed too: the
+per-date event count reported the size of the *ranking* rather than the number
+of outcomes the rates were measured over, overstating the sample by every
+unresolved row (6,125 against the true 6,107). Ranked symbols and resolved
+outcomes are different counts — `K` must come from the ranking, the sample size
+must not.
+
 Net effect on the verdict: none. Every lift moved further below 1
 (0.847–0.939, previously 0.868–0.947), the same two families are `REMOVE`, and
 the same four are `UNKNOWN`. **The corrections made the result more negative,
@@ -58,7 +65,7 @@ it.
 |---|---|
 | decision dates | **66** of S2's 98 — those with ≥25 eligible symbols |
 | span | 2020-08-01 → 2026-02-01 |
-| events | 6,125 (symbol, date) resolved outcomes |
+| events | 6,107 (symbol, date) resolved outcomes |
 | **independent blocks** | **11** (six monthly dates each; a partial tail is dropped) |
 | feature coverage | **1.000** for all six rules — no missingness |
 | regime dates | bull 40 · bear 16 · range 10 |
@@ -176,7 +183,7 @@ the author?" — here it did the opposite.
 ## 7. Limitations, stated rather than discovered later
 
 1. **Eleven blocks.** Every interval rests on 11 independent 180-day windows,
-   not on 6,125 rows. A true lift of 1.1 would not be reliably detectable at
+   not on 6,107 rows. A true lift of 1.1 would not be reliably detectable at
    this sample size, so `NO_SIGNAL` means *these rules did not show value*, not
    *no simple rule can have value*.
 2. **2018 → mid-2020 is absent**, including the window S2 measured at a 52%

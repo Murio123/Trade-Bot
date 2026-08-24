@@ -94,7 +94,9 @@ def test_an_unresolved_symbol_is_excluded_from_rates_not_from_the_ranking():
     assert res.k == 5, "K comes from the eligible ranking, not from labels"
     # The top five are S00..S04; S00 has no outcome, so the rate is over four.
     assert res.selection_rate == 1.0
-    assert res.n_resolved == 25
+    assert res.n_resolved == 24, (
+        "n_resolved counts measured outcomes, not ranked symbols; conflating "
+        "them overstates the sample by every unresolved row")
 
 
 # --- dependence -----------------------------------------------------------

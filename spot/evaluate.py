@@ -154,7 +154,12 @@ def evaluate_date(*, asof: str, regime: str, values: dict[str, float],
 
     return DateResult(
         asof=asof, regime=regime, n_eligible=n_eligible,
-        n_resolved=len(ranked), k=k,
+        # Ranked symbols and resolved outcomes are different counts and must
+        # not be conflated: `k` comes from the ranking (selection may not
+        # depend on outcome availability), while `n_resolved` is what the
+        # rates were actually measured over. Reporting the ranking size as an
+        # event count overstates the sample by the unresolved rows.
+        n_resolved=sum(1 for s in ranked if s in labels), k=k,
         selection_rate=rate(top), universe_rate=rate(ranked),
         selection_median_return=med(top, "terminal_return"),
         universe_median_return=med(ranked, "terminal_return"),

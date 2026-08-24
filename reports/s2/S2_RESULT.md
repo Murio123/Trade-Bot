@@ -112,7 +112,7 @@ before it matured.
 
 The base rate is the headline, but it is not the most useful number here.
 
-| across all 7,324 resolved events | value |
+| across all 6,397 resolved events | value |
 |---|---|
 | median MAE (deepest drawdown in the window) | **−54.8%** |
 | median terminal return at 180 days | **−33.1%** |
