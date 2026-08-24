@@ -1,0 +1,97 @@
+{
+  "schema": "spot.governance/1",
+  "recorded": "2026-08-24",
+  "note": "Stage-close record for the spot discovery track after S3. Measured facts are immutable; the next-step decision is open and has not been taken. Human record: reports/s3/SPOT_TRACK_STATUS.md. Asserted by tests/test_spot_governance.py.",
+
+  "established_facts": {
+    "immutable": true,
+    "stages": {
+      "S0": {"verdict": "SPOT_ARCHITECTURE_READY", "doc": "reports/s0/SPOT_DISCOVERY_ARCHITECTURE.md"},
+      "S1": {"verdict": "S1_PASS", "doc": "reports/s1/S1_RESULT.md"},
+      "S2": {"verdict": "S2_PASS", "doc": "reports/s2/S2_RESULT.md"},
+      "S3": {"verdict": "S3_NO_SIGNAL", "doc": "reports/s3/S3_RESULT.md"}
+    },
+    "target": {
+      "name": "CLEAN_2X",
+      "horizon_days": 180,
+      "upper_barrier": 2.0,
+      "lower_barrier": 0.6,
+      "base_rate": 0.2085,
+      "resolved_events": 6397,
+      "positives": 1334,
+      "decision_dates": 98
+    },
+    "panel": {
+      "symbols": 734,
+      "daily_bars": 826301,
+      "delisted_symbols": 250,
+      "survivorship_gap_pp": 0.04,
+      "survivorship_gap_note": "near zero for this metric on this horizon; an earlier +2.68pp figure was an artifact of an eligibility defect, corrected in S2 Amendment A1"
+    },
+    "s3": {
+      "dates": 66,
+      "resolved_events": 6107,
+      "independent_blocks": 11,
+      "universe_rate": 0.257,
+      "lift_range": [0.847, 0.939],
+      "classifications": {
+        "B4": "PRELIMINARY_UNKNOWN", "B5": "PRELIMINARY_UNKNOWN",
+        "F1": "PRELIMINARY_REMOVE", "F2": "PRELIMINARY_UNKNOWN",
+        "F3": "PRELIMINARY_REMOVE", "F4": "PRELIMINARY_UNKNOWN"
+      },
+      "no_family_earned_keep": true
+    },
+    "trial_registry": {
+      "family": {"research_objective": "spot_2x_discovery", "profile": null,
+                 "symbol": null, "target_family": "clean_2x_180d"},
+      "n_trials": 6,
+      "futures_family_n_trials": 100,
+      "families_are_not_mixed": true
+    },
+    "post_hoc_observation": {
+      "claim": "F4 ranks continuous forward returns with rho +0.136, CI [0.071, 0.205]; B4 with +0.093, CI [0.029, 0.167] - while both double less often than the universe",
+      "status": "OBSERVATION_NOT_HYPOTHESIS",
+      "constraint": "seen after the fact, on the same data, against a target the rules were not declared for; nothing may be built on it without a fresh registration"
+    }
+  },
+
+  "open_decision": {
+    "taken": false,
+    "decided_by": "project owner",
+    "options": {
+      "A": "ship a facts-only screener; no selection claim, no probability, no Buy/Avoid",
+      "B": "S3b: new families against the same CLEAN_2X target, on top of n_trials = 6",
+      "C": "re-scope the target (e.g. BTC-relative outperformance) - a governance decision on the scale of S0 section 3"
+    },
+    "implementer_recommendation": {
+      "value": "A, then C conditionally",
+      "binding": false,
+      "conditions_on_C": [
+        "target frozen before any inspection",
+        "trials registered before outcomes are read",
+        "the most recent 18 months sealed as a holdout before any feature is looked at",
+        "the post-hoc origin of the idea stated in the spec"
+      ],
+      "against_B": "at 11 blocks against a tail target the sample cannot separate a small real effect from search"
+    },
+    "named_trap": "choosing C without the freeze - replacing a failed frozen criterion with one that passes, after seeing results. Same shape as G1_SPEC.md section 7 A3."
+  },
+
+  "binding_constraints": [
+    "S4 is not started: no scanner, no combined score, no ranking model",
+    "no feature may be combined with another; spot/ contains no combiner",
+    "no unregistered experimentation; a new family is a trial declared first",
+    "the S2 target is not edited; a different target is a new spec",
+    "Phase A-prime of the futures track remains paused, G1 stays G1_INDETERMINATE",
+    "no runtime, futures, database, scheduler or Telegram code is touched"
+  ],
+
+  "repository": {
+    "branch": "claude/btc-telegram-trading-bot-1avo98",
+    "commits_ahead_of_origin": 12,
+    "pushed": false,
+    "push_blocker": "HTTP 403: local credential umutmost-svg is not the owner of Murio123/Trade-Bot; needs the owner's authentication",
+    "full_suite_passing": 2054,
+    "codex_verdict": "SAFE_TO_PUSH"
+  }
+}
