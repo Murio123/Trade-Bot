@@ -89,6 +89,32 @@ def test_a_wrapped_asset_is_rejected():
     assert screen(df, asof_after(df), base="WBTC").reason == "wrapped"
 
 
+def test_a_symbol_that_stopped_trading_before_the_date_is_stale():
+    """The defect an audit found: 938 rows of coins nobody could have bought.
+
+    A symbol delisted in 2022 keeps a perfectly consecutive final 30 bars
+    forever, so a rule that only checks consecutiveness admits it at every
+    later date — and then counts its death as a failure. Eligibility has to be
+    anchored to the decision date, not to the symbol's own last bar.
+    """
+    df = frame(300)
+    long_after = asof_after(df) + 400 * DAY
+    assert screen(df, long_after).reason == "stale"
+
+
+def test_a_symbol_trading_up_to_the_date_is_eligible():
+    df = frame(300)
+    assert screen(df, asof_after(df)).reason == "eligible"
+
+
+def test_dying_after_the_decision_date_does_not_affect_eligibility():
+    """The other half of the rule, and the half that protects survivorship:
+    a coin trading at t is eligible at t however soon it dies afterwards."""
+    df = frame(300)
+    asof = asof_after(df)
+    assert screen(df, asof).eligible is True
+
+
 def test_a_gap_in_the_last_30_days_is_inactive():
     df = frame(300)
     df = pd.concat([df.iloc[:280], df.iloc[285:]], ignore_index=True)

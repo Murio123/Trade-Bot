@@ -3,6 +3,36 @@
 Criteria: `reports/s3/S3_SPEC.md`, frozen before any outcome was computed.
 Trials declared before any label was read. No S2 definition was changed.
 
+## Amendment A1 — three audit defects fixed, all numbers recomputed (2026-08-24)
+
+An independent audit returned `NOT_SAFE` on the first S3 run with three real
+defects. All are fixed, everything below is recomputed, and **the verdict is
+unchanged**.
+
+1. **Eligibility admitted coins that had already stopped trading.** Rule E8
+   checked that a symbol's last 30 *observed* bars were consecutive rather than
+   that they were the last 30 days *before the decision date*, so a coin
+   delisted in 2022 stayed eligible at every later date and then resolved as a
+   failure. 938 such rows. This is S2's defect; `S2_RESULT.md` Amendment A1
+   carries the correction, and it moved the universe base rate from 18.21% to
+   **20.85%** and the survivorship gap from +2.68 pp to **+0.04 pp**.
+2. **The ranking set was filtered by label availability.** Symbols whose
+   outcome was censored or gap-unresolved were removed *before* `K` was
+   computed, letting information from after the decision reshape the shortlist.
+   The ranking is now over every eligible symbol with a feature value;
+   unresolved symbols are excluded from the rates only.
+3. **A partial trailing bootstrap block was resampled as a whole one.** 67
+   dates read as 12 blocks where `S3_SPEC.md` §7 defines 11. Partial tails are
+   now dropped.
+
+Net effect on the verdict: none. Every lift moved further below 1
+(0.847–0.939, previously 0.868–0.947), the same two families are `REMOVE`, and
+the same four are `UNKNOWN`. **The corrections made the result more negative,
+not less** — worth stating, because a fix applied after seeing results invites
+the question of whom it helped.
+
+---
+
 ## Verdict: `S3_NO_SIGNAL`
 
 > **No simple pre-declared feature family ranks `CLEAN_2X(180d)` better than
@@ -26,32 +56,31 @@ it.
 
 | | |
 |---|---|
-| decision dates | **67** of S2's 98 — those with ≥25 eligible symbols |
+| decision dates | **66** of S2's 98 — those with ≥25 eligible symbols |
 | span | 2020-08-01 → 2026-02-01 |
-| events | 7,029 (symbol, date) resolved outcomes |
-| **independent blocks** | **12** (six monthly dates each) |
+| events | 6,125 (symbol, date) resolved outcomes |
+| **independent blocks** | **11** (six monthly dates each; a partial tail is dropped) |
 | feature coverage | **1.000** for all six rules — no missingness |
-| regime dates | bull 41 · bear 16 · range 10 |
+| regime dates | bull 40 · bear 16 · range 10 |
 
 The ≥25 threshold discarded 2018-01 → 2020-07, as `S3_SPEC.md` §2 said it
-would. **The universe rate over these 67 dates is 26.8%, not S2's 18.21%** —
-different date set, and date-weighted rather than pooled. S2's number is
-unchanged and is not restated by this; the two are simply not the same
-quantity, and every comparison below uses the 26.8% figure computed on the same
-dates as the rules it judges.
+would. **The universe rate over these 66 dates is 25.7%, not S2's 20.85%** —
+a different date set, and date-weighted rather than pooled. Both numbers are
+correct and they are not the same quantity; every comparison below uses the
+25.7% figure, computed on exactly the dates that judge the rules.
 
 ## 2. Baselines first
 
 | baseline | CLEAN_2X | median 180d | vs BTC (log) | median MAE |
 |---|---|---|---|---|
-| **B2 eligible universe (equal weight)** | **0.268** | −0.034 | **−0.365** | −0.477 |
-| **B1 BTC hold** | 0.134 | **+0.159** | 0.000 | **−0.206** |
-| **B0 random eligible** (1,000 seeded draws/date) | 0.268 | — | — | — |
+| **B2 eligible universe (equal weight)** | **0.257** | −0.091 | **−0.374** | −0.483 |
+| **B1 BTC hold** | 0.121 | **+0.159** | 0.000 | **−0.213** |
+| **B0 random eligible** (1,000 seeded draws/date) | 0.257 | — | — | — |
 | **B3 cap-weighted** | **UNAVAILABLE** — no trustworthy point-in-time market cap (S0 §6); today's cap applied historically is a leak and was not approximated | | | |
 
 This table is the honest framing for everything after it. **The eligible
-universe doubles twice as often as BTC (26.8% vs 13.4%) and still loses to it**
-— median terminal −3.4% against BTC's +15.9%, a −0.365 log gap, with more than
+universe doubles twice as often as BTC (25.7% vs 12.1%) and still loses to it**
+— median terminal −9.1% against BTC's +15.9%, a −0.374 log gap, with more than
 twice the drawdown. Chasing the 2x outcome is not the same as making money, and
 the baseline that matters is the boring one.
 
@@ -61,16 +90,18 @@ Top quintile, `K = ceil(0.20 × N)`, aggregated as the mean of per-date values.
 
 | id | family | rate | universe | **lift** | vs BTC | MAE | Spearman ρ | ρ 90% CI | rate-diff 90% CI | class |
 |---|---|---|---|---|---|---|---|---|---|---|
-| B4 | momentum 6-1 | 0.254 | 0.268 | **0.947** | −0.317 | −0.467 | **+0.096** | [0.034, 0.163] | [−0.043, 0.014] | UNKNOWN |
-| B5 | relative strength 90d | 0.244 | 0.268 | 0.909 | −0.389 | −0.495 | +0.003 | [−0.035, 0.045] | [−0.065, 0.013] | UNKNOWN |
-| **F1** | RS persistence | 0.251 | 0.268 | 0.937 | −0.307 | −0.464 | −0.027 | [−0.061, 0.013] | **[−0.033, −0.002]** | **REMOVE** |
-| **F2** | distance above 200d MA | 0.246 | 0.268 | 0.919 | −0.361 | −0.478 | +0.042 | [−0.016, 0.106] | [−0.060, 0.014] | UNKNOWN |
-| **F3** | abnormal participation | 0.233 | 0.268 | **0.868** | **−0.464** | **−0.513** | **−0.086** | [−0.125, −0.045] | **[−0.068, −0.003]** | **REMOVE** |
-| **F4** | drawdown from 180d high | 0.248 | 0.268 | 0.926 | **−0.252** | **−0.413** | **+0.136** | [0.064, 0.206] | [−0.046, 0.003] | UNKNOWN |
+| B4 | momentum 6-1 | 0.230 | 0.257 | 0.896 | −0.330 | −0.474 | **+0.093** | [0.029, 0.167] | [−0.055, 0.000] | UNKNOWN |
+| B5 | relative strength 90d | 0.229 | 0.257 | 0.891 | −0.389 | −0.503 | +0.005 | [−0.035, 0.048] | [−0.067, 0.007] | UNKNOWN |
+| **F1** | RS persistence | 0.237 | 0.257 | 0.922 | −0.328 | −0.472 | −0.030 | [−0.071, 0.011] | **[−0.034, −0.007]** | **REMOVE** |
+| **F2** | distance above 200d MA | 0.230 | 0.257 | 0.895 | −0.357 | −0.484 | +0.043 | [−0.018, 0.113] | [−0.066, 0.007] | UNKNOWN |
+| **F3** | abnormal participation | 0.218 | 0.257 | **0.847** | **−0.441** | **−0.517** | **−0.084** | [−0.124, −0.044] | **[−0.073, −0.011]** | **REMOVE** |
+| **F4** | drawdown from 180d high | 0.241 | 0.257 | **0.939** | **−0.261** | **−0.418** | **+0.136** | [0.071, 0.205] | [−0.036, 0.002] | UNKNOWN |
+
+Universe reference on the same dates: median vs BTC −0.374, median MAE −0.483.
 
 Secondary fixed Top-10 (product intuition only, not part of any verdict):
-0.251–0.283, i.e. the same picture. **Dates on which a rule beat the 95th
-percentile of matched random: 0% to 10%** — the frozen condition wanted a
+0.230–0.262, i.e. the same picture. **Dates on which a rule beat the 95th
+percentile of matched random: 1.5% to 9.1%** — the frozen condition wanted a
 majority.
 
 Per-family classification with the full seven-condition check is in
@@ -97,13 +128,13 @@ starts on top of 6, not on top of zero.
 ## 5. The one result that is not negative
 
 **F4 (distance from the 180-day high) and B4 (6-1 momentum) rank continuous
-forward returns better than chance**, with bootstrap intervals over 12 blocks
-that exclude zero: ρ = +0.136 [0.064, 0.206] and +0.096 [0.034, 0.163]. F4's
-top quintile also has the best BTC-relative outcome of any rule (−0.252 against
-the universe's −0.365) and the shallowest drawdown (−0.413 against −0.477).
+forward returns better than chance**, with bootstrap intervals over 11 blocks
+that exclude zero: ρ = +0.136 [0.071, 0.205] and +0.093 [0.029, 0.167]. F4's
+top quintile also has the best BTC-relative outcome of any rule (−0.261 against
+the universe's −0.374) and the shallowest drawdown (−0.418 against −0.483).
 
-And yet **F4's top quintile doubles *less* often than the universe** (0.248 vs
-0.268). Both statements are measured, and the tension between them is the most
+And yet **F4's top quintile doubles *less* often than the universe** (0.241 vs
+0.257). Both statements are measured, and the tension between them is the most
 informative thing S3 produced:
 
 > Ranking well on the *average* coin and ranking well on the *tail* are not the
@@ -144,13 +175,13 @@ the author?" — here it did the opposite.
 
 ## 7. Limitations, stated rather than discovered later
 
-1. **Twelve blocks.** Every interval rests on 12 independent 180-day windows,
-   not on 7,029 rows. A true lift of 1.1 would not be reliably detectable at
+1. **Eleven blocks.** Every interval rests on 11 independent 180-day windows,
+   not on 6,125 rows. A true lift of 1.1 would not be reliably detectable at
    this sample size, so `NO_SIGNAL` means *these rules did not show value*, not
    *no simple rule can have value*.
 2. **2018 → mid-2020 is absent**, including the window S2 measured at a 52%
    base rate. The rules were never tested on the most favourable era.
-3. **Bull-heavy**: 41 of 67 dates. The bear and range subsamples are 16 and 10
+3. **Bull-heavy**: 40 of 66 dates. The bear and range subsamples are 16 and 10
    dates — one to two blocks each, which is why the per-regime lifts in the
    artifact are diagnostic only and no verdict rests on them.
 4. **B3 is missing entirely.** Without point-in-time market cap there is no
@@ -162,8 +193,8 @@ the author?" — here it did the opposite.
 
 ## 8. Verification
 
-- **50 targeted tests**: `test_spot_features.py` (30), `test_spot_evaluate.py`
-  (20), covering point-in-time construction, that appending future bars cannot
+- **56 targeted tests**: `test_spot_features.py` (30), `test_spot_evaluate.py`
+  (20) plus 6 new regression tests for the audit defects, covering point-in-time construction, that appending future bars cannot
   change a computed value, determinism, tie-breaking, percentile Top-K under a
   changing universe, BTC alignment on timestamps rather than positions,
   block-resampled uncertainty, the frozen go/no-go rule in all four outcomes,
@@ -177,14 +208,15 @@ the author?" — here it did the opposite.
 
 ## 9. Product answer
 
-> *If I had pressed "🔎 Найти монеты" on any of these 67 months, would the
+> *If I had pressed "🔎 Найти монеты" on any of these 66 months, would the
 > shortlist have been better?*
 
-**No.** Against the eligible universe it would have doubled slightly less
-often. Against matched random selection it was indistinguishable on 90%+ of
-dates. Against simply holding BTC it would have been much worse on return and
-much worse on drawdown — the universe itself loses to BTC by ~36% in log terms
-over 180 days, and none of these rules closes that gap.
+**No.** Against the eligible universe it would have doubled less often — every
+rule, in every configuration tested. Against matched random selection it was
+indistinguishable on more than 90% of dates. Against simply holding BTC it
+would have been much worse on return and on drawdown: the universe itself
+loses to BTC by ~37% in log terms over 180 days, and none of these rules closes
+that gap.
 
 The nearest thing to good news is F4: its shortlist would have lost to BTC by
 less, and drawn down less, than a random eligible pick. That is a smaller loss,

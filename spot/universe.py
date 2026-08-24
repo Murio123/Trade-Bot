@@ -149,8 +149,24 @@ def screen_symbol(symbol: str, df: pd.DataFrame, asof_ms: int, *,
     if float(tail["quote_volume"].median()) < MIN_MEDIAN_DOLLAR_VOLUME:
         return verdict("illiquid", seen)
 
-    # E8: a bar on each of the last 30 calendar days. Daily bars are one per
-    # day, so 30 consecutive days must span exactly 29 day-steps.
+    # E8: a bar on each of the last 30 calendar days *before the decision
+    # date*. Two conditions, and the second one is the one that matters.
+    #
+    # The first version checked only that the last 30 observed bars were
+    # consecutive, which a symbol that stopped trading in 2022 satisfies
+    # forever: its final 30 bars stay consecutive no matter how much later the
+    # decision date is. An audit found 938 such stale rows still passing
+    # eligibility, 927 of which then resolved as delisted failures — a coin
+    # nobody could have bought, counted as a loss.
+    #
+    # This is the opposite error from survivorship bias and it is just as
+    # wrong: a symbol is eligible at `t` only if it was still trading at `t`.
+    # A symbol that trades at `t` and dies at `t + 90` remains eligible here,
+    # and its death remains a failure — that part is unchanged.
+    last_close = int(seen["close_time"].iloc[-1])
+    if asof_ms - last_close > DAY_MS:
+        return verdict("stale", seen)
+
     span_days = (int(tail["open_time"].iloc[-1])
                  - int(tail["open_time"].iloc[0])) // DAY_MS
     if len(tail) < ACTIVITY_WINDOW_DAYS or span_days != ACTIVITY_WINDOW_DAYS - 1:

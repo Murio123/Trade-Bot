@@ -117,17 +117,24 @@ def evaluate_date(*, asof: str, regime: str, values: dict[str, float],
     """
     from spot.features import rank_symbols, top_quantile_k
 
-    ranked = [s for s in rank_symbols(values, descending) if s in labels]
+    # The ranking is over every eligible symbol that has a feature value, and
+    # nothing else may narrow it. An earlier version filtered by `s in labels`
+    # first, which let outcome availability decide the selection set: symbols
+    # whose label was censored or gap-unresolved dropped out *before* K was
+    # computed, so the shortlist depended on information from after the
+    # decision. Unresolved symbols are excluded from the rates below, where
+    # they belong, and never from the selection.
+    ranked = rank_symbols(values, descending)
     resolved = [s for s in labels if s in values]
     coverage = len(values) / n_eligible if n_eligible else 0.0
 
     def rate(symbols: Iterable[str]) -> float | None:
         outcomes = [labels[s]["clean_2x"] for s in symbols
-                    if labels[s].get("clean_2x") is not None]
+                    if s in labels and labels[s].get("clean_2x") is not None]
         return float(np.mean(outcomes)) if outcomes else None
 
     def med(symbols: Iterable[str], field: str) -> float | None:
-        return _median([labels[s].get(field) for s in symbols])
+        return _median([labels[s].get(field) for s in symbols if s in labels])
 
     k = top_quantile_k(len(ranked), TOP_FRACTION) if ranked else 0
     top = ranked[:k]
@@ -165,13 +172,17 @@ def evaluate_date(*, asof: str, regime: str, values: dict[str, float],
 
 
 def blocks(dates: Sequence[Any], size: int = BLOCK_DATES) -> list[list[int]]:
-    """Consecutive non-overlapping runs of `size` dates, by position.
+    """Consecutive **complete** non-overlapping runs of `size` dates.
 
-    A trailing partial run is kept: dropping it would silently discard the most
-    recent months, which are the ones a reader most wants included.
+    A trailing partial run is dropped. S3_SPEC.md §7 defines a block as six
+    monthly dates because that is one 180-day horizon — the smallest unit that
+    does not overlap its neighbour. A one-date tail is not that, and resampling
+    it as though it were inflates the block count and understates the
+    interval. 67 dates give 11 blocks, which is what the spec says; keeping
+    the tail gave 12.
     """
-    return [list(range(i, min(i + size, len(dates))))
-            for i in range(0, len(dates), size)]
+    n = (len(dates) // size) * size
+    return [list(range(i, i + size)) for i in range(0, n, size)]
 
 
 def block_bootstrap(per_date: Sequence[float | None], *,

@@ -3,12 +3,50 @@
 Criteria: `reports/s2/S2_SPEC.md`, written **before a single label was
 computed**. Anchor: S1 (`reports/s1/S1_RESULT.md`), 734 USDT pairs.
 
+## Amendment A1 — corrected after the S3 audit (2026-08-24)
+
+**Every number below was recomputed.** An independent audit of S3 found a
+defect in eligibility rule E8: it checked that a symbol's last 30 *observed*
+bars were consecutive, not that they were the last 30 days *before the decision
+date*. A coin delisted in 2022 satisfies the first condition forever, so it
+kept passing eligibility at every later date — and then resolved as a failure.
+**938 such rows** were in the first S2 run, 927 of them counted as delisted
+failures: coins nobody could have bought, scored as losses.
+
+What changed:
+
+| | first run (wrong) | corrected |
+|---|---|---|
+| resolved events | 7,324 | **6,397** |
+| `CLEAN_2X` positives | 1,334 | **1,334** (unchanged) |
+| **base rate** | 18.21% | **20.85%** |
+| `delisted` outcomes | 981 | **54** |
+| median eligible universe | 84 | **68** |
+| **survivorship gap** | +2.68 pp | **+0.04 pp** |
+
+The last line is the one that matters most, and it reverses a headline claim
+(§2). The 2.68-point gap was almost entirely the defect: the stale rows were
+all dead coins, all failures, and all in the "later delisted" bucket, which
+dragged that bucket's rate down. Corrected, coins that were genuinely tradeable
+at the decision date and delisted later succeed at **20.68%** against the
+survivors' **20.90%** — a difference of two tenths of a percentage point.
+
+This is not "survivorship bias does not exist". It is: **for this metric, on
+this horizon, with eligibility correctly anchored to the decision date, the
+bias is negligible** — and it took a correctly built point-in-time panel to be
+able to say so rather than guess.
+
+The verdict is unchanged, and so is every conclusion that did not rest on the
+gap.
+
+---
+
 ## Verdict: `S2_PASS`
 
 The number the whole stage existed to produce:
 
-> **The base rate of `CLEAN_2X(180d)` is 18.2%** — 1,334 clean doubles out of
-> 7,324 resolved (symbol, decision-date) events across 98 monthly dates,
+> **The base rate of `CLEAN_2X(180d)` is 20.9%** — 1,334 clean doubles out of
+> 6,397 resolved (symbol, decision-date) events across 98 monthly dates,
 > 2018-01 → 2026-02.
 
 Neither pre-registered branch of `S2_SPEC.md` §9 is triggered. 18% is far
@@ -24,16 +62,16 @@ double". **The target defined in S0 §3 stands unchanged**, and so does the
 |---|---|
 | decision dates | **98** (first of each month, 2018-01-01 → 2026-02-01) |
 | **independent 180-day windows** | **16.3** — the honest N |
-| events | 7,353 · resolved **7,324** · gap-unresolved 29 · **censored 0** |
-| **base rate** | **0.1821** (1,334 hits) |
-| eligible symbols per date | min 0 · median **84** · max 238 |
+| events | 6,415 · resolved **6,397** · gap-unresolved 18 · **censored 0** |
+| **base rate** | **0.2085** (1,334 hits) |
+| eligible symbols per date | min 0 · median **68** · max 223 |
 | same-bar ties | **1** |
 
 `censored = 0` is the spec's own self-check passing: §1 stops the decision grid
 a full horizon before the panel ends, so no living coin can run off the edge.
 A non-zero count here would have been a bug report.
 
-The median eligible universe of **84** is below S0 §5.3's 150–250 estimate. The
+The median eligible universe of **68** is well below S0 §5.3's 150–250 estimate. The
 binding screen is the $5M liquidity floor, not the size cap — the cap of 250
 almost never binds. Worth knowing before S3 builds cross-sectional ranks on
 thin cross-sections.
@@ -45,21 +83,30 @@ dates, same rules — only the universe differs:
 
 | universe | base rate | n |
 |---|---|---|
-| **full (point-in-time)** | **0.1821** | 7,324 |
+| **full (point-in-time)** | **0.2085** | 6,397 |
 | survivors only — symbols still trading today | 0.2090 | 5,159 |
-| symbols that were later delisted | 0.1182 | 2,165 |
+| symbols that were later delisted | 0.2068 | 1,238 |
 
-> **Survivorship gap: +2.68 percentage points, +14.7% relative.**
+> **Survivorship gap: +0.04 percentage points (+0.2% relative).**
 
-A naive universe built from today's symbol list would report a 21% success rate
-where the truth is 18%. That is the size of the bias for *this* metric on
-*this* horizon. It is smaller than folklore suggests and entirely real: 2,165
-of 7,324 outcomes — **30%** — belong to coins that no longer exist, and they
-succeed at barely half the rate of the survivors.
+**This is a correction of what the first run of this document claimed**
+(+2.68 pp) and the reason is in Amendment A1: the gap was an artifact of the
+E8 defect, not a property of the market.
 
-**981 of those events are deaths inside the horizon**, resolved as failures by
-§4.1 rather than dropped. Every one of them would have been silently missing
-from a survivors-only panel.
+The measured result is that a coin's eventual delisting says almost nothing
+about whether it doubled first. **1,238 of 6,397 outcomes — 19% — belong to
+coins that no longer exist**, and they reached a clean 2x at 20.68% against the
+survivors' 20.90%.
+
+Two things must not be read into that. First, the panel still *has* to contain
+them: 19% of the sample is not optional, and the mechanism that keeps them is
+what makes the measurement possible at all. Second, this is one metric on one
+horizon — a gap near zero for `CLEAN_2X(180d)` implies nothing about, say,
+terminal return over three years.
+
+**54 events are deaths inside the horizon**, resolved as failures by §4.1
+rather than dropped — coins that were tradeable at the decision date and gone
+before it matured.
 
 ## 3. The finding that matters most for the product
 
@@ -91,15 +138,15 @@ through a −39% hole.
 
 | regime (point-in-time, BTC 200d) | events | base rate |
 |---|---|---|
-| bull | 4,547 | 0.171 |
-| range | 1,133 | **0.314** |
-| bear | 1,644 | 0.121 |
+| bull | 3,966 | 0.196 |
+| range | 1,006 | **0.354** |
+| bear | 1,425 | 0.140 |
 
 By year, the same story louder:
 
 | 2018 | 2019 | 2020 | 2021 | 2022 | 2023 | 2024 | 2025 | 2026 |
 |---|---|---|---|---|---|---|---|---|
-| 0.133 | 0.250 | **0.523** | 0.313 | 0.053 | 0.259 | 0.195 | **0.050** | 0.030 |
+| 0.136 | 0.278 | **0.582** | 0.323 | 0.057 | 0.302 | 0.225 | **0.064** | 0.049 |
 
 A tenfold spread between 2020 and 2025. **S0 §21 item 4 is confirmed, not
 avoided**: most of the outcome is the calendar. Two consequences carry into
@@ -122,12 +169,12 @@ not be settled by trying definitions until one flatters a result.
   `lower_mult = 0.4`, `vertical_bars = 180` turns volatility-scaled barriers
   into fixed ±ratios, exactly as S0 §6 predicted. Frozen config hash:
   `f2346ef283a5`.
-- **The tie rule cost nothing here.** One event in 7,353 had a single daily bar
+- **The tie rule cost nothing here.** One event in 6,415 had a single daily bar
   spanning both barriers. The pessimistic convention is inherited and its
   frequency is now measured rather than assumed.
-- **Death is an outcome.** 981 resolved deaths; 0 censored; the two are never
+- **Death is an outcome.** 54 resolved deaths; 0 censored; the two are never
   merged (§4.1).
-- **29 gap-unresolved events** (0.4%), each one an event whose window crossed a
+- **18 gap-unresolved events** (0.3%), each one an event whose window crossed a
   hole in the bar grid. M02 refuses to guess at a first touch across missing
   bars, and the count is small enough to be a footnote rather than a threat.
 - **Snapshots are write-once.** 98 snapshots, each carrying every screen value

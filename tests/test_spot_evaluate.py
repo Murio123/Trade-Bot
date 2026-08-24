@@ -79,22 +79,33 @@ def test_a_symbol_without_a_feature_value_is_excluded_not_zeroed():
     assert res.n_resolved == 20
 
 
-def test_an_unresolved_symbol_never_enters_a_rate():
+def test_an_unresolved_symbol_is_excluded_from_rates_not_from_the_ranking():
+    """Label availability must not decide the shortlist.
+
+    An earlier version filtered the ranking by `s in labels`, so a symbol whose
+    outcome was censored or gap-unresolved dropped out *before* K was chosen —
+    letting information from after the decision reshape the selection.
+    """
     symbols = [f"S{i:02d}USDT" for i in range(25)]
     labels = labels_for(symbols, set(symbols[:5]))
     del labels[symbols[0]]                      # censored / gap: no outcome
     values = {s: (100.0 - i) for i, s in enumerate(symbols)}
     res = run_date(values, labels)
-    assert res.n_resolved == 24
+    assert res.k == 5, "K comes from the eligible ranking, not from labels"
+    # The top five are S00..S04; S00 has no outcome, so the rate is over four.
+    assert res.selection_rate == 1.0
+    assert res.n_resolved == 25
 
 
 # --- dependence -----------------------------------------------------------
 
 
-def test_blocks_are_six_consecutive_dates_and_keep_the_tail():
+def test_blocks_are_six_consecutive_dates_and_drop_a_partial_tail():
+    """S3_SPEC §7: a block is one 180-day horizon. A two-date tail is not one,
+    and resampling it as a whole block inflates the block count."""
     assert blocks(list(range(14)), BLOCK_DATES) == [[0, 1, 2, 3, 4, 5],
-                                                    [6, 7, 8, 9, 10, 11],
-                                                    [12, 13]]
+                                                    [6, 7, 8, 9, 10, 11]]
+    assert len(blocks(list(range(67)), BLOCK_DATES)) == 11
 
 
 def test_the_bootstrap_resamples_blocks_not_dates():
