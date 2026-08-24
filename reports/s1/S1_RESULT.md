@@ -12,11 +12,18 @@ room to spare.
 |---|---|---|
 | symbols ingested with manifests | ≥ 150 | **734** |
 | **delisted symbols among them** | **≥ 20** | **250 (34.1%)** |
-| gap ratio within threshold | honest reporting | **0.18%** missing bars; 22 symbols affected |
+| gap ratio within threshold | honest reporting | **0.17%** missing bars; 41 symbols affected |
 | loader fail-closed on manifest mismatch | must refuse | refuses, with tests for six distinct corruptions |
 
-The panel: **734 USDT pairs, 826,601 daily bars, 2017-08-17 → 2026-08-24**,
+The panel: **734 USDT pairs, 826,301 daily bars, 2017-08-17 → 2026-08-24**,
 73 MB under `data/spot/` (gitignored, regenerable).
+
+**Figures updated 2026-08-24.** S2 found 300 malformed bars — almost all the
+partial final bar of a delisted pair — and the panel was re-ingested with
+per-bar consistency validation (`S2_RESULT.md` §5.1). Every count in this
+document is the post-re-ingestion one. The gap-symbol count *rose* from 22 to
+41 as a result, which reads like a regression and is the opposite: dropping a
+corrupt mid-history bar turns a hidden defect into a visible hole.
 
 ---
 
@@ -118,12 +125,12 @@ The dropped columns are recorded in every manifest rather than silently absent.
 ## 4. What the panel looks like
 
 - **734** USDT pairs ever; **484** trading now, **250** not.
-- **826,601** daily bars; median history per symbol **985.5 bars**.
+- **826,301** daily bars; median history per symbol **985.5 bars**.
 - **630 symbols have ≥ 200 bars** — the warmup S0 §5.1 requires. That is the
   realistic ceiling on universe size before eligibility filters, and it is
   comfortably above the 150–250 per-date estimate.
-- Gaps: 22 symbols, **1,472 missing bars of 828,073 expected (0.18%)**. The
-  largest is FTTUSDT's 310-bar hole — the FTX collapse and the halt that
+- Gaps: 41 symbols, **1,395 missing bars of 827,696 expected (0.17%)**. The
+  largest is FTTUSDT's 311-bar hole — the FTX collapse and the halt that
   followed. It is reported, not filled.
 
 ---
