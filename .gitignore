@@ -14,3 +14,8 @@ env/
 # Exchange kline cache: ~20 MB, regenerable via tools/kline_cache.py and
 # rewritten on every refresh.
 data/
+
+# S2/S3 generated evaluation artifacts: regenerable via tools/s2_universe_labels.py
+# and tools/s3_evaluate.py; the governed .md reports are what is tracked.
+reports/s2/s2_labels.json
+reports/s3/s3_results.json

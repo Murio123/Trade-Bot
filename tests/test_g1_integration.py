@@ -176,8 +176,11 @@ def test_production_still_does_not_import_the_research_packages():
     """The direction runs research -> production, never back. `labeling` is a new
     top-level package and is the obvious thing for a future edit to reach for
     from the wrong side."""
+    # `spot` joins the research side (the S-track: universe, labels, features).
+    # It is offline research and may import `labeling`; what it may not do is
+    # be imported BY production, which the next test asserts.
     skip = {"tests", "tools", ".venv", ".git", "__pycache__", "scratchpad",
-            "validation", "labeling"}
+            "validation", "labeling", "spot"}
     offenders = []
     for py in REPO.rglob("*.py"):
         if skip & set(py.parts):
@@ -187,6 +190,35 @@ def test_production_still_does_not_import_the_research_packages():
                 offenders.append(str(py.relative_to(REPO)))
                 break
     assert not offenders, offenders
+
+
+def test_production_does_not_import_the_spot_research_package():
+    """The S-track is research too, so the same direction rule binds it.
+
+    Widening the skip list above without this test would have quietly bought
+    `spot` an exemption in both directions.
+    """
+    skip = {"tests", "tools", ".venv", ".git", "__pycache__", "scratchpad",
+            "validation", "labeling", "spot"}
+    offenders = []
+    for py in REPO.rglob("*.py"):
+        if skip & set(py.parts):
+            continue
+        for name in imports_of(py):
+            if name == "spot" or name.startswith("spot."):
+                offenders.append(str(py.relative_to(REPO)))
+                break
+    assert not offenders, offenders
+
+
+def test_the_spot_research_package_does_not_import_production():
+    """Same rule as M02/M03: no config, no database, no live analyzer."""
+    forbidden = ("config", "database", "scheduler", "analyzer", "bot",
+                 "signal_engine", "pipeline", "risk")
+    for path in (REPO / "spot").rglob("*.py"):
+        for name in imports_of(path):
+            root = name.split(".")[0]
+            assert root not in forbidden, f"{path.name} imports {name}"
 
 
 # --- the governed documents ---------------------------------------------------
