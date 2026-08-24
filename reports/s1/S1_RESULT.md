@@ -118,7 +118,7 @@ The dropped columns are recorded in every manifest rather than silently absent.
 ## 4. What the panel looks like
 
 - **734** USDT pairs ever; **484** trading now, **250** not.
-- **826,601** daily bars; median history per symbol **987 bars**.
+- **826,601** daily bars; median history per symbol **985.5 bars**.
 - **630 symbols have ≥ 200 bars** — the warmup S0 §5.1 requires. That is the
   realistic ceiling on universe size before eligibility filters, and it is
   comfortably above the 150–250 per-date estimate.

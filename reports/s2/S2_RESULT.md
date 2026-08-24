@@ -21,7 +21,7 @@ What changed:
 | `CLEAN_2X` positives | 1,334 | **1,334** (unchanged) |
 | **base rate** | 18.21% | **20.85%** |
 | `delisted` outcomes | 981 | **54** |
-| median eligible universe | 84 | **68** |
+| median eligible universe | 84 | **67** |
 | **survivorship gap** | +2.68 pp | **+0.04 pp** |
 
 The last line is the one that matters most, and it reverses a headline claim
@@ -64,14 +64,14 @@ double". **The target defined in S0 §3 stands unchanged**, and so does the
 | **independent 180-day windows** | **16.3** — the honest N |
 | events | 6,415 · resolved **6,397** · gap-unresolved 18 · **censored 0** |
 | **base rate** | **0.2085** (1,334 hits) |
-| eligible symbols per date | min 0 · median **68** · max 223 |
+| eligible symbols per date | min 0 · median **67** · max 223 |
 | same-bar ties | **1** |
 
 `censored = 0` is the spec's own self-check passing: §1 stops the decision grid
 a full horizon before the panel ends, so no living coin can run off the edge.
 A non-zero count here would have been a bug report.
 
-The median eligible universe of **68** is well below S0 §5.3's 150–250 estimate. The
+The median eligible universe of **67** is well below S0 §5.3's 150–250 estimate. The
 binding screen is the $5M liquidity floor, not the size cap — the cap of 250
 almost never binds. Worth knowing before S3 builds cross-sectional ranks on
 thin cross-sections.
