@@ -420,6 +420,14 @@ Built live, 2026-08-25, 34 assets:
 6. **The four views are a judgement about what a person wants to see**, not a
    measured claim that these four fields are the useful ones. Nothing here
    establishes that.
+7. **Tradability is enforced by the builder, not by the reader.** The snapshot
+   carries no per-coin tradability flag, so a hand-written file naming a
+   delisted symbol with fresh timestamps would render. The audit raised this
+   and did not treat it as a defect: no builder path produces such a file —
+   live mode fetches only `TRADING` candidates and `screen_now` requires
+   `trading_now` — and the reader already refuses anything whose bars are
+   stale. It is recorded because the guarantee lives on one side of the
+   boundary and the guarantee's consumer lives on the other.
 
 ## 14. Exact next product step
 
