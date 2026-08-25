@@ -43,6 +43,7 @@ import math
 import os
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -402,24 +403,42 @@ def build_snapshot(frames: dict[str, pd.DataFrame], meta: dict[str, dict],
     return payload
 
 
-def _sweep_stale_temps(outdir: str) -> None:
+# Only a scratch file older than this is assumed abandoned. It is far beyond
+# any build's own lifetime, which is what makes "old" a safe proxy for
+# "orphaned".
+TMP_ORPHAN_AGE_S = 3600
+
+
+def _sweep_stale_temps(outdir: str, *, now: float | None = None) -> None:
     """Remove temp files left by a build that was killed mid-write.
 
     A process that takes a SIGKILL between opening its temp file and renaming
     it cannot clean up after itself, so somebody has to. They are never read
     and never harmful — but a directory that accumulates them is a directory
-    nobody can look at and tell whether something is wrong.
+    nobody can glance at and tell whether something is wrong.
+
+    **Age is checked before deleting, and that is not caution for its own
+    sake.** The build lock makes concurrent writers unlikely rather than
+    impossible — `write_snapshot` is an ordinary function and does not hold
+    the lock itself — and a sweep that deleted every scratch file it found
+    would delete one another writer was in the middle of. An hour is longer
+    than any build has ever taken, so nothing in flight can look abandoned.
     """
+    cutoff = (time.time() if now is None else now) - TMP_ORPHAN_AGE_S
     try:
         names = os.listdir(outdir)
     except OSError:
         return
     for name in names:
-        if name.startswith(TMP_PREFIX):
-            try:
-                os.unlink(os.path.join(outdir, name))
-            except OSError:
-                pass
+        if not name.startswith(TMP_PREFIX):
+            continue
+        full = os.path.join(outdir, name)
+        try:
+            if os.path.getmtime(full) > cutoff:
+                continue
+            os.unlink(full)
+        except OSError:
+            pass
 
 
 def write_snapshot(payload: dict[str, Any],
@@ -462,16 +481,35 @@ def write_snapshot(payload: dict[str, Any],
     return path
 
 
-def _fsync_dir(outdir: str) -> None:
-    """Persist the rename itself. Best-effort: not every filesystem allows it."""
+def _fsync_dir(outdir: str) -> bool:
+    """Persist the rename itself. Returns whether it actually happened.
+
+    Best-effort by design: not every filesystem permits fsync on a directory,
+    and refusing to publish there would disable the scanner over a durability
+    nicety rather than a correctness one. The data itself is already flushed
+    before the rename, so what is at risk here is only whether the rename
+    survives a host crash — a narrower window than the one the file fsync
+    closes.
+
+    What it must not be is **silent**. An audit was right about that: a helper
+    that swallows the failure lets "durable publish" quietly become "atomic
+    publish" with nobody able to tell which one they have.
+    """
     try:
         dfd = os.open(outdir, os.O_RDONLY)
-    except OSError:
-        return
+    except OSError as exc:
+        print(f"spot-snapshot: could not open {outdir} to persist the rename "
+              f"({exc}); the snapshot is published but the rename is not "
+              f"fsynced", file=sys.stderr)
+        return False
     try:
         os.fsync(dfd)
-    except OSError:
-        pass
+        return True
+    except OSError as exc:
+        print(f"spot-snapshot: directory fsync unsupported on {outdir} "
+              f"({exc}); the snapshot is published and its contents are "
+              f"flushed, but the rename is not fsynced", file=sys.stderr)
+        return False
     finally:
         os.close(dfd)
 

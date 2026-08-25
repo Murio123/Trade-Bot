@@ -224,6 +224,8 @@ def test_an_interrupted_build_leaves_the_previous_snapshot_intact(panel,
 
     assert digest(snapdir / SNAPSHOT_NAME) == before
     assert not list(snapdir.glob("*.tmp"))
+    assert not [p for p in snapdir.iterdir()
+                if p.name.startswith(".current.json.")]
 
 
 def test_a_refresh_whose_builder_cannot_start_reports_it_and_preserves(
@@ -343,22 +345,45 @@ def test_the_publish_is_an_atomic_rename_and_a_durable_one():
         "the sweep must be scoped to scratch files by prefix")
 
 
-def test_a_killed_build_leaves_no_scratch_file_behind(panel, snapdir):
-    """A temp file nobody removes is not dangerous, but it is unreadable state.
-
-    A directory that slowly fills with `.current.json.*` is a directory nobody
-    can glance at and tell whether something is wrong.
+def test_a_successful_build_leaves_no_scratch_file_and_sweeps_old_orphans(
+        panel, snapdir):
+    """Two claims, and the earlier version of this test named a third it did
+    not test — it never killed anything. The kill case is
+    `test_an_interrupted_build_leaves_the_previous_snapshot_intact`, which now
+    checks scratch files too.
     """
-    assert run_builder(panel, snapdir).returncode == EXIT_OK
-    leftovers = [p for p in snapdir.iterdir()
-                 if p.name.startswith(".current.json.")]
-    assert leftovers == []
+    import os
+    import time
 
-    # An orphan from a previous kill is swept by the next successful write.
-    (snapdir / ".current.json.orphan").write_text("half a json", encoding="utf-8")
     assert run_builder(panel, snapdir).returncode == EXIT_OK
-    assert not [p for p in snapdir.iterdir()
-                if p.name.startswith(".current.json.")]
+    assert [p for p in snapdir.iterdir()
+            if p.name.startswith(".current.json.")] == []
+
+    orphan = snapdir / ".current.json.orphan"
+    orphan.write_text("half a json", encoding="utf-8")
+    old_enough = time.time() - 2 * builder_module().TMP_ORPHAN_AGE_S
+    os.utime(orphan, (old_enough, old_enough))
+    assert run_builder(panel, snapdir).returncode == EXIT_OK
+    assert not orphan.exists()
+
+
+def builder_module():
+    from tools import spot_snapshot
+
+    return spot_snapshot
+
+
+def test_the_sweep_never_deletes_a_scratch_file_still_being_written(snapdir):
+    """`write_snapshot` does not hold the build lock itself.
+
+    The lock makes a second writer unlikely, not impossible, and a sweep that
+    deleted every scratch file it found would delete one another writer was in
+    the middle of. Age is what separates "abandoned" from "in flight".
+    """
+    in_flight = snapdir / ".current.json.someone-elses"
+    in_flight.write_text("being written right now", encoding="utf-8")
+    builder_module()._sweep_stale_temps(str(snapdir))
+    assert in_flight.exists()
 
 
 def test_an_interrupted_publish_removes_its_own_scratch_file(snapdir,
@@ -520,19 +545,41 @@ def test_a_mistyped_cadence_cannot_stop_the_bot_from_starting(monkeypatch):
 
 
 def test_the_configured_cadence_is_clamped_to_something_cron_accepts():
+    """The clamp is only worth having if the clamped value actually works.
+
+    An audit caught the earlier version asserting a ceiling of 24 — which
+    APScheduler rejects, because a step above 23 exceeds the hour field's
+    range. The test said "something cron accepts" and never asked cron.
+    """
     import importlib
     import os
 
+    from apscheduler.triggers.cron import CronTrigger
+
     import config
 
-    for raw, expected in (("0", 1), ("-3", 1), ("99", 24), ("3", 3)):
+    for raw, expected in (("0", 1), ("-3", 1), ("99", 12), ("24", 12),
+                          ("3", 3), ("12", 12)):
         os.environ["SPOT_SNAPSHOT_REFRESH_HOURS"] = raw
         try:
             importlib.reload(config)
-            assert config.SPOT_SNAPSHOT_REFRESH_HOURS == expected, raw
+            hours = config.SPOT_SNAPSHOT_REFRESH_HOURS
+            assert hours == expected, raw
+            # The whole point: this must not raise.
+            CronTrigger(timezone="UTC", minute=7, hour=f"*/{hours}")
         finally:
             os.environ.pop("SPOT_SNAPSHOT_REFRESH_HOURS", None)
     importlib.reload(config)
+
+
+def test_the_cadence_ceiling_keeps_the_scanner_inside_its_own_limit():
+    """A cadence past 12h could not hold the snapshot under the reader's 24h
+    limit with any margin — the scanner would go dark between refreshes by
+    design. The ceiling is that constraint, not only cron's."""
+    import config
+
+    assert config.SPOT_SNAPSHOT_REFRESH_MAX_HOURS == 12
+    assert config.SPOT_SNAPSHOT_REFRESH_MAX_HOURS * 2 <= MAX_SNAPSHOT_AGE_HOURS
 
 
 def test_the_refresh_job_can_be_switched_off(monkeypatch):
@@ -782,3 +829,108 @@ def test_the_refresh_layer_introduced_no_predictive_language():
         for banned in ("probability of", "2x", "expected return",
                        "alpha_score", "composite_score"):
             assert banned not in low, f"{rel}: {banned}"
+
+
+# --- durability, verified against the syscalls themselves --------------------
+
+def test_the_data_is_flushed_before_the_rename_and_the_rename_after(tmp_path):
+    """Ordering, not just presence. `fsync` after `replace` would be useless.
+
+    The file's contents must be on disk before the directory entry points at
+    them, and the directory entry must be persisted after it moves. Asserted
+    on the real call order because an AST check can only see that both appear.
+    """
+    import os
+    import stat
+
+    from tools import spot_snapshot as builder
+
+    order: list[str] = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd):
+        kind = "dir" if stat.S_ISDIR(os.fstat(fd).st_mode) else "file"
+        order.append(f"fsync-{kind}")
+        return real_fsync(fd)
+
+    def replace(a, b):
+        order.append("replace")
+        return real_replace(a, b)
+
+    os.fsync, os.replace = fsync, replace
+    try:
+        builder.write_snapshot({"schema": "x"}, str(tmp_path))
+    finally:
+        os.fsync, os.replace = real_fsync, real_replace
+    assert order == ["fsync-file", "replace", "fsync-dir"], order
+
+
+def test_data_that_cannot_be_flushed_is_never_published(tmp_path):
+    """A snapshot that cannot be made durable must not replace a good one.
+
+    Refusing costs one cycle. Publishing content the kernel has not committed
+    would mean a host that dies leaves a directory entry pointing at nothing —
+    an atomic rename to an empty file.
+    """
+    import os
+    import stat
+
+    from tools import spot_snapshot as builder
+
+    builder.write_snapshot({"schema": "old"}, str(tmp_path))
+    before = digest(tmp_path / SNAPSHOT_NAME)
+    real_fsync = os.fsync
+
+    def file_fsync_fails(fd):
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("EIO")
+        return real_fsync(fd)
+
+    os.fsync = file_fsync_fails
+    try:
+        with pytest.raises(OSError):
+            builder.write_snapshot({"schema": "new"}, str(tmp_path))
+    finally:
+        os.fsync = real_fsync
+
+    assert digest(tmp_path / SNAPSHOT_NAME) == before
+    assert not [p for p in tmp_path.iterdir()
+                if p.name.startswith(".current.json.")]
+
+
+def test_a_filesystem_that_cannot_fsync_a_directory_publishes_and_says_so(
+        tmp_path, capsys):
+    """Directory fsync is best-effort: not every filesystem permits it, and
+    refusing to publish there would disable the scanner for a durability
+    nicety rather than a correctness one."""
+    import os
+    import stat
+
+    from tools import spot_snapshot as builder
+
+    real_fsync = os.fsync
+
+    def dir_fsync_fails(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("EINVAL")
+        return real_fsync(fd)
+
+    os.fsync = dir_fsync_fails
+    try:
+        path = builder.write_snapshot({"schema": "x"}, str(tmp_path))
+    finally:
+        os.fsync = real_fsync
+    assert os.path.exists(path)
+    # Best-effort, but never silent: "durable publish" must not quietly become
+    # "atomic publish" with nobody able to tell which one they have.
+    assert builder._fsync_dir("/nonexistent-directory-for-this-test") is False
+
+
+def test_a_coins_field_of_the_wrong_type_does_not_report_an_empty_market():
+    """"Пусто" and "сломано" are different sentences to a user."""
+    from spot_market.snapshot import SnapshotUnavailable, parse_snapshot
+
+    with pytest.raises(SnapshotUnavailable) as exc:
+        parse_snapshot({"schema": "spot.snapshot/1", "generated_at_ms": 1,
+                        "data_asof_ms": 1, "coins": {"a": 1}, "btc": {}})
+    assert exc.value.reason == "malformed"

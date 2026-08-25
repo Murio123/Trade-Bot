@@ -246,6 +246,10 @@ def parse_snapshot(payload: dict[str, Any], *, path: str = "<memory>",
     Every check below is explicit; `_guard` is the backstop for the ones
     nobody thought of.
     """
+    if not isinstance(payload, dict):
+        raise SnapshotUnavailable(
+            "malformed", f"{path}: payload is {type(payload).__name__}, "
+                         f"not an object")
     now = _now_ms() if now_ms is None else int(now_ms)
 
     if payload.get("schema") != SCHEMA:
@@ -259,7 +263,15 @@ def parse_snapshot(payload: dict[str, Any], *, path: str = "<memory>",
                                "data_asof_ms"))
 
     raw_coins = _require(payload, "coins", path)
-    if not isinstance(raw_coins, list) or not raw_coins:
+    # "empty" and "malformed" reach the user as different sentences, so a
+    # `coins` that is an object rather than a list must not report itself as
+    # an empty universe — that reads as "the market has nothing to show today"
+    # when the truth is "this file is broken".
+    if not isinstance(raw_coins, list):
+        raise SnapshotUnavailable(
+            "malformed", f"{path}: coins is {type(raw_coins).__name__}, "
+                         f"not a list")
+    if not raw_coins:
         raise SnapshotUnavailable("empty",
                                   f"{path}: the snapshot lists no coins")
     coins = tuple(_coin(c, path) for c in raw_coins)

@@ -172,7 +172,13 @@ ENABLE_SPOT_SNAPSHOT_REFRESH = _get_bool("ENABLE_SPOT_SNAPSHOT_REFRESH", True)
 # build_scheduler() runs before the bot finishes starting — so a mistyped spot
 # setting would take the whole bot down. No Telegram feature outside the spot
 # section may depend on the spot section, and that includes its config.
-SPOT_SNAPSHOT_REFRESH_HOURS = min(24, max(1, _get_int(
+#
+# The ceiling is 12, for two independent reasons and the stricter one wins:
+# APScheduler rejects a step above 23 for the hour field, and a cadence past
+# 12h could not keep the snapshot inside the reader's 24h fail-closed limit
+# with any margin — the scanner would go dark by design between refreshes.
+SPOT_SNAPSHOT_REFRESH_MAX_HOURS = 12
+SPOT_SNAPSHOT_REFRESH_HOURS = min(SPOT_SNAPSHOT_REFRESH_MAX_HOURS, max(1, _get_int(
     "SPOT_SNAPSHOT_REFRESH_HOURS", 2)))
 # A live build measured ~33s over 467 symbols; this bounds a hung socket.
 SPOT_SNAPSHOT_BUILD_TIMEOUT_SECONDS = _get_int(

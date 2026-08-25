@@ -65,7 +65,11 @@ which are untouched.
 ## 3. Cadence
 
 **Every 2 hours, at minute 7**: `CronTrigger(hour="*/2", minute=7)` → 00:07,
-02:07, … Configurable via `SPOT_SNAPSHOT_REFRESH_HOURS`.
+02:07, … Configurable via `SPOT_SNAPSHOT_REFRESH_HOURS`, clamped to **1–12**.
+The ceiling has two independent reasons and the stricter one wins: APScheduler
+rejects a step above 23 in the hour field, and a cadence past 12 h could not
+hold the snapshot inside the reader's 24 h limit with any margin — the scanner
+would go dark between refreshes by design.
 
 Cron rather than interval so the cadence survives a redeploy instead of
 restarting from "now" each time the container comes back. Minute 7 puts the
@@ -135,10 +139,29 @@ during a replace sees the whole old file or the whole new one, never a half.
 The two fsyncs were added after the audit. Without the first, a host that dies
 just after the rename can come back with a directory entry pointing at
 unflushed content — an atomic rename to nothing. Without the second, the
-rename itself is not persisted on most filesystems. The temp name is unique
-(`tempfile.mkstemp`) rather than fixed, it is removed on any exception
-including `KeyboardInterrupt`, and a successful write sweeps orphans left by a
-build that was SIGKILLed between opening its scratch file and renaming it.
+rename itself is not persisted on most filesystems.
+
+The two are treated differently, on purpose. **A file fsync that fails aborts
+the publish**: data the kernel has not committed must not replace a good
+snapshot, so the scratch file is removed, the previous snapshot stays
+byte-identical and the build exits 1. **A directory fsync that fails does
+not** — not every filesystem permits it, and refusing there would disable the
+scanner over a durability nicety rather than a correctness one. It is
+best-effort but **never silent**: `_fsync_dir` returns whether it happened and
+prints why it did not, so "durable publish" cannot quietly become "atomic
+publish" with nobody able to tell which one they have.
+
+The ordering is asserted against the real syscalls, not just their presence —
+`fsync(file) → replace → fsync(dir)`; an fsync after the rename would be
+useless.
+
+The temp name is unique (`tempfile.mkstemp`) rather than fixed and is removed
+on any exception including `KeyboardInterrupt`. A successful write sweeps
+orphans left by a build that was SIGKILLed between opening its scratch file
+and renaming it — but only those **older than an hour**. `write_snapshot` is
+an ordinary function and does not hold the build lock itself, so a sweep that
+deleted every scratch file it found could delete one another writer was in the
+middle of; age is what separates "abandoned" from "in flight".
 
 The stronger guarantee is **ordering**, and it is what `main()` was
 restructured around: the lock is taken, the snapshot is built and validated
@@ -287,8 +310,8 @@ the bot process.
 
 ## 14. Tests
 
-**2197 passed** (2151 before S4A.1; +46). New file
-`tests/test_spot_refresh.py` (45); `tests/test_spot_screener.py` gained the
+**2203 passed** (2151 before S4A.1; +52). New file
+`tests/test_spot_refresh.py` (51); `tests/test_spot_screener.py` gained the
 import-boundary tests. Every pre-existing test still passes.
 
 Failure paths are tested with **real subprocesses against real files** — a
@@ -379,7 +402,35 @@ Codex returned `NOT_SAFE` on the first pass. Four real defects, all fixed:
    very function whose real failure it was supposed to catch. Replaced with
    tests that exercise the real paths against real files.
 
-Two smaller things came out of it: `refresh()` and `needs_refresh()` now
+## 18. Audit round 2
+
+Round 2 returned `NOT_SAFE` again, on three narrower points. All fixed:
+
+1. **The cadence ceiling was itself invalid.** Round 1's clamp allowed 24, and
+   APScheduler rejects `hour="*/24"` — so a documented, permitted value would
+   have been caught by the round-1 guard and silently disabled the refresh
+   entirely. Ceiling is now 12, and the test constructs the real
+   `CronTrigger` for every allowed value instead of asserting a number. The
+   earlier test was named "clamped to something cron accepts" and never asked
+   cron; that is the kind of test that is worse than none.
+2. **`_fsync_dir` swallowed its failure silently.** The behaviour is right —
+   publishing anyway is correct on a filesystem that cannot fsync a directory
+   — but the silence was not. It now reports, and returns whether it happened.
+3. **The orphan sweep could delete a scratch file still being written.**
+   `write_snapshot` does not hold the build lock, so "delete every temp file
+   you find" was unsafe for a case the docstring itself had raised. Only files
+   older than an hour are swept now.
+
+And two tests were renamed or replaced because they claimed more than they
+did: the scratch-file test never killed anything (the kill case lives in the
+interrupted-build test, which now checks scratch files too), and the cadence
+test described above.
+
+`parse_snapshot` also now type-checks its own argument, so the
+single-exception contract holds when it is called directly and not only
+through `load_snapshot`.
+
+Two smaller things came out of round 1: `refresh()` and `needs_refresh()` now
 resolve the canonical path at call time instead of binding it as a default
 argument (correct in production, untestable everywhere else), and the
 builder's `main()` catches broadly so no failure mode escapes as a traceback.
