@@ -922,8 +922,12 @@ def test_a_filesystem_that_cannot_fsync_a_directory_publishes_and_says_so(
         os.fsync = real_fsync
     assert os.path.exists(path)
     # Best-effort, but never silent: "durable publish" must not quietly become
-    # "atomic publish" with nobody able to tell which one they have.
+    # "atomic publish" with nobody able to tell which one they have. The
+    # return value is half of that; the operator-visible line is the half that
+    # actually reaches a human, so it is asserted rather than assumed.
+    assert "not fsynced" in capsys.readouterr().err
     assert builder._fsync_dir("/nonexistent-directory-for-this-test") is False
+    assert "could not open" in capsys.readouterr().err
 
 
 def test_a_coins_field_of_the_wrong_type_does_not_report_an_empty_market():
