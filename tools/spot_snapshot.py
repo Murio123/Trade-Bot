@@ -42,6 +42,7 @@ import json
 import math
 import os
 import sys
+import tempfile
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -66,6 +67,7 @@ HOUR_MS = 3_600_000
 DEFAULT_SNAPSHOT_DIR = os.path.join(DEFAULT_OUTDIR, "snapshot")
 SNAPSHOT_NAME = "current.json"
 LOCK_NAME = ".refresh.lock"
+TMP_PREFIX = ".current.json."
 
 # Exit codes. The scheduled refresher reads these, so they are part of the
 # contract between the CLI and its caller rather than incidental.
@@ -400,23 +402,78 @@ def build_snapshot(frames: dict[str, pd.DataFrame], meta: dict[str, dict],
     return payload
 
 
+def _sweep_stale_temps(outdir: str) -> None:
+    """Remove temp files left by a build that was killed mid-write.
+
+    A process that takes a SIGKILL between opening its temp file and renaming
+    it cannot clean up after itself, so somebody has to. They are never read
+    and never harmful — but a directory that accumulates them is a directory
+    nobody can look at and tell whether something is wrong.
+    """
+    try:
+        names = os.listdir(outdir)
+    except OSError:
+        return
+    for name in names:
+        if name.startswith(TMP_PREFIX):
+            try:
+                os.unlink(os.path.join(outdir, name))
+            except OSError:
+                pass
+
+
 def write_snapshot(payload: dict[str, Any],
                    outdir: str = DEFAULT_SNAPSHOT_DIR) -> str:
-    """Replace the current snapshot atomically.
+    """Replace the current snapshot atomically and durably.
 
     Unlike the S2 universe snapshots this one is *meant* to be overwritten —
-    it describes now, and now moves. The temp-file rename matters because a
-    Telegram handler may be reading the file at the moment it is replaced, and
-    a half-written JSON would fail closed for the wrong reason.
+    it describes now, and now moves. Three things make the overwrite safe:
+
+      * **A temp file and a rename.** A Telegram handler may be reading at the
+        moment of the replace; `os.replace` on the same filesystem is atomic,
+        so it sees the whole old file or the whole new one. Writing in place
+        would give it a half.
+      * **fsync, on the file and then on the directory.** Without the first,
+        a host that dies after the rename can come back with the directory
+        entry pointing at unflushed content — an atomic rename to nothing. The
+        second is what makes the rename itself durable; on most filesystems a
+        rename is not persisted just because the process returned from it.
+      * **A unique temp name.** Two writers, however unlikely given the lock,
+        must not share a scratch file.
     """
     os.makedirs(outdir, exist_ok=True)
+    _sweep_stale_temps(outdir)
     path = os.path.join(outdir, SNAPSHOT_NAME)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, ensure_ascii=False, indent=2)
-        fh.write("\n")
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(prefix=TMP_PREFIX, dir=outdir, text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        # Includes KeyboardInterrupt and SystemExit: an interrupted publish
+        # must not leave its scratch file behind either.
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    _fsync_dir(outdir)
     return path
+
+
+def _fsync_dir(outdir: str) -> None:
+    """Persist the rename itself. Best-effort: not every filesystem allows it."""
+    try:
+        dfd = os.open(outdir, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(dfd)
+    except OSError:
+        pass
+    finally:
+        os.close(dfd)
 
 
 # --- sources ----------------------------------------------------------------

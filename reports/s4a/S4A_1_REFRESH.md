@@ -125,13 +125,20 @@ developer's shell.
 No Railway volume is required, and none is used. Startup covers the empty-disk
 case (§9).
 
-## 7. Atomic writes
+## 7. Atomic and durable writes
 
-Unchanged from S4A and now asserted at the AST level
-(`test_the_publish_is_an_atomic_rename_not_a_rewrite`): `write_snapshot`
-writes `current.json.tmp` and calls `os.replace`. Same filesystem, so the
-rename is atomic; a handler reading during a replace sees the whole old file
-or the whole new one, never a half.
+`write_snapshot` writes to a unique temp file in the destination directory,
+**fsyncs it**, `os.replace`s it into position, and then **fsyncs the
+directory**. Same filesystem, so the rename is atomic: a handler reading
+during a replace sees the whole old file or the whole new one, never a half.
+
+The two fsyncs were added after the audit. Without the first, a host that dies
+just after the rename can come back with a directory entry pointing at
+unflushed content — an atomic rename to nothing. Without the second, the
+rename itself is not persisted on most filesystems. The temp name is unique
+(`tempfile.mkstemp`) rather than fixed, it is removed on any exception
+including `KeyboardInterrupt`, and a successful write sweeps orphans left by a
+build that was SIGKILLed between opening its scratch file and renaming it.
 
 The stronger guarantee is **ordering**, and it is what `main()` was
 restructured around: the lock is taken, the snapshot is built and validated
@@ -279,8 +286,8 @@ the bot process.
 
 ## 14. Tests
 
-**2186 passed** (2151 before S4A.1; +35). New file
-`tests/test_spot_refresh.py` (34); `tests/test_spot_screener.py` gained the
+**2197 passed** (2151 before S4A.1; +46). New file
+`tests/test_spot_refresh.py` (45); `tests/test_spot_screener.py` gained the
 import-boundary tests. Every pre-existing test still passes.
 
 Failure paths are tested with **real subprocesses against real files** — a
@@ -295,7 +302,11 @@ rule would be testing a loader production does not use).
 | successful refresh publishes | `test_the_manual_cli_builds_and_publishes_a_snapshot` |
 | **failed refresh preserves the old snapshot** | `…_leaves_the_previous_snapshot_byte_identical`, `…_an_interrupted_build_…` (real SIGKILL) |
 | invalid result is never published | `test_a_builder_that_exits_zero_with_an_unreadable_result_is_a_failure` |
-| atomic replacement | `test_the_publish_is_an_atomic_rename_not_a_rewrite` (AST) |
+| atomic **and durable** replacement | `test_the_publish_is_an_atomic_rename_and_a_durable_one` (AST: replace + fsync + dir fsync) |
+| no scratch file survives | `test_a_killed_build_leaves_no_scratch_file_behind`, `…_an_interrupted_publish_removes_its_own_…` |
+| a corrupt snapshot raises one type only | `…_cannot_raise_anything_but_snapshot_unavailable` (5 shapes) |
+| a corrupt snapshot does not escape the job | `test_a_corrupt_snapshot_does_not_escape_the_scheduler_job` |
+| a mistyped cadence cannot stop startup | `test_a_mistyped_cadence_cannot_stop_the_bot_from_starting`, `…_is_clamped_…` |
 | overlapping refresh prevented | `test_two_builds_cannot_run_at_once`, `…_the_lock_is_released_when_its_holder_exits` |
 | stale / missing stays fail-closed | `test_freshness_thresholds_were_not_relaxed_by_this_stage` + S4A's suite |
 | startup with a fresh snapshot does not rebuild | `test_startup_with_a_fresh_snapshot_does_not_rebuild` |
@@ -339,6 +350,38 @@ byte-identical.
 6. **The snapshot is not shared between environments.** A staging service
    builds its own. Correct, but worth knowing before assuming one refresh
    serves everything.
+
+## 17. Audit round 1 — what it found
+
+Codex returned `NOT_SAFE` on the first pass. Four real defects, all fixed:
+
+1. **The reader's exception contract was not total.** `load_snapshot` promised
+   `SnapshotUnavailable`, but a coin entry that was a string reached
+   `raw.get(...)` and left an `AttributeError` — which sails past every
+   caller: into a Telegram handler as a silent failure, and out of the
+   scheduler's job into the shared event loop. Valid JSON of the wrong shape
+   is exactly what a half-finished or hand-edited file looks like. Fixed with
+   an explicit type check plus a `_guard` backstop, so the one exception type
+   the callers catch really is the only one they can receive. Five shapes are
+   now regression-tested.
+2. **The publish was atomic but not durable** — no fsync on the file, none on
+   the directory, and a fixed temp name with no cleanup. §7.
+3. **A mistyped cadence could stop the whole bot from starting.**
+   `SPOT_SNAPSHOT_REFRESH_HOURS=0` becomes `hour="*/0"`, which APScheduler
+   rejects — inside `build_scheduler()`, which runs before the bot finishes
+   starting. A spot setting would have taken the futures streams, the alerts
+   and the journal down with it. Now clamped to 1–24 in config, and the job
+   registration is guarded so an unreachable failure still costs only the
+   scanner.
+4. **Three tests asserted less than they claimed** — the atomicity test would
+   have passed against the missing fsyncs, and the event-loop test mocked the
+   very function whose real failure it was supposed to catch. Replaced with
+   tests that exercise the real paths against real files.
+
+Two smaller things came out of it: `refresh()` and `needs_refresh()` now
+resolve the canonical path at call time instead of binding it as a default
+argument (correct in production, untestable everywhere else), and the
+builder's `main()` catches broadly so no failure mode escapes as a traceback.
 
 ---
 

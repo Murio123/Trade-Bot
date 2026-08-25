@@ -95,16 +95,27 @@ def _digest(path: str) -> str | None:
         return None
 
 
-def read_snapshot(path: str = DEFAULT_SNAPSHOT_PATH
+def _path(path: str | None) -> str:
+    """Resolve the canonical path at call time, not at import time.
+
+    A default argument would bind `DEFAULT_SNAPSHOT_PATH` once, when this
+    module is first imported — which is correct in production and untestable
+    everywhere else, because pointing the whole refresher at a fixture would
+    then require patching three signatures instead of one constant.
+    """
+    return DEFAULT_SNAPSHOT_PATH if path is None else path
+
+
+def read_snapshot(path: str | None = None
                   ) -> tuple[MarketSnapshot | None, str]:
     """(snapshot, reason). The reader's own rules decide; nothing is bypassed."""
     try:
-        return load_snapshot(path), "ok"
+        return load_snapshot(_path(path)), "ok"
     except SnapshotUnavailable as exc:
         return None, exc.reason
 
 
-def needs_refresh(path: str = DEFAULT_SNAPSHOT_PATH, *,
+def needs_refresh(path: str | None = None, *,
                   max_age_hours: int = REFRESH_AFTER_HOURS,
                   now_ms: int | None = None) -> bool:
     """Is the snapshot missing, unusable, or simply due?
@@ -128,7 +139,7 @@ def _tail(raw: bytes) -> str:
     return text[-_MAX_LOG_OUTPUT:] if len(text) > _MAX_LOG_OUTPUT else text
 
 
-async def refresh(path: str = DEFAULT_SNAPSHOT_PATH, *,
+async def refresh(path: str | None = None, *,
                   force: bool = False,
                   timeout_s: int = BUILD_TIMEOUT_SECONDS,
                   source: str = "live",
@@ -139,6 +150,7 @@ async def refresh(path: str = DEFAULT_SNAPSHOT_PATH, *,
     `force` skips the freshness check only. It does not skip the lock, and it
     cannot make a partial build reach the canonical path.
     """
+    path = _path(path)
     started = time.monotonic()
 
     def done(status: str, detail: str, *, preserved: bool = True,

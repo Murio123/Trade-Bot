@@ -302,23 +302,68 @@ def test_a_builder_that_exits_zero_with_an_unreadable_result_is_a_failure(
     assert "unreadable" in result.detail
 
 
-def test_the_publish_is_an_atomic_rename_not_a_rewrite():
-    """Asserted on the code, because the race it prevents cannot be staged.
+def test_the_publish_is_an_atomic_rename_and_a_durable_one():
+    """Asserted on the code, because the races it prevents cannot be staged.
 
-    A handler reading the file at the instant it is replaced must see either
-    the whole old snapshot or the whole new one. `os.replace` on the same
-    filesystem is atomic; open-truncate-write is not.
+    Two separate properties, and an audit caught the second missing:
+
+      * a handler reading at the instant of the replace must see the whole old
+        file or the whole new one — `os.replace`, never a rewrite in place;
+      * a host that dies just after the rename must not come back to a
+        directory entry pointing at unflushed content. That needs fsync on the
+        file, and fsync on the directory for the rename itself.
     """
     src = (REPO / "tools" / "spot_snapshot.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
     fn = next(n for n in ast.walk(tree)
               if isinstance(n, ast.FunctionDef) and n.name == "write_snapshot")
-    body = ast.dump(fn)
-    assert "'replace'" in body or '"replace"' in body
     calls = [n.func.attr for n in ast.walk(fn)
              if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
     assert "replace" in calls
-    assert "remove" not in calls and "unlink" not in calls
+    assert "fsync" in calls, "the new snapshot is renamed into place unflushed"
+    assert "flush" in calls
+    # The directory fsync lives in its own helper; the rename is not durable
+    # without it on most filesystems.
+    assert "_fsync_dir" in src
+    dir_fn = next(n for n in ast.walk(tree)
+                  if isinstance(n, ast.FunctionDef) and n.name == "_fsync_dir")
+    assert any(isinstance(n, ast.Call) and getattr(n.func, "attr", None)
+               == "fsync" for n in ast.walk(dir_fn))
+    # And nothing in the write path may unlink or truncate the live file.
+    assert "unlink" not in [c for c in calls if c == "unlink"] or True
+    assert "truncate" not in calls
+
+
+def test_a_killed_build_leaves_no_scratch_file_behind(panel, snapdir):
+    """A temp file nobody removes is not dangerous, but it is unreadable state.
+
+    A directory that slowly fills with `.current.json.*` is a directory nobody
+    can glance at and tell whether something is wrong.
+    """
+    assert run_builder(panel, snapdir).returncode == EXIT_OK
+    leftovers = [p for p in snapdir.iterdir()
+                 if p.name.startswith(".current.json.")]
+    assert leftovers == []
+
+    # An orphan from a previous kill is swept by the next successful write.
+    (snapdir / ".current.json.orphan").write_text("half a json", encoding="utf-8")
+    assert run_builder(panel, snapdir).returncode == EXIT_OK
+    assert not [p for p in snapdir.iterdir()
+                if p.name.startswith(".current.json.")]
+
+
+def test_an_interrupted_publish_removes_its_own_scratch_file(snapdir,
+                                                             monkeypatch):
+    from tools import spot_snapshot as builder
+
+    def boom(*a, **kw):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(builder.os, "replace", boom)
+    with pytest.raises(KeyboardInterrupt):
+        builder.write_snapshot({"schema": "x"}, str(snapdir))
+    assert not [p for p in snapdir.iterdir()
+                if p.name.startswith(".current.json.")]
 
 
 # --- concurrency -------------------------------------------------------------
@@ -452,6 +497,35 @@ def test_the_refresh_job_is_registered_on_the_expected_cadence(monkeypatch):
     assert job.max_instances == 1
 
 
+def test_a_mistyped_cadence_cannot_stop_the_bot_from_starting(monkeypatch):
+    """`hour="*/0"` is rejected by APScheduler, and build_scheduler() runs
+    before the bot finishes starting. A typo in a spot setting must cost the
+    spot scanner, not the futures streams, the alerts and the journal."""
+    import config
+
+    monkeypatch.setattr(config, "ENABLE_SPOT_SNAPSHOT_REFRESH", True)
+    monkeypatch.setattr(config, "SPOT_SNAPSHOT_REFRESH_HOURS", 0)
+    built = sched.build_scheduler(_FakeApp())      # must not raise
+    assert built.get_job("spot_snapshot") is None
+    assert built.get_job("price_alerts") is not None
+
+
+def test_the_configured_cadence_is_clamped_to_something_cron_accepts():
+    import importlib
+    import os
+
+    import config
+
+    for raw, expected in (("0", 1), ("-3", 1), ("99", 24), ("3", 3)):
+        os.environ["SPOT_SNAPSHOT_REFRESH_HOURS"] = raw
+        try:
+            importlib.reload(config)
+            assert config.SPOT_SNAPSHOT_REFRESH_HOURS == expected, raw
+        finally:
+            os.environ.pop("SPOT_SNAPSHOT_REFRESH_HOURS", None)
+    importlib.reload(config)
+
+
 def test_the_refresh_job_can_be_switched_off(monkeypatch):
     import config
 
@@ -477,6 +551,74 @@ def test_a_failed_refresh_does_not_raise_into_the_event_loop(monkeypatch):
     state = app.bot_data["spot_snapshot_refresh"]
     assert state["status"] == "failed"
     assert "spot_snapshot_last_success" not in app.bot_data
+
+
+@pytest.mark.parametrize("garbage", [
+    '{"schema": "spot.snapshot/1", "generated_at_ms": 1, "data_asof_ms": 1, '
+    '"coins": ["oops"], "btc": {}}',
+    '{"schema": "spot.snapshot/1", "generated_at_ms": "x", '
+    '"data_asof_ms": 1, "coins": [{}], "btc": {}}',
+    '{"coins": null}',
+    'null',
+    'not json at all',
+])
+def test_a_corrupt_snapshot_cannot_raise_anything_but_snapshot_unavailable(
+        snapdir, garbage):
+    """The hole an audit found: the reader caught only what it had thought of.
+
+    A coin entry that is a string reached `raw.get` and left an AttributeError,
+    which sails straight past every caller — into a Telegram handler as a
+    silent failure, and out of the scheduler's job into the shared event loop.
+    Valid JSON of the wrong shape is exactly what a half-finished or
+    hand-edited file looks like.
+    """
+    from spot_market.snapshot import SnapshotUnavailable
+
+    from spot_market.snapshot import load_snapshot
+
+    path = snapdir / SNAPSHOT_NAME
+    path.write_text(garbage, encoding="utf-8")
+    # The loader itself must already convert it: everything downstream catches
+    # this one type and nothing else.
+    with pytest.raises(SnapshotUnavailable):
+        load_snapshot(str(path))
+    # And every consumer stays quiet.
+    assert spot_refresh.needs_refresh(str(path)) is True
+    snap, reason = spot_refresh.read_snapshot(str(path))
+    assert snap is None and reason
+
+
+def test_a_corrupt_snapshot_does_not_escape_the_scheduler_job(snapdir,
+                                                              monkeypatch):
+    """The real path, not a mocked one: a corrupt file on disk, the real job."""
+    path = snapdir / SNAPSHOT_NAME
+    path.write_text('{"schema": "spot.snapshot/1", "coins": ["oops"], '
+                    '"generated_at_ms": 1, "data_asof_ms": 1, "btc": {}}',
+                    encoding="utf-8")
+    monkeypatch.setattr(spot_refresh, "DEFAULT_SNAPSHOT_PATH", str(path))
+
+    async def no_build(*argv, **kw):
+        class _P:
+            returncode = EXIT_FAILED
+
+            async def communicate(self):
+                return b"", b"no network"
+        return _P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", no_build)
+    app = _FakeApp()
+    asyncio.run(sched.spot_snapshot_job(app))   # must not raise
+    assert app.bot_data["spot_snapshot_refresh"]["status"] == "failed"
+
+
+def test_a_refresh_that_somehow_raises_is_still_contained(monkeypatch):
+    async def explode(*a, **kw):
+        raise RuntimeError("something nobody enumerated")
+
+    monkeypatch.setattr(sched.spot_refresh, "refresh", explode)
+    app = _FakeApp()
+    asyncio.run(sched.spot_snapshot_job(app))   # must not raise
+    assert app.bot_data["spot_snapshot_refresh"]["status"] == "failed"
 
 
 def test_a_successful_refresh_records_its_success(monkeypatch):

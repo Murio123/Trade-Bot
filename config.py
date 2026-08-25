@@ -167,7 +167,13 @@ ENABLE_SPOT_SNAPSHOT_REFRESH = _get_bool("ENABLE_SPOT_SNAPSHOT_REFRESH", True)
 # Cadence in hours. The source is daily OHLCV, so anything faster buys nothing;
 # 2h keeps the snapshot comfortably inside the reader's 24h fail-closed limit
 # even after several consecutive failures.
-SPOT_SNAPSHOT_REFRESH_HOURS = _get_int("SPOT_SNAPSHOT_REFRESH_HOURS", 2)
+# Clamped, because this value is interpolated into a cron expression
+# (hour="*/N"). A typo of 0 would make APScheduler reject the trigger, and
+# build_scheduler() runs before the bot finishes starting — so a mistyped spot
+# setting would take the whole bot down. No Telegram feature outside the spot
+# section may depend on the spot section, and that includes its config.
+SPOT_SNAPSHOT_REFRESH_HOURS = min(24, max(1, _get_int(
+    "SPOT_SNAPSHOT_REFRESH_HOURS", 2)))
 # A live build measured ~33s over 467 symbols; this bounds a hung socket.
 SPOT_SNAPSHOT_BUILD_TIMEOUT_SECONDS = _get_int(
     "SPOT_SNAPSHOT_BUILD_TIMEOUT_SECONDS", 600)

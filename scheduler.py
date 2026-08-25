@@ -345,8 +345,20 @@ async def spot_snapshot_job(application) -> None:
     separation is the point: no Telegram feature outside the spot section may
     depend on Binance's spot API being reachable.
     """
-    result = await spot_refresh.refresh(
-        timeout_s=config.SPOT_SNAPSHOT_BUILD_TIMEOUT_SECONDS)
+    try:
+        result = await spot_refresh.refresh(
+            timeout_s=config.SPOT_SNAPSHOT_BUILD_TIMEOUT_SECONDS)
+    except Exception:  # noqa: BLE001
+        # `refresh` is written not to raise, and its reader now guarantees a
+        # single exception type. This is the belt to that pair of braces: the
+        # cost of being wrong is an unhandled error in the loop the futures
+        # streams share, and the cost of the guard is three lines.
+        log.exception("spot snapshot refresh raised; previous snapshot kept")
+        application.bot_data["spot_snapshot_refresh"] = {
+            "at": datetime.now(timezone.utc), "status": "failed",
+            "duration_s": None, "detail": "unexpected error", "assets": None,
+        }
+        return
     application.bot_data["spot_snapshot_refresh"] = {
         "at": datetime.now(timezone.utc),
         "status": result.status,
@@ -554,11 +566,19 @@ def build_scheduler(application) -> AsyncIOScheduler:
         # run landing on the same minute. coalesce collapses slots missed
         # during downtime into one run, because two catch-up builds would
         # produce the same file twice.
-        scheduler.add_job(
-            spot_snapshot_job,
-            CronTrigger(timezone="UTC", minute=7,
-                        hour=f"*/{config.SPOT_SNAPSHOT_REFRESH_HOURS}"),
-            args=[application], id="spot_snapshot",
-            coalesce=True, max_instances=1, misfire_grace_time=1800,
-        )
+        try:
+            scheduler.add_job(
+                spot_snapshot_job,
+                CronTrigger(timezone="UTC", minute=7,
+                            hour=f"*/{config.SPOT_SNAPSHOT_REFRESH_HOURS}"),
+                args=[application], id="spot_snapshot",
+                coalesce=True, max_instances=1, misfire_grace_time=1800,
+            )
+        except Exception:  # noqa: BLE001
+            # The cadence is clamped in config, so this should be unreachable.
+            # It is caught anyway because the alternative is that a bad spot
+            # setting stops the bot from starting at all — the futures streams,
+            # the alerts and the journal included.
+            log.exception("spot snapshot job could not be scheduled; the "
+                          "scanner will run on whatever snapshot exists")
     return scheduler

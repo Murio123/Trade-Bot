@@ -181,7 +181,11 @@ def _number(value: Any, where: str) -> float:
     return v
 
 
-def _coin(raw: dict[str, Any], path: str) -> CoinFacts:
+def _coin(raw: Any, path: str) -> CoinFacts:
+    if not isinstance(raw, dict):
+        raise SnapshotUnavailable(
+            "malformed", f"{path}: a coin entry is {type(raw).__name__}, "
+                         f"not an object")
     symbol = raw.get("symbol")
     if not isinstance(symbol, str) or not symbol:
         raise SnapshotUnavailable("malformed", f"{path}: a coin has no symbol")
@@ -232,6 +236,15 @@ def parse_snapshot(payload: dict[str, Any], *, path: str = "<memory>",
 
     Split out from `load_snapshot` so the freshness rule can be tested without
     a file, and so the rule lives in exactly one place for both callers.
+
+    **Raises `SnapshotUnavailable` and nothing else.** That is the contract the
+    rest of the product is written against: a Telegram handler catches this one
+    exception and shows the fail-closed screen, and the refresher catches it to
+    decide whether to rebuild. An `AttributeError` from a coin entry that
+    happens to be a string would sail past both — into a user's chat as a
+    silent failure, and into the shared event loop from the scheduler's job.
+    Every check below is explicit; `_guard` is the backstop for the ones
+    nobody thought of.
     """
     now = _now_ms() if now_ms is None else int(now_ms)
 
@@ -312,6 +325,23 @@ def parse_snapshot(payload: dict[str, Any], *, path: str = "<memory>",
     )
 
 
+def _guard(fn, path: str):
+    """Run a parse step, turning anything unexpected into `SnapshotUnavailable`.
+
+    Not a substitute for validation — every field is still checked explicitly.
+    This exists so that the one exception type the callers catch really is the
+    only one they can receive, including for a malformation nobody enumerated.
+    """
+    try:
+        return fn()
+    except SnapshotUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001
+        raise SnapshotUnavailable(
+            "malformed",
+            f"{path}: {type(exc).__name__}: {exc}") from exc
+
+
 def load_snapshot(path: str = DEFAULT_SNAPSHOT_PATH, *,
                   now_ms: int | None = None) -> MarketSnapshot:
     """Read and verify the snapshot at `path`, or raise `SnapshotUnavailable`."""
@@ -325,4 +355,5 @@ def load_snapshot(path: str = DEFAULT_SNAPSHOT_PATH, *,
             "unreadable", f"{path}: {type(exc).__name__}: {exc}") from exc
     if not isinstance(payload, dict):
         raise SnapshotUnavailable("malformed", f"{path}: not an object")
-    return parse_snapshot(payload, path=path, now_ms=now_ms)
+    return _guard(lambda: parse_snapshot(payload, path=path, now_ms=now_ms),
+                  path)
