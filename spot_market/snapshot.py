@@ -15,6 +15,14 @@ snapshot that was fresh when it was written and has since been left to rot,
 which is the failure mode of any cached artifact whose producer stops running.
 Neither implies the other, so neither is enough on its own.
 
+And `data_asof_ms` is not taken on trust. It is a claim the producer makes
+about its own contents, so the reader recomputes the oldest bar behind
+everything it is about to show and refuses a file that claims to be fresher
+than that. Skipping this leaves one hole big enough to walk through: a
+snapshot with a current top-level clock and a single coin whose last bar
+closed a year ago renders that coin as an ordinary card, and every screen
+still looks normal.
+
 No network, no database, no research imports. Reading is all this module does.
 """
 from __future__ import annotations
@@ -247,6 +255,28 @@ def parse_snapshot(payload: dict[str, Any], *, path: str = "<memory>",
 
     btc = _btc(payload.get("btc"), path)
 
+    # `data_asof_ms` is a claim the producer makes about its own contents, and
+    # the whole freshness rule rests on it. So it is re-derived here rather
+    # than trusted: the reader recomputes the oldest bar behind anything it is
+    # about to show and refuses a file that claims to be fresher than that.
+    #
+    # Without this, a snapshot with a current top-level clock and one coin
+    # whose last bar closed a year ago renders that coin as an ordinary card,
+    # which is precisely the failure the fail-closed rule exists to prevent —
+    # and it would be invisible, because every screen would look normal.
+    stamps = [c.last_close_ms for c in coins] + [btc.last_close_ms]
+    oldest, newest = min(stamps), max(stamps)
+    if data_asof_ms > oldest:
+        raise SnapshotUnavailable(
+            "inconsistent",
+            f"{path}: data_asof {iso(data_asof_ms)} is newer than the oldest "
+            f"bar it describes ({iso(oldest)}); the snapshot overstates its "
+            f"own freshness")
+    if newest - now > HOUR_MS:
+        raise SnapshotUnavailable(
+            "clock",
+            f"{path}: a bar is dated {iso(newest)}, ahead of now")
+
     # Freshness last, so a malformed file is reported as malformed rather than
     # as stale — the two need different fixes.
     snapshot_age_h = (now - generated_at_ms) / HOUR_MS
@@ -254,6 +284,9 @@ def parse_snapshot(payload: dict[str, Any], *, path: str = "<memory>",
         raise SnapshotUnavailable(
             "stale_snapshot",
             f"built {snapshot_age_h:.1f}h ago, limit {MAX_SNAPSHOT_AGE_HOURS}h")
+    # Checked against `data_asof_ms`, which the block above has established is
+    # no newer than any bar behind any screen. One stale coin therefore fails
+    # the whole snapshot rather than hiding inside a fresh-looking one.
     data_age_h = (now - data_asof_ms) / HOUR_MS
     if data_age_h > MAX_BAR_AGE_HOURS:
         raise SnapshotUnavailable(

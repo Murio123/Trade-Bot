@@ -103,6 +103,16 @@ served.
 BTC, not the maximum. The freshness promise has to hold for every coin on the
 screen, so the weakest link is what gets published.
 
+**And the reader does not take that value on trust.** It re-derives the oldest
+bar behind everything it is about to show and refuses a file that claims to be
+fresher than its own contents (`inconsistent`). A Codex audit found this gap:
+with the two clocks checked in isolation, a snapshot with a current top-level
+timestamp and one coin whose last bar closed a year ago rendered that coin as
+an ordinary card, and every screen still looked normal. A bar dated ahead of
+now is refused as `clock`. Four regression tests cover it, including one that
+asserts the builder's own output survives the reader's re-derivation — the two
+rules live in different files and could otherwise drift apart silently.
+
 On failure the user sees a named reason and **no numbers at all** — never a
 partial screen:
 
@@ -275,9 +285,9 @@ computation lives in the builder and cannot be reached from a handler.
 
 ## 10. Tests
 
-**2145 passed** (2054 before S4A; +91).
+**2151 passed** (2054 before S4A; +97).
 
-New: `tests/test_spot_snapshot.py` (22) and `tests/test_spot_screener.py` (54).
+New: `tests/test_spot_snapshot.py` (22) and `tests/test_spot_screener.py` (60).
 Amended: `tests/test_menu.py` (main menu is four sections),
 `tests/test_spot_governance.py` (+3, §11).
 
@@ -296,6 +306,7 @@ Coverage against the stage's requirements:
 | **delisted asset cannot appear today** | `test_a_delisted_asset_cannot_appear_in_todays_scanner`, `test_the_recency_test_is_anchored_to_now_not_to_the_symbols_own_history` |
 | stale data fails closed | `test_stale_data_fails_closed`, `test_a_snapshot_that_stopped_being_rebuilt_fails_closed` |
 | missing / broken data fails closed | 8 parametrised cases + `test_every_route_fails_closed_when_the_snapshot_is_gone` |
+| a stale coin cannot hide behind a fresh clock | `test_a_stale_coin_cannot_hide_behind_a_fresh_top_level_clock` + 3 (audit round 1) |
 | deterministic ordering | `test_ordering_is_deterministic_and_breaks_ties_on_the_symbol` |
 | explicit-symbol behaviour | `test_a_coin_is_only_ever_looked_up_by_an_explicit_symbol`, `test_the_only_hard_coded_symbol_is_the_benchmark` |
 | no dependence on futures open trades | `test_the_screener_does_not_touch_futures_open_trades_or_the_database` |

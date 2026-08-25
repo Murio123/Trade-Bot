@@ -119,6 +119,10 @@ def test_a_missing_snapshot_is_refused_rather_than_rendered_empty(tmp_path):
 
 
 def test_stale_data_fails_closed():
+    # The declared clock alone. The stronger case — producer and bars stale
+    # together — is `test_stale_data_fails_closed_when_every_clock_moves_together`
+    # below, and the case this one cannot see is
+    # `test_a_stale_coin_cannot_hide_behind_a_fresh_top_level_clock`.
     old = payload(data_asof_ms=NOW - (MAX_BAR_AGE_HOURS + 1) * HOUR)
     with pytest.raises(SnapshotUnavailable) as exc:
         parse_snapshot(old, now_ms=NOW)
@@ -619,3 +623,78 @@ def test_the_context_paragraph_is_a_pure_function_of_the_numbers(snap):
     c = snap.coins[0]
     assert spot_text.context_paragraph(c) == spot_text.context_paragraph(c)
     assert spot_text.context_paragraph(c).endswith(".")
+
+
+# --- the freshness claim is re-derived, not trusted --------------------------
+
+def test_a_stale_coin_cannot_hide_behind_a_fresh_top_level_clock():
+    """The hole a two-clock check leaves open on its own.
+
+    `data_asof_ms` is written by the producer. If the reader takes it on
+    trust, one coin whose last bar closed a year ago renders as an ordinary
+    card while every screen still looks current — the exact failure the
+    fail-closed rule exists to prevent, and invisible from the outside.
+    """
+    p = payload()
+    p["coins"][3]["last_close_ms"] = NOW - 365 * 24 * HOUR
+    with pytest.raises(SnapshotUnavailable) as exc:
+        parse_snapshot(p, now_ms=NOW)
+    assert exc.value.reason == "inconsistent"
+
+
+def test_a_stale_benchmark_cannot_hide_either():
+    p = payload()
+    p["btc"]["last_close_ms"] = NOW - 30 * 24 * HOUR
+    with pytest.raises(SnapshotUnavailable) as exc:
+        parse_snapshot(p, now_ms=NOW)
+    assert exc.value.reason == "inconsistent"
+
+
+def test_a_bar_dated_in_the_future_is_refused_as_a_clock_fault():
+    p = payload()
+    p["coins"][0]["last_close_ms"] = NOW + 48 * HOUR
+    with pytest.raises(SnapshotUnavailable) as exc:
+        parse_snapshot(p, now_ms=NOW)
+    assert exc.value.reason == "clock"
+
+
+def test_stale_data_fails_closed_when_every_clock_moves_together():
+    """The honest version of a stale snapshot: producer and bars agree.
+
+    The earlier test moved only the top-level field, which a reader that
+    re-derives its own anchor would still catch. This one is what a real
+    stalled pipeline looks like, and it must fail as `stale_data`.
+    """
+    old_ms = NOW - (MAX_BAR_AGE_HOURS + 5) * HOUR
+    p = payload(data_asof_ms=old_ms)
+    for c in p["coins"]:
+        c["last_close_ms"] = old_ms
+    p["btc"]["last_close_ms"] = old_ms
+    with pytest.raises(SnapshotUnavailable) as exc:
+        parse_snapshot(p, now_ms=NOW)
+    assert exc.value.reason == "stale_data"
+
+
+def test_a_snapshot_that_understates_its_own_freshness_is_still_served():
+    """Conservative in the safe direction is not an error."""
+    p = payload(data_asof_ms=NOW - 3 * HOUR)
+    assert parse_snapshot(p, now_ms=NOW).universe_size == 25
+
+
+def test_the_builder_declares_the_oldest_bar_and_the_reader_agrees():
+    """The producer's own output must survive the reader's re-derivation.
+
+    Asserted because the two rules live in different files and could drift
+    apart silently: the builder would keep publishing and the reader would
+    keep refusing.
+    """
+    from tests.test_spot_snapshot import NOW as BNOW
+    from tests.test_spot_snapshot import frame, panel
+    from tools.spot_snapshot import build_snapshot
+
+    frames, meta = panel()
+    frames["C0USDT"] = frame(400, ends_ms=BNOW - 20 * HOUR)
+    built = build_snapshot(frames, meta, BNOW, source="test")
+    snap = parse_snapshot(built, now_ms=BNOW)
+    assert snap.data_asof_ms == min(
+        [c.last_close_ms for c in snap.coins] + [snap.btc.last_close_ms])
