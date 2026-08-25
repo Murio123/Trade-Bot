@@ -144,8 +144,9 @@ The stronger guarantee is **ordering**, and it is what `main()` was
 restructured around: the lock is taken, the snapshot is built and validated
 entirely in memory, and only a complete payload reaches the filesystem. There
 is no instant at which the old snapshot is gone and the new one does not yet
-exist. Nothing is ever truncated in place, and `remove`/`unlink` do not appear
-in the write path — also asserted.
+exist. Nothing is ever truncated in place, and the only files the write path
+unlinks are scratch files — the canonical path is replaced, never removed and
+rewritten. Both are asserted on the AST.
 
 `test_an_interrupted_build_leaves_the_previous_snapshot_intact` kills a real
 builder process mid-run and compares SHA-256 before and after. That property

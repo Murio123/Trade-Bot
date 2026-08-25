@@ -329,9 +329,18 @@ def test_the_publish_is_an_atomic_rename_and_a_durable_one():
                   if isinstance(n, ast.FunctionDef) and n.name == "_fsync_dir")
     assert any(isinstance(n, ast.Call) and getattr(n.func, "attr", None)
                == "fsync" for n in ast.walk(dir_fn))
-    # And nothing in the write path may unlink or truncate the live file.
-    assert "unlink" not in [c for c in calls if c == "unlink"] or True
+    # Cleanup unlinks scratch files. It must never touch the live one: the
+    # canonical path is only ever *replaced*, never removed and rewritten.
     assert "truncate" not in calls
+    unlinked = [ast.dump(n.args[0]) for n in ast.walk(fn)
+                if isinstance(n, ast.Call)
+                and getattr(n.func, "attr", None) == "unlink" and n.args]
+    assert all("tmp" in u for u in unlinked), unlinked
+    sweep = next(n for n in ast.walk(tree)
+                 if isinstance(n, ast.FunctionDef)
+                 and n.name == "_sweep_stale_temps")
+    assert "TMP_PREFIX" in ast.dump(sweep), (
+        "the sweep must be scoped to scratch files by prefix")
 
 
 def test_a_killed_build_leaves_no_scratch_file_behind(panel, snapdir):
