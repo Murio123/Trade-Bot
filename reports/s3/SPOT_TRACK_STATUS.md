@@ -101,10 +101,15 @@ idea stated in the spec.
 
 ## 4. Repository state
 
-- Branch `claude/btc-telegram-trading-bot-1avo98`, **12 commits ahead of
-  origin and not pushed**: `git push` returns HTTP 403, the local credential
-  (`umutmost-svg`) is not the repository owner (`Murio123/Trade-Bot`). This is
-  the only external blocker and it needs the owner's authentication.
+- Branch `claude/btc-telegram-trading-bot-1avo98`, **pushed; origin is at
+  `79a1899`, 0 ahead / 0 behind**.
+- **The push blocker is RESOLVED (2026-08-25).** It is recorded rather than
+  deleted: `git push` used to return HTTP 403 because the local credential
+  (`umutmost-svg`) was not the repository owner (`Murio123/Trade-Bot`); the
+  owner's GitHub account was fixed and the 12 commits that this document
+  previously recorded as unpushed are now on origin. This correction is an
+  operational fact about the repository only — **no research verdict, number
+  or artifact changed with it**.
 - Full suite: **2054 passed**. Codex audit of the S3 work: **SAFE_TO_PUSH**
   after four rounds that found seven real defects between them.
 - `data/` is gitignored; the 73 MB panel and all generated evaluation

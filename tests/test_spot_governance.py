@@ -134,3 +134,39 @@ def test_the_spot_package_still_contains_no_feature_combiner():
         src = path.read_text(encoding="utf-8")
         for name in forbidden:
             assert name not in src, f"{path}: {name}"
+
+
+# --- operational repository state ----------------------------------------
+
+
+def test_the_push_blocker_is_recorded_as_resolved(gov):
+    """An administrative fact, kept honest the same way the research ones are.
+
+    The 403 really happened and the record keeps saying so; what changed is
+    that it no longer describes the present. A record that quietly deletes a
+    blocker is as unreadable later as one that never notices it was lifted.
+    """
+    repo = gov["repository"]
+    assert repo["pushed"] is True
+    assert repo["commits_ahead_of_origin"] == 0
+    assert repo["push_blocker"] is None
+    history = repo["push_blocker_history"]
+    assert history["status"] == "RESOLVED"
+    assert "403" in history["what"]
+
+
+def test_resolving_the_push_blocker_changed_no_research_fact(gov):
+    """The correction is operational. Nothing it touched may have moved."""
+    facts = gov["established_facts"]
+    assert facts["immutable"] is True
+    assert facts["stages"]["S3"]["verdict"] == "S3_NO_SIGNAL"
+    assert facts["target"]["base_rate"] == 0.2085
+    assert facts["trial_registry"]["n_trials"] == 6
+
+
+def test_the_status_document_marks_the_blocker_resolved_without_erasing_it():
+    text = open(STATUS).read()
+    assert "RESOLVED" in text
+    assert "HTTP 403" in text, (
+        "the blocker that was lifted must stay legible; a record that deletes "
+        "what it corrected cannot be checked")

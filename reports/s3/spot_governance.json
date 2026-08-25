@@ -88,9 +88,17 @@
 
   "repository": {
     "branch": "claude/btc-telegram-trading-bot-1avo98",
-    "commits_ahead_of_origin": 12,
-    "pushed": false,
-    "push_blocker": "HTTP 403: local credential umutmost-svg is not the owner of Murio123/Trade-Bot; needs the owner's authentication",
+    "commits_ahead_of_origin": 0,
+    "pushed": true,
+    "origin_head": "79a1899",
+    "push_blocker": null,
+    "push_blocker_history": {
+      "what": "HTTP 403: local credential umutmost-svg was not the owner of Murio123/Trade-Bot",
+      "status": "RESOLVED",
+      "resolved": "2026-08-25",
+      "how": "the owner's GitHub account was fixed; the 12 commits recorded here as unpushed are now on origin at 79a1899",
+      "note": "operational fact only; no research verdict, number or artifact was touched by this correction"
+    },
     "full_suite_passing": 2054,
     "codex_verdict": "SAFE_TO_PUSH"
   }
