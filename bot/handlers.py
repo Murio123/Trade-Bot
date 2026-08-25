@@ -507,6 +507,14 @@ async def testalert_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "текущий расклад, или снизь SCORE_ALERT_MIN.")
 
 
+def _spot_health() -> dict[str, object] | None:
+    try:
+        return spot_screener.snapshot_health()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("status_cmd: spot snapshot health failed: %s", exc)
+        return None
+
+
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     binance = _binance(context)
     bot_data = context.application.bot_data
@@ -546,6 +554,11 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         "open_trades": open_trades,
         "closed_trades": stats.get("total", 0),
         "winrate": stats.get("winrate", 0),
+        # S4A.1. Read through the screener's own fail-closed loader, so
+        # /status cannot call a snapshot healthy that the scanner refuses.
+        # Never allowed to break /status: the spot section is one feature.
+        "spot_snapshot": _spot_health(),
+        "spot_refresh": bot_data.get("spot_snapshot_refresh"),
     }
     await update.effective_message.reply_text(formatting.format_status(s))
 

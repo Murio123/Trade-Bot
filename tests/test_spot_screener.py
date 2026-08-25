@@ -490,18 +490,52 @@ def test_spot_market_imports_neither_the_runtime_nor_the_research_package():
                 f"{path.name} imports {name}"
 
 
-def test_only_the_adapter_module_imports_spot_market():
-    """One file wide, and asserted rather than promised."""
+# The two production modules allowed to import `spot_market`, and what each
+# is for. S4A had one; S4A.1 added the second so the scheduler can keep the
+# snapshot fresh. The list is short and explicit because its whole value is
+# that adding to it takes a deliberate edit — `handlers.py` appearing here
+# would mean the screener had reached the database and the futures pipeline.
+SPOT_MARKET_CONSUMERS = {
+    "bot/spot_screener.py",   # renders the Telegram screens
+    "scheduler.py",           # runs the two-hourly refresh job (S4A.1)
+}
+
+
+def test_only_the_declared_consumers_import_spot_market():
     skip = {".venv", ".git", "__pycache__", "scratchpad", "tests",
             "spot_market"}
     offenders = []
     for py in REPO.rglob("*.py"):
         if skip & set(py.parts):
             continue
-        if py.name == "spot_screener.py":
+        if str(py.relative_to(REPO)) in SPOT_MARKET_CONSUMERS:
             continue
         if any(n.split(".")[0] == "spot_market" for n in imports_of(py)):
             offenders.append(str(py.relative_to(REPO)))
+    assert not offenders, offenders
+
+
+def test_the_research_package_never_enters_the_bot_process():
+    """S4A.1's load-bearing property, and the reason the builder is a
+    subprocess rather than an import.
+
+    `tools/spot_snapshot.py` imports `spot.features` and `spot.universe`. If
+    anything reachable from `main.py` imported IT, offline research code would
+    be loaded into the live runtime — the direction the S-track's import rule
+    exists to forbid. A module name in a string is not an import, and this is
+    what makes that claim checkable rather than rhetorical.
+    """
+    skip = {".venv", ".git", "__pycache__", "scratchpad", "tests", "tools",
+            "spot", "labeling", "validation"}
+    offenders = []
+    for py in REPO.rglob("*.py"):
+        if skip & set(py.parts):
+            continue
+        for name in imports_of(py):
+            root = name.split(".")[0]
+            if root == "spot" or (root == "tools"
+                                  and "spot_snapshot" in name):
+                offenders.append(f"{py.relative_to(REPO)} imports {name}")
     assert not offenders, offenders
 
 

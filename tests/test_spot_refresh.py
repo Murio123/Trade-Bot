@@ -1,0 +1,633 @@
+"""S4A.1 — the automated snapshot refresh.
+
+One property matters more than the rest and most of this file is about it:
+**a refresh that fails must leave the previous snapshot exactly where it was.**
+The scanner already knows how to go dark when its data ages out. What it
+cannot survive is a refresher that truncates the file it is about to rewrite
+and then loses its network connection — that turns a temporary outage into a
+permanent one, and it does so silently.
+
+So the failure paths are tested with real subprocesses against real files,
+not with mocks of them. A mock cannot demonstrate that an interrupted build
+left a byte-identical snapshot behind.
+
+Nothing here reaches the network: every subprocess runs the builder in
+`--source panel` mode against a synthetic panel on disk, or is made to fail
+before it gets that far.
+"""
+from __future__ import annotations
+
+import ast
+import asyncio
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+import scheduler as sched
+from spot_market import refresh as spot_refresh
+from spot_market.snapshot import MAX_SNAPSHOT_AGE_HOURS
+from tools.spot_snapshot import (EXIT_FAILED, EXIT_LOCKED, EXIT_OK, LOCK_NAME,
+                                 SNAPSHOT_NAME, SnapshotLocked, build_lock)
+
+REPO = Path(__file__).resolve().parents[1]
+HOUR_MS = 3_600_000
+DAY = 86_400_000
+
+
+# --- a tiny real panel, so the builder can run for real ----------------------
+
+def _frame(bars: int, ends_ms: int, *, close: float, drift: float,
+           quote_volume: float) -> pd.DataFrame:
+    rows = []
+    first = ends_ms - bars * DAY
+    price = close
+    for i in range(bars):
+        ot = first + i * DAY
+        price *= (1.0 + drift)
+        rows.append({"open_time": ot, "open": price, "high": price * 1.01,
+                     "low": price * 0.99, "close": price, "volume": 1.0,
+                     "close_time": ot + DAY - 1,
+                     "quote_volume": quote_volume, "trades": 10})
+    return pd.DataFrame(rows)
+
+
+@pytest.fixture
+def panel(tmp_path):
+    """A four-symbol S1-shaped panel the builder's `--source panel` accepts."""
+    from tools.spot_cache import write_symbol
+
+    outdir = tmp_path / "data"
+    klines = outdir / "klines"
+    klines.mkdir(parents=True)
+    now_ms = int(pd.Timestamp.utcnow().timestamp() * 1000)
+    # Bars end at the last midnight so the snapshot is fresh by construction.
+    ends = (now_ms // DAY) * DAY
+
+    # Two of the six no longer trade. Not decoration: `load_panel` refuses a
+    # panel whose delisted share has collapsed, because a survivors-only panel
+    # is what a survivorship-biased universe looks like from the inside. A
+    # fixture that dodged that rule would be testing a loader production does
+    # not use.
+    symbols = [("BTCUSDT", "BTC", 0.0005, 6e8, True),
+               ("AAAUSDT", "AAA", 0.0002, 2e7, True),
+               ("BBBUSDT", "BBB", -0.0003, 3e7, True),
+               ("CCCUSDT", "CCC", 0.0001, 4e7, True),
+               ("DEADUSDT", "DEAD", 0.0001, 5e7, False),
+               ("GONEUSDT", "GONE", 0.0001, 5e7, False)]
+    records = []
+    for symbol, base, drift, volume, alive in symbols:
+        status = "TRADING" if alive else "BREAK"
+        spine = {"symbol": symbol, "status": status, "trading_now": alive}
+        # The dead pairs stop a year ago, exactly as a delisted pair does.
+        last = ends if alive else ends - 365 * DAY
+        write_symbol(_frame(400, last, close=100.0, drift=drift,
+                            quote_volume=volume),
+                     str(klines), symbol=symbol, spine=spine,
+                     duplicates_removed=0)
+        records.append({"symbol": symbol, "base_asset": base,
+                        "quote_asset": "USDT", "status": status,
+                        "trading_now": alive})
+    (outdir / "symbols.json").write_text(
+        json.dumps({"stage": "S1", "symbols": records}), encoding="utf-8")
+    return outdir
+
+
+@pytest.fixture
+def snapdir(tmp_path):
+    d = tmp_path / "snapshot"
+    d.mkdir()
+    return d
+
+
+def run_builder(panel_dir, snap_dir, *extra) -> subprocess.CompletedProcess:
+    """The CLI, exactly as an operator or the scheduler would invoke it."""
+    return subprocess.run(
+        [sys.executable, "-m", "tools.spot_snapshot", "--source", "panel",
+         "--outdir", str(panel_dir), "--snapshot-dir", str(snap_dir), *extra],
+        cwd=str(REPO), capture_output=True, text=True, timeout=300)
+
+
+def digest(path: Path) -> str | None:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+# --- the manual CLI still works, and it is the same one ----------------------
+
+def test_the_manual_cli_builds_and_publishes_a_snapshot(panel, snapdir):
+    proc = run_builder(panel, snapdir)
+    assert proc.returncode == EXIT_OK, proc.stderr
+    payload = json.loads((snapdir / SNAPSHOT_NAME).read_text())
+    assert payload["schema"] == "spot.snapshot/1"
+    assert payload["counts"]["eligible"] == 4
+    assert "refresh started" in proc.stdout
+    assert "refresh finished" in proc.stdout
+
+
+def test_the_automated_path_invokes_that_same_cli(snapdir, monkeypatch):
+    """One builder, two invocation paths — asserted, not asserted about.
+
+    The refresher names the builder module; it does not reimplement it. If a
+    second implementation ever appears, this is the test that has to be
+    deleted to make it pass.
+    """
+    assert spot_refresh.BUILDER_MODULE == "tools.spot_snapshot"
+    seen: dict = {}
+
+    async def capture(*argv, **kw):
+        seen["argv"] = list(argv)
+        seen["cwd"] = kw.get("cwd")
+
+        class _P:
+            returncode = EXIT_OK
+
+            async def communicate(self):
+                return b"", b""
+        return _P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", capture)
+    asyncio.run(spot_refresh.refresh(str(snapdir / SNAPSHOT_NAME), force=True))
+
+    assert seen["argv"][1:3] == ["-m", "tools.spot_snapshot"]
+    assert "--source" in seen["argv"] and "live" in seen["argv"]
+    # The destination is passed explicitly rather than inherited from the
+    # working directory: the bot and the builder must not be able to disagree
+    # about which file is the canonical one.
+    assert seen["argv"][seen["argv"].index("--snapshot-dir") + 1] == \
+        str(snapdir)
+    assert seen["cwd"] == spot_refresh.REPO_ROOT
+
+
+# --- a successful refresh publishes -----------------------------------------
+
+def test_a_successful_refresh_publishes_a_readable_snapshot(panel, snapdir):
+    proc = run_builder(panel, snapdir)
+    assert proc.returncode == EXIT_OK, proc.stderr
+
+    result = asyncio.run(spot_refresh.refresh(str(snapdir / SNAPSHOT_NAME)))
+    assert result.status == "skipped_fresh"
+    assert result.ok
+    assert result.eligible == 4  # the two delisted pairs are excluded
+
+
+# --- a failed refresh preserves the previous snapshot ------------------------
+
+def test_a_failed_refresh_leaves_the_previous_snapshot_byte_identical(
+        panel, snapdir, tmp_path):
+    """The defining requirement of this stage.
+
+    The build is made to fail the way a real one does — the data it needs is
+    not there — after the previous snapshot has already been published. The
+    old file must be untouched, not merely present: a truncated or partially
+    rewritten file would still "exist".
+    """
+    assert run_builder(panel, snapdir).returncode == EXIT_OK
+    before = digest(snapdir / SNAPSHOT_NAME)
+    assert before is not None
+
+    empty = tmp_path / "empty"
+    (empty / "klines").mkdir(parents=True)
+    (empty / "symbols.json").write_text(json.dumps({"symbols": []}))
+    proc = run_builder(empty, snapdir)
+
+    assert proc.returncode == EXIT_FAILED
+    assert "FAILED" in proc.stderr
+    assert "previous snapshot preserved" in proc.stderr
+    assert digest(snapdir / SNAPSHOT_NAME) == before
+
+
+def test_an_interrupted_build_leaves_the_previous_snapshot_intact(panel,
+                                                                  snapdir):
+    """A killed process, not a raised exception. There is no `finally` here.
+
+    The guarantee comes from ordering — the write is the last thing that
+    happens inside the lock — so it has to hold when the process simply stops
+    existing mid-build.
+    """
+    assert run_builder(panel, snapdir).returncode == EXIT_OK
+    before = digest(snapdir / SNAPSHOT_NAME)
+
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "tools.spot_snapshot", "--source", "panel",
+         "--outdir", str(panel), "--snapshot-dir", str(snapdir)],
+        cwd=str(REPO), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc.kill()
+    proc.communicate()
+
+    assert digest(snapdir / SNAPSHOT_NAME) == before
+    assert not list(snapdir.glob("*.tmp"))
+
+
+def test_a_refresh_whose_builder_cannot_start_reports_it_and_preserves(
+        panel, snapdir):
+    assert run_builder(panel, snapdir).returncode == EXIT_OK
+    before = digest(snapdir / SNAPSHOT_NAME)
+    result = asyncio.run(spot_refresh.refresh(
+        str(snapdir / SNAPSHOT_NAME), force=True,
+        python="/nonexistent/python"))
+    assert result.status == "failed"
+    assert result.previous_preserved
+    assert digest(snapdir / SNAPSHOT_NAME) == before
+
+
+def test_a_build_that_exceeds_its_timeout_is_killed_and_reaped(panel, snapdir,
+                                                               monkeypatch):
+    """A hung socket must cost one cycle, not every cycle after it.
+
+    The kill alone is not enough: an unreaped child keeps the build lock for
+    the life of the bot process, and every later slot would then skip. So the
+    test asserts the refresher waits for the corpse as well as producing one.
+    """
+    assert run_builder(panel, snapdir).returncode == EXIT_OK
+    before = digest(snapdir / SNAPSHOT_NAME)
+    events: list[str] = []
+
+    async def hang(*argv, **kw):
+        class _P:
+            returncode = None
+
+            async def communicate(self):
+                if "killed" in events:
+                    return b"", b"killed"
+                await asyncio.sleep(60)
+                return b"", b""       # pragma: no cover
+
+            def kill(self):
+                events.append("killed")
+        return _P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", hang)
+    result = asyncio.run(spot_refresh.refresh(
+        str(snapdir / SNAPSHOT_NAME), force=True, timeout_s=1))
+
+    assert result.status == "timeout"
+    assert events == ["killed"]
+    assert result.previous_preserved
+    assert digest(snapdir / SNAPSHOT_NAME) == before
+
+
+# --- an invalid result is never published -----------------------------------
+
+def test_a_builder_that_exits_zero_with_an_unreadable_result_is_a_failure(
+        panel, snapdir, monkeypatch):
+    """Exit code 0 is the builder's opinion, not a fact.
+
+    The refresher reads the result back through the same fail-closed loader
+    the Telegram screens use. A snapshot the product cannot read is not a
+    successful refresh, whatever the process claimed on its way out.
+    """
+    assert run_builder(panel, snapdir).returncode == EXIT_OK
+    (snapdir / SNAPSHOT_NAME).write_text("{ not json", encoding="utf-8")
+
+    async def fake_exec(*argv, **kw):
+        class _P:
+            returncode = EXIT_OK
+
+            async def communicate(self):
+                return b"", b""
+        return _P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    result = asyncio.run(spot_refresh.refresh(
+        str(snapdir / SNAPSHOT_NAME), force=True))
+    assert result.status == "failed"
+    assert "unreadable" in result.detail
+
+
+def test_the_publish_is_an_atomic_rename_not_a_rewrite():
+    """Asserted on the code, because the race it prevents cannot be staged.
+
+    A handler reading the file at the instant it is replaced must see either
+    the whole old snapshot or the whole new one. `os.replace` on the same
+    filesystem is atomic; open-truncate-write is not.
+    """
+    src = (REPO / "tools" / "spot_snapshot.py").read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "write_snapshot")
+    body = ast.dump(fn)
+    assert "'replace'" in body or '"replace"' in body
+    calls = [n.func.attr for n in ast.walk(fn)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)]
+    assert "replace" in calls
+    assert "remove" not in calls and "unlink" not in calls
+
+
+# --- concurrency -------------------------------------------------------------
+
+def test_two_builds_cannot_run_at_once(panel, snapdir):
+    """The lock covers every invocation path, including a manual one.
+
+    The overlap that will actually happen is not two scheduler slots — those
+    are two hours apart — but an operator running the CLI while the job is
+    mid-build.
+    """
+    with build_lock(str(snapdir)):
+        proc = run_builder(panel, snapdir)
+    assert proc.returncode == EXIT_LOCKED
+    assert "SKIPPED" in proc.stderr
+    assert "previous snapshot preserved" in proc.stderr
+
+
+def test_the_lock_is_released_when_its_holder_exits(panel, snapdir, tmp_path):
+    """`flock`, not a pid file: a killed builder must not block every later run.
+
+    This is the whole reason for the mechanism. A pid file survives SIGKILL
+    and then jams every subsequent refresh until a human notices — a worse
+    failure than the overlap it was meant to prevent.
+    """
+    import time
+
+    holder = tmp_path / "holder.py"
+    holder.write_text(
+        "import sys, time\n"
+        f"sys.path.insert(0, {str(REPO)!r})\n"
+        "from tools.spot_snapshot import build_lock\n"
+        f"with build_lock({str(snapdir)!r}):\n"
+        "    print('held', flush=True)\n"
+        "    time.sleep(60)\n", encoding="utf-8")
+
+    proc = subprocess.Popen([sys.executable, str(holder)], cwd=str(REPO),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == b"held"
+        # While it is held, a build refuses instead of waiting.
+        assert run_builder(panel, snapdir).returncode == EXIT_LOCKED
+    finally:
+        proc.kill()
+        proc.communicate(timeout=10)
+
+    # The kernel released it when the holder died.
+    for _ in range(100):
+        if run_builder(panel, snapdir).returncode == EXIT_OK:
+            break
+        time.sleep(0.05)
+    else:  # pragma: no cover
+        pytest.fail("the lock outlived the process that held it")
+
+
+def test_the_lock_raises_rather_than_waiting():
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        with build_lock(d):
+            with pytest.raises(SnapshotLocked):
+                with build_lock(d):
+                    pass  # pragma: no cover
+
+
+# --- freshness decisions -----------------------------------------------------
+
+def test_a_fresh_snapshot_is_not_rebuilt(panel, snapdir):
+    assert run_builder(panel, snapdir).returncode == EXIT_OK
+    assert spot_refresh.needs_refresh(str(snapdir / SNAPSHOT_NAME)) is False
+    result = asyncio.run(spot_refresh.refresh(str(snapdir / SNAPSHOT_NAME)))
+    assert result.status == "skipped_fresh"
+
+
+def test_a_missing_snapshot_needs_a_refresh(snapdir):
+    assert spot_refresh.needs_refresh(str(snapdir / SNAPSHOT_NAME)) is True
+
+
+def test_a_snapshot_past_the_refresh_window_needs_one(panel, snapdir):
+    assert run_builder(panel, snapdir).returncode == EXIT_OK
+    path = str(snapdir / SNAPSHOT_NAME)
+    payload = json.loads((snapdir / SNAPSHOT_NAME).read_text())
+    later = payload["generated_at_ms"] + spot_refresh.REFRESH_AFTER_HOURS * HOUR_MS
+    assert spot_refresh.needs_refresh(path, now_ms=later) is True
+    assert spot_refresh.needs_refresh(path, now_ms=later - HOUR_MS) is False
+
+
+def test_an_unreadable_snapshot_needs_a_refresh_whatever_the_reason(snapdir):
+    """Not only age. A malformed file will not repair itself, and leaving it
+    in place would keep the scanner dark until somebody looked."""
+    (snapdir / SNAPSHOT_NAME).write_text("{}", encoding="utf-8")
+    assert spot_refresh.needs_refresh(str(snapdir / SNAPSHOT_NAME)) is True
+
+
+def test_the_refresh_window_sits_well_inside_the_fail_closed_limit():
+    """The refresher must act long before the scanner would go dark.
+
+    Several consecutive failures have to be survivable, which is only true if
+    the two thresholds are far apart.
+    """
+    assert spot_refresh.REFRESH_AFTER_HOURS < MAX_SNAPSHOT_AGE_HOURS
+    assert MAX_SNAPSHOT_AGE_HOURS / spot_refresh.REFRESH_AFTER_HOURS >= 4
+
+
+def test_freshness_thresholds_were_not_relaxed_by_this_stage():
+    """S4A.1 is infrastructure. Weakening a limit to hide a refresh that did
+    not happen would make the scanner lie instead of going quiet."""
+    from spot_market.snapshot import MAX_BAR_AGE_HOURS
+    assert MAX_BAR_AGE_HOURS == 48
+    assert MAX_SNAPSHOT_AGE_HOURS == 24
+
+
+# --- scheduler and startup wiring -------------------------------------------
+
+def test_the_refresh_job_is_registered_on_the_expected_cadence(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "ENABLE_SPOT_SNAPSHOT_REFRESH", True)
+    monkeypatch.setattr(config, "SPOT_SNAPSHOT_REFRESH_HOURS", 2)
+    built = sched.build_scheduler(_FakeApp())
+    job = built.get_job("spot_snapshot")
+    assert job is not None
+    assert job.func is sched.spot_snapshot_job
+    # Cron, not interval: the cadence must survive a redeploy rather than
+    # restarting from "now" every time the container comes back.
+    assert str(job.trigger).startswith("cron")
+    fields = {f.name: str(f) for f in job.trigger.fields}
+    assert fields["hour"] == "*/2"
+    assert fields["minute"] == "7"
+    assert job.coalesce is True
+    assert job.max_instances == 1
+
+
+def test_the_refresh_job_can_be_switched_off(monkeypatch):
+    import config
+
+    monkeypatch.setattr(config, "ENABLE_SPOT_SNAPSHOT_REFRESH", False)
+    assert sched.build_scheduler(_FakeApp()).get_job("spot_snapshot") is None
+
+
+class _FakeApp:
+    def __init__(self) -> None:
+        self.bot_data: dict = {}
+
+
+def test_a_failed_refresh_does_not_raise_into_the_event_loop(monkeypatch):
+    """The futures streams share this loop. A spot outage is not their problem."""
+    async def failing(*a, **kw):
+        return spot_refresh.RefreshResult(
+            status="failed", detail="binance unreachable", duration_s=1.0,
+            previous_preserved=True)
+
+    monkeypatch.setattr(sched.spot_refresh, "refresh", failing)
+    app = _FakeApp()
+    asyncio.run(sched.spot_snapshot_job(app))
+    state = app.bot_data["spot_snapshot_refresh"]
+    assert state["status"] == "failed"
+    assert "spot_snapshot_last_success" not in app.bot_data
+
+
+def test_a_successful_refresh_records_its_success(monkeypatch):
+    async def ok(*a, **kw):
+        return spot_refresh.RefreshResult(
+            status="built", detail="ok", duration_s=33.0,
+            previous_preserved=True, eligible=34)
+
+    monkeypatch.setattr(sched.spot_refresh, "refresh", ok)
+    app = _FakeApp()
+    asyncio.run(sched.spot_snapshot_job(app))
+    assert app.bot_data["spot_snapshot_refresh"]["assets"] == 34
+    assert "spot_snapshot_last_success" in app.bot_data
+
+
+def test_startup_schedules_one_refresh_and_does_not_await_it():
+    """Startup must not block on Binance, and must not skip the gap.
+
+    Railway's filesystem is ephemeral, so a redeploy begins with no snapshot
+    at all; without this the scanner would stay dark until the next slot.
+    """
+    src = (REPO / "main.py").read_text(encoding="utf-8")
+    assert "initial_spot_snapshot" in src
+    assert "ENABLE_SPOT_SNAPSHOT_REFRESH" in src
+    tree = ast.parse(src)
+    awaited = [n for n in ast.walk(tree)
+               if isinstance(n, ast.Await)
+               and "spot" in ast.dump(n.value).lower()]
+    assert not awaited, "startup must not await the spot refresh"
+
+
+def test_startup_with_a_fresh_snapshot_does_not_rebuild(panel, snapdir):
+    """The startup job is the same job; freshness is what makes it cheap."""
+    assert run_builder(panel, snapdir).returncode == EXIT_OK
+    result = asyncio.run(spot_refresh.refresh(str(snapdir / SNAPSHOT_NAME)))
+    assert result.status == "skipped_fresh"
+    assert result.duration_s < 5
+
+
+# --- /status -----------------------------------------------------------------
+
+def test_status_reports_the_snapshot_through_the_same_fail_closed_reader(
+        tmp_path, monkeypatch):
+    from bot import spot_screener as ss
+
+    path = tmp_path / "current.json"
+    monkeypatch.setattr(ss.snap_mod, "DEFAULT_SNAPSHOT_PATH", str(path))
+    health = ss.snapshot_health()
+    assert health["ok"] is False
+    assert health["reason"] == "missing"
+
+
+def test_the_status_line_says_the_scanner_is_off_when_the_snapshot_is_not_ok():
+    from bot import formatting
+
+    text = formatting.format_status({
+        "dry_run": False, "db_connected": True, "alert_chats": 1,
+        "signal_tf": "4H", "fast_tf": "15m",
+        "spot_snapshot": {"ok": False, "reason": "stale_data"},
+        "spot_refresh": {"status": "failed", "at": None},
+    })
+    assert "НЕДОСТУПЕН" in text and "сканер отключён" in text
+    assert "последнее обновление: failed" in text
+
+
+def test_the_status_line_is_absent_when_there_is_nothing_to_say():
+    from bot import formatting
+
+    text = formatting.format_status({
+        "dry_run": False, "db_connected": True, "alert_chats": 1,
+        "signal_tf": "4H", "fast_tf": "15m"})
+    assert "Спот-снимок" not in text
+
+
+def test_a_broken_snapshot_never_breaks_status(monkeypatch):
+    import bot.handlers as h
+
+    def boom():
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(h.spot_screener, "snapshot_health", boom)
+    assert h._spot_health() is None
+
+
+# --- deployment configuration ------------------------------------------------
+
+def test_the_deployment_runs_one_service_that_owns_the_snapshot():
+    """The persistence argument, asserted where it can rot.
+
+    A second Railway service would have its own filesystem and would write a
+    snapshot this bot could never read. One `worker` process is what makes the
+    shared-file design correct, so a Procfile that grows a second process type
+    has to come back through this test.
+    """
+    procfile = (REPO / "Procfile").read_text(encoding="utf-8").strip()
+    assert procfile == "worker: python main.py"
+    assert not (REPO / "railway.json").exists()
+    assert not (REPO / "Dockerfile").exists()
+
+
+def test_the_snapshot_path_is_the_same_one_on_both_sides():
+    from spot_market.snapshot import DEFAULT_SNAPSHOT_PATH
+    from tools.spot_snapshot import DEFAULT_SNAPSHOT_DIR, SNAPSHOT_NAME
+
+    assert DEFAULT_SNAPSHOT_PATH == os.path.join(DEFAULT_SNAPSHOT_DIR,
+                                                 SNAPSHOT_NAME)
+
+
+def test_no_credentials_are_needed_or_referenced_by_the_refresh_path():
+    """Binance's public spot endpoints only. No key, no secret, no signature."""
+    for rel in ("tools/spot_snapshot.py", "tools/spot_client.py",
+                "spot_market/refresh.py"):
+        src = (REPO / rel).read_text(encoding="utf-8")
+        low = src.lower()
+        # Credential-shaped names only. "token" is excluded on purpose:
+        # `is_leveraged_token` is a universe rule, not a secret.
+        for banned in ("api_key", "apikey", "api_secret", "secret",
+                       "x-mbx-apikey", "bearer", "signature="):
+            assert banned not in low, f"{rel}: {banned}"
+
+
+def test_the_new_settings_are_documented_by_name_only():
+    env = (REPO / ".env.example").read_text(encoding="utf-8")
+    for name in ("ENABLE_SPOT_SNAPSHOT_REFRESH", "SPOT_SNAPSHOT_REFRESH_HOURS",
+                 "SPOT_SNAPSHOT_BUILD_TIMEOUT_SECONDS"):
+        assert name in env, name
+
+
+# --- nothing about S4A's product logic moved ---------------------------------
+
+def test_this_stage_changed_no_ranking_or_eligibility_rule():
+    """S4A.1 is infrastructure. The screener's semantics are frozen here."""
+    from spot_market.views import SHORTLIST_SIZE, VIEWS
+    from tools.spot_snapshot import (ACTIVITY_WINDOW_DAYS, MAX_LAST_BAR_AGE_MS,
+                                     MIN_BARS, MIN_LISTING_AGE_DAYS,
+                                     MIN_MEDIAN_DOLLAR_VOLUME)
+
+    assert [v.field for v in VIEWS] == [
+        "rel_btc_90d", "median_quote_volume_30d", "drawdown_180d",
+        "relative_volume"]
+    assert SHORTLIST_SIZE == 8
+    assert (MIN_BARS, MIN_LISTING_AGE_DAYS) == (200, 180)
+    assert MIN_MEDIAN_DOLLAR_VOLUME == 5_000_000.0
+    assert MAX_LAST_BAR_AGE_MS == 48 * 3_600_000
+    assert ACTIVITY_WINDOW_DAYS == 30
+
+
+def test_the_refresh_layer_introduced_no_predictive_language():
+    for rel in ("spot_market/refresh.py", "scheduler.py"):
+        src = (REPO / rel).read_text(encoding="utf-8")
+        low = src.lower()
+        for banned in ("probability of", "2x", "expected return",
+                       "alpha_score", "composite_score"):
+            assert banned not in low, f"{rel}: {banned}"

@@ -95,6 +95,19 @@ async def _amain() -> None:
     from scheduler import analysis_job
     scheduler.add_job(analysis_job, args=[application], id="initial_analysis")
 
+    # S4A.1: Railway's container filesystem is ephemeral, so a redeploy starts
+    # with no snapshot at all and the spot scanner would stay dark until the
+    # next two-hourly slot. One controlled refresh at startup closes that gap.
+    #
+    # Scheduled rather than awaited: the build takes ~33s and startup must not
+    # block on Binance's spot API. The job skips immediately when a fresh
+    # snapshot survived the restart, and it cannot raise — a spot refresh that
+    # fails leaves every other part of the bot running.
+    if config.ENABLE_SPOT_SNAPSHOT_REFRESH:
+        from scheduler import spot_snapshot_job
+        scheduler.add_job(spot_snapshot_job, args=[application],
+                          id="initial_spot_snapshot")
+
     stop_event = asyncio.Event()
 
     def _stop(*_):

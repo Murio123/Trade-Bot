@@ -891,6 +891,7 @@ def format_status(s: dict[str, Any]) -> str:
         lines.append(f"   └ результат: заблокирован ({s.get('last_analysis_blocked_at')})")
     elif st:
         lines.append(f"   └ результат: {st}")
+    lines += _spot_snapshot_lines(s)
     lines += [
         "",
         f"📈 Таймфреймы: {s.get('signal_tf')} осн. + {s.get('fast_tf')} быстрый",
@@ -899,6 +900,67 @@ def format_status(s: dict[str, Any]) -> str:
         + (f", винрейт {s.get('winrate')}%" if s.get('closed_trades') else ""),
     ]
     return "\n".join(lines)
+
+
+_SPOT_SNAPSHOT_REASONS = {
+    "missing": "ещё не построен",
+    "stale_data": "данные устарели",
+    "stale_snapshot": "обновление не завершено",
+    "inconsistent": "противоречит сам себе",
+    "unreadable": "файл повреждён",
+    "malformed": "неполный",
+    "schema": "неизвестный формат",
+    "empty": "пустой",
+    "clock": "расходится по времени",
+}
+
+
+def _spot_snapshot_lines(s: dict[str, Any]) -> list[str]:
+    """One health line for the spot screener, plus a failure note if there is
+    one. Absent entirely when /status has nothing to say about it.
+
+    Deliberately two lines at most. /status describes the whole bot, and the
+    spot scanner is one section of it; research internals belong in the
+    reports, not here.
+    """
+    health = s.get("spot_snapshot")
+    refresh = s.get("spot_refresh") or {}
+    if not health:
+        return []
+
+    if health.get("ok"):
+        head = (f"🪙 Спот-снимок: OK · {health.get('assets')} "
+                f"{_coins_word(int(health.get('assets') or 0))} · обновлён "
+                f"{_ago(_from_ms(health.get('generated_at_ms')))}")
+    else:
+        why = _SPOT_SNAPSHOT_REASONS.get(str(health.get("reason")),
+                                         str(health.get("reason")))
+        head = f"🪙 Спот-снимок: НЕДОСТУПЕН ({why}) — сканер отключён"
+
+    out = ["", head]
+    status = refresh.get("status")
+    if status and status not in ("built", "skipped_fresh"):
+        out.append(f"   └ последнее обновление: {status} "
+                   f"({_ago(refresh.get('at'))})")
+    return out
+
+
+def _from_ms(ms: Any):
+    if ms is None:
+        return None
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(int(ms) / 1000, tz=timezone.utc)
+
+
+def _coins_word(n: int) -> str:
+    if 11 <= n % 100 <= 14:
+        return "монет"
+    last = n % 10
+    if last == 1:
+        return "монета"
+    if 2 <= last <= 4:
+        return "монеты"
+    return "монет"
 
 
 def format_trade_event(trade: dict[str, Any], event: dict[str, Any]) -> str:

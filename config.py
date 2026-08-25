@@ -159,6 +159,19 @@ ENABLE_POSITION_ANALYSIS = _get_bool("ENABLE_POSITION_ANALYSIS", True)
 # registered for it at all.
 ENABLE_BOUNCE_PROFILE = _get_bool("ENABLE_BOUNCE_PROFILE", False)
 
+# --- Spot snapshot refresh (S4A.1) -----------------------------------------
+# The Telegram spot screener reads a snapshot file; this keeps it fresh. The
+# refresher runs INSIDE this process (one Railway service, one filesystem) and
+# shells out to the same CLI an operator would run by hand.
+ENABLE_SPOT_SNAPSHOT_REFRESH = _get_bool("ENABLE_SPOT_SNAPSHOT_REFRESH", True)
+# Cadence in hours. The source is daily OHLCV, so anything faster buys nothing;
+# 2h keeps the snapshot comfortably inside the reader's 24h fail-closed limit
+# even after several consecutive failures.
+SPOT_SNAPSHOT_REFRESH_HOURS = _get_int("SPOT_SNAPSHOT_REFRESH_HOURS", 2)
+# A live build measured ~33s over 467 symbols; this bounds a hung socket.
+SPOT_SNAPSHOT_BUILD_TIMEOUT_SECONDS = _get_int(
+    "SPOT_SNAPSHOT_BUILD_TIMEOUT_SECONDS", 600)
+
 # --- Forecast observability ledger ------------------------------------------
 # Every analysis run (including WAIT / NO_TRADE / blocked) is recorded in the
 # forecasts table; outcome tracking measures what price did afterwards.

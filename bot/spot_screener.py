@@ -177,6 +177,24 @@ def render(route: str) -> tuple[str, InlineKeyboardMarkup]:
     return spot_text.spot_menu(snap), spot_menu_keyboard()
 
 
+def snapshot_health() -> dict[str, object]:
+    """Compact spot-snapshot health for /status.
+
+    Answers through the same fail-closed reader the screens use, so /status
+    can never report a snapshot as healthy that the scanner is refusing to
+    show. Returns a dict rather than a string: the wording belongs to
+    `bot/formatting.py` with the rest of the status text.
+    """
+    try:
+        snap = _load()
+    except snap_mod.SnapshotUnavailable as exc:
+        return {"ok": False, "reason": exc.reason, "assets": None,
+                "data_asof_ms": None, "generated_at_ms": None}
+    return {"ok": True, "reason": "ok", "assets": snap.universe_size,
+            "data_asof_ms": snap.data_asof_ms,
+            "generated_at_ms": snap.generated_at_ms}
+
+
 # --- handlers ---------------------------------------------------------------
 
 async def spot_menu_cmd(update: Update,

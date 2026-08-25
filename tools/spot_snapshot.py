@@ -36,12 +36,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import hashlib
 import json
 import math
 import os
+import sys
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Iterator
 
 import numpy as np
 import pandas as pd
@@ -63,6 +65,13 @@ HOUR_MS = 3_600_000
 
 DEFAULT_SNAPSHOT_DIR = os.path.join(DEFAULT_OUTDIR, "snapshot")
 SNAPSHOT_NAME = "current.json"
+LOCK_NAME = ".refresh.lock"
+
+# Exit codes. The scheduled refresher reads these, so they are part of the
+# contract between the CLI and its caller rather than incidental.
+EXIT_OK = 0
+EXIT_FAILED = 1
+EXIT_LOCKED = 2
 
 # --- frozen current-eligibility thresholds ---------------------------------
 # The first four are S2's, unchanged, because "enough history and enough
@@ -89,6 +98,51 @@ FIELDS = ("price", "ret_30d", "ret_90d", "rel_btc_90d", "drawdown_180d",
 
 class SnapshotBuildError(Exception):
     """The snapshot cannot be built from what is available."""
+
+
+class SnapshotLocked(Exception):
+    """Another build already holds the lock for this snapshot directory."""
+
+
+@contextlib.contextmanager
+def build_lock(outdir: str) -> Iterator[None]:
+    """Refuse to build while another build is running. Advisory, per directory.
+
+    `flock` rather than a pid file, for one reason: the kernel releases it when
+    the holding process dies, however it dies. A pid file survives a SIGKILL
+    and then blocks every later run until somebody notices and deletes it,
+    which is a worse failure than the one it prevents.
+
+    This guards *every* invocation path, not just the scheduled one — the
+    operator running the CLI by hand while the two-hourly job is mid-build is
+    the overlap most likely to actually happen.
+    """
+    os.makedirs(outdir, exist_ok=True)
+    path = os.path.join(outdir, LOCK_NAME)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+    try:
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - not a deployment target
+            yield
+            return
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise SnapshotLocked(
+                f"another build holds {path}; skipping this run") from exc
+        try:
+            os.ftruncate(fd, 0)
+            os.write(fd, f"{os.getpid()} {_utcnow_iso()}\n".encode())
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _utcnow_iso() -> str:
+    return _iso(_utcnow_ms())
 
 
 def _utcnow_ms() -> int:
@@ -440,10 +494,11 @@ def load_panel_frames(outdir: str = DEFAULT_OUTDIR
     return frames, meta
 
 
-def format_report(payload: dict[str, Any]) -> str:
+def format_report(payload: dict[str, Any], *, elapsed_s: float | None = None
+                  ) -> str:
     counts = payload["counts"]
     top = sorted(counts["excluded"].items(), key=lambda kv: -kv[1])[:6]
-    return "\n".join([
+    lines = [
         f"S4A — current spot snapshot ({payload['source']})",
         f"  generated_at : {payload['generated_at']}",
         f"  data_asof    : {payload['data_asof']}",
@@ -451,10 +506,32 @@ def format_report(payload: dict[str, Any]) -> str:
         f"  eligible     : {counts['eligible']}",
         f"  btc regime   : {payload['btc']['regime']}",
         "  excluded     : " + ", ".join(f"{k}={v}" for k, v in top),
-    ])
+    ]
+    if elapsed_s is not None:
+        lines.append(f"  duration     : {elapsed_s:.1f}s")
+    return "\n".join(lines)
+
+
+def build(args: argparse.Namespace) -> dict[str, Any]:
+    """Fetch or load, then screen and measure. No lock, no write."""
+    if args.source == "live":
+        frames, meta = asyncio.run(fetch_live(
+            concurrency=args.concurrency, limit_symbols=args.limit_symbols))
+    else:
+        frames, meta = load_panel_frames(args.outdir)
+    return build_snapshot(frames, meta, _utcnow_ms(), source=args.source)
 
 
 def main(argv: list[str] | None = None) -> int:
+    """The one canonical entry point. The scheduler calls exactly this.
+
+    Order matters and is the whole of the failure contract: the lock is taken
+    first, the snapshot is built and validated entirely in memory, and only a
+    complete payload ever reaches the filesystem — through a temp file and an
+    atomic rename. There is no point in this function at which the previous
+    snapshot has been removed and the new one does not yet exist, so a build
+    that dies anywhere leaves the last good snapshot exactly where it was.
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", choices=("live", "panel"), default="live")
     parser.add_argument("--outdir", default=DEFAULT_OUTDIR,
@@ -467,18 +544,38 @@ def main(argv: list[str] | None = None) -> int:
                         help="build and report, write nothing")
     args = parser.parse_args(argv)
 
-    if args.source == "live":
-        frames, meta = asyncio.run(fetch_live(
-            concurrency=args.concurrency, limit_symbols=args.limit_symbols))
-    else:
-        frames, meta = load_panel_frames(args.outdir)
+    started = _utcnow_ms()
+    print(f"spot-snapshot: refresh started (source={args.source}, "
+          f"dest={args.snapshot_dir})", flush=True)
+    try:
+        with build_lock(args.snapshot_dir):
+            payload = build(args)
+            if not args.dry_run:
+                path = write_snapshot(payload, args.snapshot_dir)
+                print(f"  written      : {path}")
+    except SnapshotLocked as exc:
+        print(f"spot-snapshot: SKIPPED — {exc}; previous snapshot preserved",
+              file=sys.stderr)
+        return EXIT_LOCKED
+    except Exception as exc:  # noqa: BLE001
+        # Broad on purpose. This is an operational entry point, and every way
+        # a build can fail — the venue, the panel loader's own fail-closed
+        # checks, a malformed row, an OOM in pandas — has to end the same way:
+        # exit 1, one legible line, previous snapshot untouched. A traceback
+        # escaping here would still preserve the file (the write is the last
+        # statement inside the lock and never runs on this path), but the
+        # caller would have to parse a stack trace to learn that.
+        print(f"spot-snapshot: FAILED — {type(exc).__name__}: {exc}; "
+              f"previous snapshot preserved", file=sys.stderr)
+        return EXIT_FAILED
 
-    payload = build_snapshot(frames, meta, _utcnow_ms(), source=args.source)
-    if not args.dry_run:
-        path = write_snapshot(payload, args.snapshot_dir)
-        print(f"  written      : {path}")
-    print(format_report(payload))
-    return 0
+    elapsed = (_utcnow_ms() - started) / 1000.0
+    print(format_report(payload, elapsed_s=elapsed))
+    print(f"spot-snapshot: refresh finished in {elapsed:.1f}s "
+          f"(eligible={payload['counts']['eligible']}, "
+          f"screened={payload['counts']['screened']}, "
+          f"data_asof={payload['data_asof']})", flush=True)
+    return EXIT_OK
 
 
 if __name__ == "__main__":

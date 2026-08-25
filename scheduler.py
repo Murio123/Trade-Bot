@@ -27,6 +27,7 @@ from bot import alerts, formatting, journal
 from database import db
 from forecast_lifecycle import enrich_forecast_with_lifecycle
 from pipeline import _drop_unclosed, gather_market_context, run_cascade
+from spot_market import refresh as spot_refresh
 
 log = logging.getLogger(__name__)
 
@@ -329,6 +330,39 @@ async def outcome_tracking_job(application) -> None:
     await _report_abandoned_funding()
 
 
+async def spot_snapshot_job(application) -> None:
+    """Keep the spot screener's snapshot fresh (S4A.1).
+
+    Deliberately the thinnest job in this file. Everything that can go wrong —
+    the network, the venue, a hung socket, an overlapping run — is handled
+    inside `spot_refresh.refresh`, which returns a result rather than raising,
+    so nothing here can reach the event loop as an exception and disturb the
+    futures streams sharing it.
+
+    A failure is not escalated to the user. The previous snapshot stays where
+    it was, and if it eventually ages past the reader's own limits the spot
+    screener goes dark on its own while the rest of the bot carries on. That
+    separation is the point: no Telegram feature outside the spot section may
+    depend on Binance's spot API being reachable.
+    """
+    result = await spot_refresh.refresh(
+        timeout_s=config.SPOT_SNAPSHOT_BUILD_TIMEOUT_SECONDS)
+    application.bot_data["spot_snapshot_refresh"] = {
+        "at": datetime.now(timezone.utc),
+        "status": result.status,
+        "duration_s": round(result.duration_s, 1),
+        "detail": result.detail,
+        "assets": result.eligible,
+    }
+    if result.status == "built":
+        application.bot_data["spot_snapshot_last_success"] = \
+            datetime.now(timezone.utc)
+    elif not result.ok:
+        log.warning("spot snapshot refresh %s: %s (previous snapshot %s)",
+                    result.status, result.detail,
+                    "preserved" if result.previous_preserved else "LOST")
+
+
 async def _send_signal_chart(application, ctx: dict, signal: dict) -> None:
     """Attach a chart to a delivered auto-signal; failures never block it."""
     import asyncio
@@ -509,4 +543,22 @@ def build_scheduler(application) -> AsyncIOScheduler:
         minutes=config.OUTCOME_TRACK_INTERVAL_MINUTES,
         args=[application], id="outcome_tracking",
     )
+    if config.ENABLE_SPOT_SNAPSHOT_REFRESH:
+        # Cron rather than interval, so the cadence survives restarts instead
+        # of restarting from "now" on every redeploy. Minute 7 puts the
+        # midnight run just after the daily bar closes at 00:00 UTC, with
+        # enough margin for the venue to finalise it.
+        #
+        # max_instances=1 is the in-process half of the overlap guard; the
+        # builder's own file lock is the other half and covers a manual CLI
+        # run landing on the same minute. coalesce collapses slots missed
+        # during downtime into one run, because two catch-up builds would
+        # produce the same file twice.
+        scheduler.add_job(
+            spot_snapshot_job,
+            CronTrigger(timezone="UTC", minute=7,
+                        hour=f"*/{config.SPOT_SNAPSHOT_REFRESH_HOURS}"),
+            args=[application], id="spot_snapshot",
+            coalesce=True, max_instances=1, misfire_grace_time=1800,
+        )
     return scheduler
