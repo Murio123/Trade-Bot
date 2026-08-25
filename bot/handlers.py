@@ -14,7 +14,7 @@ from telegram.ext import ContextTypes
 import config
 from analyzer.news import get_fear_greed
 from ai import claude
-from bot import formatting, journal, keyboards
+from bot import formatting, journal, keyboards, spot_screener
 from database import db
 from pipeline import gather_market_context, run_cascade
 
@@ -34,6 +34,8 @@ HELP_TEXT = (
     "📓 Торговый журнал:\n"
     "/journal — винрейт и R по закрытым сделкам\n"
     "/backtest [swing|intraday] — измерение по истории\n\n"
+    "🪙 Спот / Монеты:\n"
+    "/spot — сканер спотовых монет: факты по текущему рынку\n\n"
     "Сервис:\n"
     "/setalert <цена> — алерт по уровню (/alerts — список, /delalert — удалить)\n"
     "/status — здоровье бота | /testalert — проверка уведомлений\n\n"
@@ -45,10 +47,12 @@ HELP_TEXT = (
 
 WELCOME_TEXT = (
     "🤖 Привет! Я BTC Signal Bot.\n\n"
-    "Три раздела:\n"
+    "Четыре раздела:\n"
     "📊 Анализ рынка — что происходит прямо сейчас\n"
     "🔮 Прогноз — спот или фьючерсы (свинг / интрадей)\n"
-    "📓 Торговый журнал — открытые прогнозы, история, статистика\n\n"
+    "📓 Торговый журнал — открытые прогнозы, история, статистика\n"
+    "🪙 Спот / Монеты — факты по спотовому рынку: динамика, сила к BTC, "
+    "просадка, ликвидность\n\n"
     "Это описание рынка, а не торговые рекомендации — подтверждённой "
     "торговой модели у меня пока нет.\n"
     "Выбери раздел на кнопках ниже 👇"
@@ -648,6 +652,10 @@ COMMAND_DISPATCH = {
     "menu_analyze": menu_analyze_cmd,
     "menu_market": menu_market_cmd,
     "menu_history": menu_history_cmd,
+    # S4A: the spot facts screener. Everything under it lives in
+    # bot/spot_screener.py — the single adapter to spot_market/.
+    "menu_spot": spot_screener.spot_menu_cmd,
+    "spot": spot_screener.spot_menu_cmd,
     "last_forecast": last_forecast_cmd,
     "recent_forecasts": recent_forecasts_cmd,
     "forecast_results": forecast_results_cmd,
@@ -675,6 +683,7 @@ BOT_COMMANDS = [
     ("signal", "📈 Прогноз: фьючерсы, свинг"),
     ("intraday", "⚡ Прогноз: фьючерсы, интрадей"),
     ("journal", "📓 Журнал: статистика сделок"),
+    ("spot", "🪙 Спот: сканер монет по фактам"),
     ("backtest", "📉 Измерение порога по истории"),
     ("setalert", "🔔 Поставить алерт по цене"),
     ("alerts", "📋 Мои ценовые алерты"),
@@ -717,6 +726,7 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("market", market_cmd))
     application.add_handler(CommandHandler("funding", funding_cmd))
     application.add_handler(CommandHandler("journal", journal_cmd))
+    application.add_handler(CommandHandler("spot", spot_screener.spot_menu_cmd))
     application.add_handler(CommandHandler("backtest", backtest_cmd))
     application.add_handler(CommandHandler("status", status_cmd))
     application.add_handler(CommandHandler("testalert", testalert_cmd))
@@ -726,6 +736,8 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("ask", ask_cmd))
     application.add_handler(CallbackQueryHandler(button_callback, pattern=r"^cmd:"))
     application.add_handler(CallbackQueryHandler(menu_callback, pattern=r"^menu:"))
+    application.add_handler(
+        CallbackQueryHandler(spot_screener.spot_callback, pattern=r"^spot:"))
     application.add_handler(
         MessageHandler(filters.TEXT & ~filters.COMMAND, text_message)
     )

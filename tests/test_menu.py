@@ -40,7 +40,10 @@ def test_bot_command_menu_matches_registered_commands():
 
 # --- new two-level menu structure -------------------------------------------
 
-MAIN_LABELS = ["📊 Анализ рынка", "🔮 Прогноз", "📓 Торговый журнал"]
+# S4A adds the spot facts screener as a fourth section. It is a section and
+# not an action: it opens its own inline tree under the "spot:" namespace.
+MAIN_LABELS = ["📊 Анализ рынка", "🔮 Прогноз", "📓 Торговый журнал",
+               "🪙 Спот / Монеты"]
 
 
 def _labels(markup) -> list[str]:
@@ -48,7 +51,7 @@ def _labels(markup) -> list[str]:
     return [btn.text for row in rows for btn in row]
 
 
-def test_main_menu_has_exactly_the_three_d13_sections():
+def test_main_menu_has_exactly_the_d13_sections_plus_spot():
     assert _labels(k.main_reply_keyboard()) == MAIN_LABELS
     assert _labels(k.main_inline_keyboard()) == MAIN_LABELS
 

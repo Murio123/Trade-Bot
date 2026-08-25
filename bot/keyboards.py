@@ -23,6 +23,9 @@ from telegram import (InlineKeyboardButton, InlineKeyboardMarkup,
 BTN_MARKET_ANALYSIS = "📊 Анализ рынка"
 BTN_FORECAST = "🔮 Прогноз"
 BTN_JOURNAL = "📓 Торговый журнал"
+# S4A: the spot facts screener. A section, not an action — it opens its own
+# inline tree under the "spot:" callback namespace.
+BTN_SPOT_COINS = "🪙 Спот / Монеты"
 
 BTN_BACK = "⬅️ Назад"
 
@@ -52,6 +55,7 @@ _LAYOUT = [
     [(BTN_MARKET_ANALYSIS, "menu_market")],
     [(BTN_FORECAST, "menu_forecast")],
     [(BTN_JOURNAL, "menu_journal")],
+    [(BTN_SPOT_COINS, "menu_spot")],
 ]
 
 # Forecast submenu labels — the one place the spot/futures split is named.
@@ -112,8 +116,14 @@ def main_reply_keyboard() -> ReplyKeyboardMarkup:
 def main_inline_keyboard() -> InlineKeyboardMarkup:
     def cb(cmd: str) -> str:
         # Section buttons navigate ("menu:analyze"), actions dispatch ("cmd:...").
-        if cmd.startswith("menu_"):
-            return "menu:" + cmd.removeprefix("menu_")
+        #
+        # Only sections that ARE static submenus navigate that way. "menu_spot"
+        # is a section too, but its screen is built from live snapshot state —
+        # a title and a fixed button grid cannot express "32 монеты, данные от
+        # 24.08" — so it dispatches to a handler like an action does.
+        section = cmd.removeprefix("menu_")
+        if cmd.startswith("menu_") and section in SUBMENUS:
+            return "menu:" + section
         return f"cmd:{cmd}"
 
     rows = [[InlineKeyboardButton(label, callback_data=cb(cmd))
@@ -142,6 +152,7 @@ LABEL_TO_COMMAND = {label: cmd for row in _LAYOUT for label, cmd in row}
 # them verbatim, so route them too.
 LABEL_TO_COMMAND.update({
     BTN_SPOT: "position",
+    BTN_SPOT_COINS: "menu_spot",
     BTN_FUT_SWING: "signal",
     BTN_FUT_INTRADAY: "intraday",
 })
